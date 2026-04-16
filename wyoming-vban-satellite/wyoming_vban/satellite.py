@@ -49,7 +49,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._info = satellite_info
         self._vban_receiver = vban_receiver
         self._vban_sender = vban_sender
-        self._has_tts_output = vban_sender is not None
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
         self._streaming = False
         self._streaming_task: Optional[asyncio.Task] = None
@@ -287,24 +286,21 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._vban_receiver.stop()
 
 
-def make_satellite_info(name: str, has_tts_output: bool) -> Info:
+def make_satellite_info(name: str) -> Info:
     """Build the Wyoming Info descriptor for this satellite.
 
-    Only declare 'satellite' in Info — no mic programs.
-    This matches the official wyoming-satellite behavior and ensures
-    HA creates an assist_satellite entity (not assist_microphone).
-
-    snd is populated only when TTS VBAN output is enabled, so HA
-    knows whether it can send TTS audio to this satellite.
+    Always declare snd so HA knows the satellite can receive TTS audio.
+    This allows HA to show the "Media player for TTS" option in the
+    satellite config. If no VBAN speaker is configured, TTS audio is
+    received and silently discarded.
     """
-    snd = []
-    if has_tts_output:
-        snd.append(
+    return Info(
+        snd=[
             SndProgram(
-                name="vban",
+                name="snd",
                 attribution=Attribution(name="", url=""),
                 installed=True,
-                description="VBAN audio output",
+                description="Audio output",
                 version=None,
                 snd_format=AudioFormat(
                     rate=WYOMING_RATE,
@@ -312,10 +308,7 @@ def make_satellite_info(name: str, has_tts_output: bool) -> Info:
                     channels=WYOMING_CHANNELS,
                 ),
             )
-        )
-
-    return Info(
-        snd=snd,
+        ],
         satellite=Satellite(
             name=name,
             attribution=Attribution(name="", url=""),

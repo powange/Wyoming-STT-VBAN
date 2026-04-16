@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.0
+
+- Always declare snd (audio output) in satellite Info, even without TTS VBAN
+- This allows HA to show "Media player for TTS" in satellite config
+- TTS audio is silently discarded if no VBAN speaker is configured
+
 ## 2.0.2
 
 - Fix ConnectionResetError when HA disconnects between pipeline cycles

@@ -96,10 +96,7 @@ async def main() -> None:
         vban_sender.open()
 
     # Build satellite info
-    satellite_info = make_satellite_info(
-        name=args.name,
-        has_tts_output=vban_sender is not None,
-    )
+    satellite_info = make_satellite_info(name=args.name)
 
     # Handler factory — creates a new handler per connection
     def handler_factory(reader, writer):
