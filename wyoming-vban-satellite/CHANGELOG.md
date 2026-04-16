@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.0
+
+- Send run-pipeline event to HA after streaming starts (start_stage=wake, restart_on_end=true)
+- This tells HA to start wake word detection on the audio stream — the missing piece for triggering openWakeWord
+- Set end_stage based on whether TTS VBAN output is enabled (tts vs handle)
+
 ## 1.6.1
 
 - Log peak audio level over 50-chunk windows instead of sampling one chunk

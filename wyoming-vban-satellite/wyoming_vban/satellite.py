@@ -9,7 +9,7 @@ from typing import Optional
 from wyoming.audio import AudioChunk, AudioFormat, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import Attribution, Describe, Info, Satellite, SndProgram
-from wyoming.pipeline import RunPipeline
+from wyoming.pipeline import PipelineStage, RunPipeline
 from wyoming.satellite import (
     PauseSatellite,
     RunSatellite,
@@ -43,6 +43,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._info = satellite_info
         self._vban_receiver = vban_receiver
         self._vban_sender = vban_sender
+        self._has_tts_output = vban_sender is not None
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
         self._streaming = False
         self._streaming_task: Optional[asyncio.Task] = None
@@ -114,6 +115,19 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         # Start streaming loop
         self._streaming_task = asyncio.create_task(self._stream_audio())
+
+        # Tell HA to start the voice pipeline with wake word detection
+        end_stage = PipelineStage.TTS if self._has_tts_output else PipelineStage.HANDLE
+        run_pipeline = RunPipeline(
+            start_stage=PipelineStage.WAKE,
+            end_stage=end_stage,
+            restart_on_end=True,
+        )
+        await self.write_event(run_pipeline.event())
+        _LOGGER.info(
+            "Sent run-pipeline: start=%s end=%s restart=True",
+            PipelineStage.WAKE.value, end_stage.value,
+        )
 
     async def _stop_streaming(self) -> None:
         """Stop the audio streaming loop (VBAN receiver stays alive)."""
