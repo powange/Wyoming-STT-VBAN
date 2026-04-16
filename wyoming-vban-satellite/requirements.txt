@@ -1,1 +1,1 @@
-wyoming==1.5.4
+wyoming==1.8.0

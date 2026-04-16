@@ -4,9 +4,9 @@ import asyncio
 import logging
 from typing import Optional
 
-from wyoming.audio import AudioChunk, AudioStart, AudioStop
+from wyoming.audio import AudioChunk, AudioFormat, AudioStart, AudioStop
 from wyoming.event import Event
-from wyoming.info import Attribution, Describe, Info, Satellite
+from wyoming.info import Attribution, Describe, Info, MicProgram, Satellite, SndProgram
 from wyoming.pipeline import RunPipeline
 from wyoming.satellite import RunSatellite, StreamingStarted, StreamingStopped
 from wyoming.server import AsyncEventHandler
@@ -180,15 +180,49 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
 def make_satellite_info(name: str, has_tts_output: bool) -> Info:
     """Build the Wyoming Info descriptor for this satellite."""
+    mic_format = AudioFormat(
+        rate=WYOMING_RATE,
+        width=WYOMING_WIDTH,
+        channels=WYOMING_CHANNELS,
+    )
+
+    attribution = Attribution(
+        name="Wyoming VBAN Satellite",
+        url="https://github.com/powange/Wyoming-STT-VBAN",
+    )
+
+    mic = [
+        MicProgram(
+            name="vban",
+            attribution=attribution,
+            installed=True,
+            description="VBAN audio input",
+            version="1.2.2",
+            mic_format=mic_format,
+        )
+    ]
+
+    snd = []
+    if has_tts_output:
+        snd.append(
+            SndProgram(
+                name="vban",
+                attribution=attribution,
+                installed=True,
+                description="VBAN audio output",
+                version="1.2.2",
+                snd_format=mic_format,
+            )
+        )
+
     return Info(
+        mic=mic,
+        snd=snd,
         satellite=Satellite(
             name=name,
-            attribution=Attribution(
-                name="Wyoming VBAN Satellite",
-                url="https://github.com/powange/Wyoming-STT-VBAN",
-            ),
+            attribution=attribution,
             installed=True,
             description="VBAN audio source as Wyoming satellite",
-            version="1.0.0",
+            version="1.2.2",
         ),
     )

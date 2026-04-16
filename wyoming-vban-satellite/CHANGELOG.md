@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.2
+
+- Declare mic and snd capabilities in Wyoming Info so HA recognizes the satellite as a full voice device
+- Upgrade wyoming library from 1.5.4 to 1.8.0
+
 ## 1.2.1
 
 - Handle Wyoming ping/pong keepalive from Home Assistant
