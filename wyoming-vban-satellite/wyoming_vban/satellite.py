@@ -8,7 +8,12 @@ from wyoming.audio import AudioChunk, AudioFormat, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import Attribution, Describe, Info, MicProgram, Satellite, SndProgram
 from wyoming.pipeline import RunPipeline
-from wyoming.satellite import RunSatellite, StreamingStarted, StreamingStopped
+from wyoming.satellite import (
+    PauseSatellite,
+    RunSatellite,
+    StreamingStarted,
+    StreamingStopped,
+)
 from wyoming.server import AsyncEventHandler
 
 from .const import WYOMING_CHANNELS, WYOMING_RATE, WYOMING_WIDTH
@@ -39,7 +44,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
         self._streaming = False
         self._streaming_task: Optional[asyncio.Task] = None
-        self._receiver_task: Optional[asyncio.Task] = None
+        self._receiver_started = False
         self._first_packet_logged = False
 
     async def handle_event(self, event: Event) -> bool:
@@ -55,13 +60,17 @@ class VbanSatelliteHandler(AsyncEventHandler):
             await self._start_streaming()
             return True
 
+        if PauseSatellite.is_type(event.type):
+            _LOGGER.info("Server paused — stopping audio streaming")
+            await self._stop_streaming()
+            return True
+
         if RunPipeline.is_type(event.type):
             pipeline = RunPipeline.from_event(event)
             _LOGGER.debug(
                 "Pipeline requested: start=%s end=%s restart=%s",
                 pipeline.start_stage, pipeline.end_stage, pipeline.restart_on_end,
             )
-            # Start streaming if not already
             if not self._streaming:
                 await self._start_streaming()
             return True
@@ -71,7 +80,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return True
 
         if AudioChunk.is_type(event.type):
-            # TTS audio — forward to VBAN sender
             if self._vban_sender:
                 chunk = AudioChunk.from_event(event)
                 self._vban_sender.send(chunk.audio)
@@ -95,14 +103,37 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         self._streaming = True
 
-        # Start VBAN receiver if not already running
-        if self._receiver_task is None:
-            self._receiver_task = asyncio.create_task(
+        # Start VBAN receiver once (persists across pause/resume)
+        if not self._receiver_started:
+            self._receiver_started = True
+            asyncio.create_task(
                 self._vban_receiver.start(self._on_vban_audio)
             )
 
         # Start streaming loop
         self._streaming_task = asyncio.create_task(self._stream_audio())
+
+    async def _stop_streaming(self) -> None:
+        """Stop the audio streaming loop (VBAN receiver stays alive)."""
+        if not self._streaming:
+            return
+
+        self._streaming = False
+
+        if self._streaming_task:
+            self._streaming_task.cancel()
+            try:
+                await self._streaming_task
+            except asyncio.CancelledError:
+                pass
+            self._streaming_task = None
+
+        # Drain the audio queue
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
     async def _stream_audio(self) -> None:
         """Continuously read from the VBAN queue and send audio-chunk events."""
@@ -145,12 +176,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
             )
             self._first_packet_logged = True
 
+        if not self._streaming:
+            return
+
         pcm = resample_to_wyoming(packet.payload, packet)
 
         try:
             self._audio_queue.put_nowait(pcm)
         except asyncio.QueueFull:
-            # Drop oldest to avoid backpressure
             try:
                 self._audio_queue.get_nowait()
             except asyncio.QueueEmpty:
@@ -160,22 +193,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
     async def disconnect(self) -> None:
         """Called when the client disconnects."""
         _LOGGER.info("Client disconnected")
-        self._streaming = False
-
-        if self._streaming_task:
-            self._streaming_task.cancel()
-            try:
-                await self._streaming_task
-            except asyncio.CancelledError:
-                pass
+        await self._stop_streaming()
 
         self._vban_receiver.stop()
-        if self._receiver_task:
-            self._receiver_task.cancel()
-            try:
-                await self._receiver_task
-            except asyncio.CancelledError:
-                pass
 
 
 def make_satellite_info(name: str, has_tts_output: bool) -> Info:
@@ -197,7 +217,7 @@ def make_satellite_info(name: str, has_tts_output: bool) -> Info:
             attribution=attribution,
             installed=True,
             description="VBAN audio input",
-            version="1.2.2",
+            version="1.3.0",
             mic_format=mic_format,
         )
     ]
@@ -210,7 +230,7 @@ def make_satellite_info(name: str, has_tts_output: bool) -> Info:
                 attribution=attribution,
                 installed=True,
                 description="VBAN audio output",
-                version="1.2.2",
+                version="1.3.0",
                 snd_format=mic_format,
             )
         )
@@ -223,6 +243,6 @@ def make_satellite_info(name: str, has_tts_output: bool) -> Info:
             attribution=attribution,
             installed=True,
             description="VBAN audio source as Wyoming satellite",
-            version="1.2.2",
+            version="1.3.0",
         ),
     )

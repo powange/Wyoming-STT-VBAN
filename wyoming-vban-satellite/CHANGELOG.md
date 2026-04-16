@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.0
+
+- Handle pause-satellite event from HA (stop/resume streaming properly)
+- Keep VBAN receiver alive across pause/resume cycles (avoids socket close/reopen)
+- Drop audio packets when paused to prevent stale audio on resume
+- Fix disconnect cleanup
+
 ## 1.2.2
 
 - Declare mic and snd capabilities in Wyoming Info so HA recognizes the satellite as a full voice device
