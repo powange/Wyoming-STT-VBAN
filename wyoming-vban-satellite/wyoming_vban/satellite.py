@@ -221,7 +221,18 @@ def make_satellite_info(name: str, has_tts_output: bool) -> Info:
     Only declare 'satellite' — no mic/snd programs.
     This matches the official wyoming-satellite behavior and ensures
     HA creates an assist_satellite entity (not assist_microphone).
+
+    snd_format is set only when TTS VBAN output is enabled, so HA
+    knows whether it can send TTS audio to this satellite.
     """
+    snd_format = None
+    if has_tts_output:
+        snd_format = AudioFormat(
+            rate=WYOMING_RATE,
+            width=WYOMING_WIDTH,
+            channels=WYOMING_CHANNELS,
+        )
+
     return Info(
         satellite=Satellite(
             name=name,
@@ -229,5 +240,6 @@ def make_satellite_info(name: str, has_tts_output: bool) -> Info:
             installed=True,
             description=name,
             version=None,
+            snd_format=snd_format,
         ),
     )

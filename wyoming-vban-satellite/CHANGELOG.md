@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1
+
+- Declare snd_format only when TTS VBAN is enabled, so HA knows whether the satellite has a speaker
+
 ## 1.4.0
 
 - Fix satellite discovery: declare only `satellite` in Info (no mic/snd programs)
