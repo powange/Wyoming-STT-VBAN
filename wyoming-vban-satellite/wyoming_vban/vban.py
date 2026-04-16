@@ -173,7 +173,7 @@ def resample_from_wyoming(
 
 
 class VbanReceiver:
-    """Async VBAN packet receiver supporting unicast and multicast."""
+    """Async VBAN packet receiver supporting unicast, broadcast, and multicast."""
 
     def __init__(
         self,
@@ -194,6 +194,7 @@ class VbanReceiver:
         """Create and configure the UDP socket."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
         if hasattr(socket, "SO_REUSEPORT"):
             try:
@@ -213,7 +214,9 @@ class VbanReceiver:
                 self.port,
             )
         else:
-            _LOGGER.info("Listening for unicast VBAN on port %d", self.port)
+            _LOGGER.info(
+                "Listening for unicast/broadcast VBAN on port %d", self.port
+            )
 
         sock.setblocking(False)
         return sock
