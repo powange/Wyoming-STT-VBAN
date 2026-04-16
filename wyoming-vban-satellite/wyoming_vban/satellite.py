@@ -130,17 +130,20 @@ class VbanSatelliteHandler(AsyncEventHandler):
         before it receives RunPipeline. Audio chunks must arrive after HA
         has processed RunPipeline (set _is_pipeline_running=True).
         """
-        # Tell HA to start the voice pipeline with wake word detection
-        end_stage = PipelineStage.TTS if self._has_tts_output else PipelineStage.HANDLE
+        # Tell HA to start the voice pipeline with wake word detection.
+        # Always use TTS as end_stage — HA's pipeline crashes with KeyError
+        # on 'tts_output' if end_stage is HANDLE because RUN_START event
+        # data doesn't include tts_output. TTS audio is simply ignored
+        # if no VBAN sender is configured.
         run_pipeline = RunPipeline(
             start_stage=PipelineStage.WAKE,
-            end_stage=end_stage,
+            end_stage=PipelineStage.TTS,
             restart_on_end=True,
         )
         await self.write_event(run_pipeline.event())
         _LOGGER.info(
             "Sent run-pipeline: start=%s end=%s restart=True",
-            PipelineStage.WAKE.value, end_stage.value,
+            PipelineStage.WAKE.value, PipelineStage.TTS.value,
         )
 
         # Give HA time to process RunPipeline before we send audio

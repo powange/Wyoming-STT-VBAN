@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.1
+
+- Fix pipeline crash: always use end_stage=TTS (HA crashes with KeyError 'tts_output' when end_stage=HANDLE)
+- TTS audio is silently ignored if no VBAN speaker is configured
+
 ## 2.0.0
 
 - Fix critical event ordering that prevented wake word detection from working
