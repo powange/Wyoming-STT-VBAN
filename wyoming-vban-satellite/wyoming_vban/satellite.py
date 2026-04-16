@@ -140,12 +140,29 @@ class VbanSatelliteHandler(AsyncEventHandler):
         _LOGGER.info("Audio streaming started")
         await self.write_event(StreamingStarted().event())
 
+        chunks_sent = 0
+        timeouts = 0
+
         try:
             while self._streaming and self._is_running:
                 try:
-                    pcm = await asyncio.wait_for(self._audio_queue.get(), timeout=0.5)
+                    pcm = await asyncio.wait_for(self._audio_queue.get(), timeout=2.0)
                 except asyncio.TimeoutError:
+                    timeouts += 1
+                    if timeouts == 1 or timeouts % 5 == 0:
+                        _LOGGER.warning(
+                            "No VBAN audio received for %d seconds (chunks sent so far: %d)",
+                            timeouts * 2, chunks_sent,
+                        )
                     continue
+
+                timeouts = 0
+                chunks_sent += 1
+
+                if chunks_sent == 1:
+                    _LOGGER.info("First audio chunk sent to Wyoming (%d bytes)", len(pcm))
+                elif chunks_sent % 500 == 0:
+                    _LOGGER.debug("Audio chunks sent: %d", chunks_sent)
 
                 chunk = AudioChunk(
                     rate=WYOMING_RATE,
@@ -162,7 +179,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 await self.write_event(StreamingStopped().event())
             except (ConnectionError, OSError):
                 pass
-            _LOGGER.info("Audio streaming stopped")
+            _LOGGER.info("Audio streaming stopped (total chunks sent: %d)", chunks_sent)
 
     def _on_vban_audio(self, packet: VbanPacket) -> None:
         """Callback from VBAN receiver — enqueue resampled audio."""

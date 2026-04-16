@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1
+
+- Add diagnostic logging: warn when no VBAN audio is received, log chunk counts and sizes
+- Helps diagnose connectivity issues between VBAN source and addon
+
 ## 1.3.0
 
 - Handle pause-satellite event from HA (stop/resume streaming properly)
