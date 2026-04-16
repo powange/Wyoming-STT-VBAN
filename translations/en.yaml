@@ -1,0 +1,37 @@
+configuration:
+  satellite_name:
+    name: Satellite Name
+    description: Name shown in Home Assistant for this satellite
+  wyoming_port:
+    name: Wyoming Port
+    description: TCP port for the Wyoming protocol
+  vban_receive_port:
+    name: VBAN Receive Port
+    description: UDP port to listen for VBAN audio
+  vban_receive_mode:
+    name: VBAN Receive Mode
+    description: Unicast (direct) or multicast reception
+  vban_receive_multicast_group:
+    name: VBAN Multicast Group
+    description: Multicast group address (e.g. 239.0.0.1). Required when mode is multicast.
+  vban_receive_stream_name:
+    name: VBAN Stream Name Filter
+    description: Only accept audio from this VBAN stream name. Leave empty for any stream.
+  tts_vban_enabled:
+    name: Enable TTS VBAN Output
+    description: Send TTS audio responses back via VBAN
+  tts_vban_mode:
+    name: TTS VBAN Mode
+    description: Unicast or multicast for TTS output
+  tts_vban_address:
+    name: TTS VBAN Address
+    description: Target IP address for TTS VBAN output
+  tts_vban_port:
+    name: TTS VBAN Port
+    description: Target UDP port for TTS VBAN output
+  tts_vban_stream_name:
+    name: TTS VBAN Stream Name
+    description: Name of the outgoing TTS VBAN stream
+  debug_logging:
+    name: Debug Logging
+    description: Enable verbose debug logging
