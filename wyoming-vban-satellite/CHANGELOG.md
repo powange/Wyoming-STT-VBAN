@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.0
+
+- Add Zeroconf (mDNS) discovery so HA auto-discovers the satellite as a proper assist_satellite
+- No more manual Wyoming Protocol integration needed — HA finds the satellite automatically
+
 ## 1.5.0
 
 - Buffer small VBAN packets (256 samples/16ms) into larger Wyoming chunks (1024 samples/64ms)

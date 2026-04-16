@@ -4,9 +4,9 @@ import argparse
 import asyncio
 import logging
 import sys
-from functools import partial
 
 from wyoming.server import AsyncServer
+from wyoming.zeroconf import HomeAssistantZeroconf
 
 from .const import DEFAULT_VBAN_PORT
 from .satellite import VbanSatelliteHandler, make_satellite_info
@@ -114,6 +114,11 @@ async def main() -> None:
     # Start Wyoming server
     server = AsyncServer.from_uri(f"tcp://0.0.0.0:{args.wyoming_port}")
     _LOGGER.info("Wyoming server listening on tcp://0.0.0.0:%d", args.wyoming_port)
+
+    # Register via Zeroconf so HA auto-discovers the satellite
+    zeroconf = HomeAssistantZeroconf(port=args.wyoming_port)
+    await zeroconf.register_server()
+    _LOGGER.info("Zeroconf registered: %s on port %d", zeroconf.name, args.wyoming_port)
 
     await server.run(handler_factory)
 
