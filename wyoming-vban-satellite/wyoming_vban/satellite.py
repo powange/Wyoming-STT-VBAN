@@ -148,6 +148,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         chunks_sent = 0
         timeouts = 0
+        peak_db = -100.0
         # Buffer to accumulate small VBAN packets into larger Wyoming chunks
         # Target: 1024 samples = 2048 bytes at 16-bit mono (64ms at 16kHz)
         target_bytes = 1024 * WYOMING_WIDTH * WYOMING_CHANNELS
@@ -176,20 +177,24 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
                     chunks_sent += 1
 
-                    # Log audio level periodically
-                    if chunks_sent == 1 or chunks_sent % 50 == 0:
-                        rms = audioop.rms(send_pcm, WYOMING_WIDTH)
-                        db = 20 * math.log10(max(rms, 1) / 32768)
-                        if chunks_sent == 1:
-                            _LOGGER.info(
-                                "First audio chunk sent to Wyoming (%d bytes, %.1f dB)",
-                                len(send_pcm), db,
-                            )
-                        else:
-                            _LOGGER.debug(
-                                "Audio chunks sent: %d (level: %.1f dB)",
-                                chunks_sent, db,
-                            )
+                    # Track peak audio level over reporting window
+                    rms = audioop.rms(send_pcm, WYOMING_WIDTH)
+                    db = 20 * math.log10(max(rms, 1) / 32768)
+                    if db > peak_db:
+                        peak_db = db
+
+                    # Log every 50 chunks (~3s) with peak level
+                    if chunks_sent == 1:
+                        _LOGGER.info(
+                            "First audio chunk sent to Wyoming (%d bytes, %.1f dB)",
+                            len(send_pcm), db,
+                        )
+                    elif chunks_sent % 50 == 0:
+                        _LOGGER.debug(
+                            "Audio chunks: %d (peak: %.1f dB, current: %.1f dB)",
+                            chunks_sent, peak_db, db,
+                        )
+                        peak_db = -100.0
 
                     chunk = AudioChunk(
                         rate=WYOMING_RATE,

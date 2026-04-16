@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.1
+
+- Log peak audio level over 50-chunk windows instead of sampling one chunk
+- No more missed voice peaks in diagnostic logs
+
 ## 1.6.0
 
 - Add Zeroconf (mDNS) discovery so HA auto-discovers the satellite as a proper assist_satellite
