@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0
+
+- Fix satellite discovery: declare only `satellite` in Info (no mic/snd programs)
+- Matches official wyoming-satellite behavior so HA creates an assist_satellite entity instead of assist_microphone
+- This fixes wake word detection not triggering
+
 ## 1.3.1
 
 - Add diagnostic logging: warn when no VBAN audio is received, log chunk counts and sizes
