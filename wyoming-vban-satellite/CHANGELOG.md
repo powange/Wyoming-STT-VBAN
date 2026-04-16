@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0
+
+- Buffer small VBAN packets (256 samples/16ms) into larger Wyoming chunks (1024 samples/64ms)
+- Matches the chunk size used by the official wyoming-satellite for reliable wake word detection
+
 ## 1.4.2
 
 - Fix crash: use SndProgram in Info.snd instead of Satellite.snd_format (removed in wyoming 1.8.0)

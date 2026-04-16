@@ -1,7 +1,9 @@
 """Wyoming satellite server that bridges VBAN audio to the HA voice pipeline."""
 
 import asyncio
+import audioop
 import logging
+import math
 from typing import Optional
 
 from wyoming.audio import AudioChunk, AudioFormat, AudioStart, AudioStop
@@ -136,12 +138,20 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 break
 
     async def _stream_audio(self) -> None:
-        """Continuously read from the VBAN queue and send audio-chunk events."""
+        """Continuously read from the VBAN queue and send audio-chunk events.
+
+        Buffers small VBAN packets into larger chunks (~1024 samples / 64ms)
+        to match what openWakeWord and the Wyoming pipeline expect.
+        """
         _LOGGER.info("Audio streaming started")
         await self.write_event(StreamingStarted().event())
 
         chunks_sent = 0
         timeouts = 0
+        # Buffer to accumulate small VBAN packets into larger Wyoming chunks
+        # Target: 1024 samples = 2048 bytes at 16-bit mono (64ms at 16kHz)
+        target_bytes = 1024 * WYOMING_WIDTH * WYOMING_CHANNELS
+        audio_buffer = bytearray()
 
         try:
             while self._streaming and self._is_running:
@@ -157,20 +167,37 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     continue
 
                 timeouts = 0
-                chunks_sent += 1
+                audio_buffer.extend(pcm)
 
-                if chunks_sent == 1:
-                    _LOGGER.info("First audio chunk sent to Wyoming (%d bytes)", len(pcm))
-                elif chunks_sent % 500 == 0:
-                    _LOGGER.debug("Audio chunks sent: %d", chunks_sent)
+                # Send when we have enough data
+                while len(audio_buffer) >= target_bytes:
+                    send_pcm = bytes(audio_buffer[:target_bytes])
+                    del audio_buffer[:target_bytes]
 
-                chunk = AudioChunk(
-                    rate=WYOMING_RATE,
-                    width=WYOMING_WIDTH,
-                    channels=WYOMING_CHANNELS,
-                    audio=pcm,
-                )
-                await self.write_event(chunk.event())
+                    chunks_sent += 1
+
+                    # Log audio level periodically
+                    if chunks_sent == 1 or chunks_sent % 50 == 0:
+                        rms = audioop.rms(send_pcm, WYOMING_WIDTH)
+                        db = 20 * math.log10(max(rms, 1) / 32768)
+                        if chunks_sent == 1:
+                            _LOGGER.info(
+                                "First audio chunk sent to Wyoming (%d bytes, %.1f dB)",
+                                len(send_pcm), db,
+                            )
+                        else:
+                            _LOGGER.debug(
+                                "Audio chunks sent: %d (level: %.1f dB)",
+                                chunks_sent, db,
+                            )
+
+                    chunk = AudioChunk(
+                        rate=WYOMING_RATE,
+                        width=WYOMING_WIDTH,
+                        channels=WYOMING_CHANNELS,
+                        audio=send_pcm,
+                    )
+                    await self.write_event(chunk.event())
         except (ConnectionError, asyncio.CancelledError):
             pass
         finally:
