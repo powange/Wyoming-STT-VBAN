@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.0
+
+- Fix critical event ordering that prevented wake word detection from working
+- HA only routes audio to openWakeWord AFTER processing RunPipeline
+- New protocol flow: wait for second Describe (inside HA's pipeline loop), respond with Info, send RunPipeline, wait 300ms, then start streaming audio
+- This ensures HA has set _is_pipeline_running=True before audio arrives
+
 ## 1.7.0
 
 - Send run-pipeline event to HA after streaming starts (start_stage=wake, restart_on_end=true)

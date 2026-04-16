@@ -27,8 +27,14 @@ _LOGGER = logging.getLogger(__name__)
 class VbanSatelliteHandler(AsyncEventHandler):
     """Handles a single Wyoming client connection (Home Assistant server).
 
-    Responds to describe, streams VBAN audio as audio-chunk events,
-    and forwards TTS audio-chunk events back to VBAN sender.
+    Protocol flow (critical ordering):
+      1. HA sends Describe → we respond with Info
+      2. HA sends RunSatellite → we mark ourselves ready
+      3. HA sends Describe again (inside _run_pipeline_loop) → we respond with Info,
+         then send RunPipeline, then start streaming audio after a brief delay
+
+    Audio chunks MUST arrive after HA has processed RunPipeline, otherwise
+    they are silently dropped (HA only forwards them when _is_pipeline_running=True).
     """
 
     def __init__(
@@ -49,6 +55,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._streaming_task: Optional[asyncio.Task] = None
         self._receiver_started = False
         self._first_packet_logged = False
+        self._server_ready = False  # True after RunSatellite received
 
     async def handle_event(self, event: Event) -> bool:
         """Handle an incoming Wyoming event from the HA server."""
@@ -56,26 +63,34 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if Describe.is_type(event.type):
             await self.write_event(self._info.event())
             _LOGGER.debug("Sent satellite info")
+
+            # If the server already sent RunSatellite, this is the second
+            # Describe (inside _run_pipeline_loop). Now we can start the pipeline.
+            if self._server_ready and not self._streaming:
+                await self._send_pipeline_and_stream()
+
             return True
 
         if RunSatellite.is_type(event.type):
-            _LOGGER.info("Server ready — starting VBAN audio streaming")
-            await self._start_streaming()
+            _LOGGER.info("Server ready")
+            self._server_ready = True
+            # Don't start streaming yet — wait for the next Describe
+            # which HA sends inside _run_pipeline_loop
+            self._ensure_vban_receiver()
             return True
 
         if PauseSatellite.is_type(event.type):
             _LOGGER.info("Server paused — stopping audio streaming")
+            self._server_ready = False
             await self._stop_streaming()
             return True
 
         if RunPipeline.is_type(event.type):
             pipeline = RunPipeline.from_event(event)
             _LOGGER.debug(
-                "Pipeline requested: start=%s end=%s restart=%s",
+                "Pipeline requested by server: start=%s end=%s restart=%s",
                 pipeline.start_stage, pipeline.end_stage, pipeline.restart_on_end,
             )
-            if not self._streaming:
-                await self._start_streaming()
             return True
 
         if AudioStart.is_type(event.type):
@@ -99,23 +114,22 @@ class VbanSatelliteHandler(AsyncEventHandler):
         _LOGGER.debug("Unhandled event type: %s", event.type)
         return True
 
-    async def _start_streaming(self) -> None:
-        """Start the VBAN receiver and audio streaming loop."""
-        if self._streaming:
-            return
-
-        self._streaming = True
-
-        # Start VBAN receiver once (persists across pause/resume)
+    def _ensure_vban_receiver(self) -> None:
+        """Start the VBAN receiver if not already running."""
         if not self._receiver_started:
             self._receiver_started = True
             asyncio.create_task(
                 self._vban_receiver.start(self._on_vban_audio)
             )
+            _LOGGER.info("VBAN receiver started")
 
-        # Start streaming loop
-        self._streaming_task = asyncio.create_task(self._stream_audio())
+    async def _send_pipeline_and_stream(self) -> None:
+        """Send RunPipeline to HA, wait for it to be processed, then stream audio.
 
+        This must be called AFTER responding to Describe, so HA has the Info
+        before it receives RunPipeline. Audio chunks must arrive after HA
+        has processed RunPipeline (set _is_pipeline_running=True).
+        """
         # Tell HA to start the voice pipeline with wake word detection
         end_stage = PipelineStage.TTS if self._has_tts_output else PipelineStage.HANDLE
         run_pipeline = RunPipeline(
@@ -128,6 +142,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
             "Sent run-pipeline: start=%s end=%s restart=True",
             PipelineStage.WAKE.value, end_stage.value,
         )
+
+        # Give HA time to process RunPipeline before we send audio
+        await asyncio.sleep(0.3)
+
+        # Now start the audio streaming task
+        self._streaming = True
+        self._streaming_task = asyncio.create_task(self._stream_audio())
 
     async def _stop_streaming(self) -> None:
         """Stop the audio streaming loop (VBAN receiver stays alive)."""
@@ -256,6 +277,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
     async def disconnect(self) -> None:
         """Called when the client disconnects."""
         _LOGGER.info("Client disconnected")
+        self._server_ready = False
         await self._stop_streaming()
 
         self._vban_receiver.stop()
