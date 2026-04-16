@@ -6,7 +6,7 @@ from typing import Optional
 
 from wyoming.audio import AudioChunk, AudioFormat, AudioStart, AudioStop
 from wyoming.event import Event
-from wyoming.info import Attribution, Describe, Info, Satellite
+from wyoming.info import Attribution, Describe, Info, Satellite, SndProgram
 from wyoming.pipeline import RunPipeline
 from wyoming.satellite import (
     PauseSatellite,
@@ -218,28 +218,37 @@ class VbanSatelliteHandler(AsyncEventHandler):
 def make_satellite_info(name: str, has_tts_output: bool) -> Info:
     """Build the Wyoming Info descriptor for this satellite.
 
-    Only declare 'satellite' — no mic/snd programs.
+    Only declare 'satellite' in Info — no mic programs.
     This matches the official wyoming-satellite behavior and ensures
     HA creates an assist_satellite entity (not assist_microphone).
 
-    snd_format is set only when TTS VBAN output is enabled, so HA
+    snd is populated only when TTS VBAN output is enabled, so HA
     knows whether it can send TTS audio to this satellite.
     """
-    snd_format = None
+    snd = []
     if has_tts_output:
-        snd_format = AudioFormat(
-            rate=WYOMING_RATE,
-            width=WYOMING_WIDTH,
-            channels=WYOMING_CHANNELS,
+        snd.append(
+            SndProgram(
+                name="vban",
+                attribution=Attribution(name="", url=""),
+                installed=True,
+                description="VBAN audio output",
+                version=None,
+                snd_format=AudioFormat(
+                    rate=WYOMING_RATE,
+                    width=WYOMING_WIDTH,
+                    channels=WYOMING_CHANNELS,
+                ),
+            )
         )
 
     return Info(
+        snd=snd,
         satellite=Satellite(
             name=name,
             attribution=Attribution(name="", url=""),
             installed=True,
             description=name,
             version=None,
-            snd_format=snd_format,
         ),
     )

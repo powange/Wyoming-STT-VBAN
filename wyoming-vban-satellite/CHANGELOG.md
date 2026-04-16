@@ -1,8 +1,9 @@
 # Changelog
 
-## 1.4.1
+## 1.4.2
 
-- Declare snd_format only when TTS VBAN is enabled, so HA knows whether the satellite has a speaker
+- Fix crash: use SndProgram in Info.snd instead of Satellite.snd_format (removed in wyoming 1.8.0)
+- TTS speaker capability declared via SndProgram only when tts_vban_enabled is true
 
 ## 1.4.0
 
