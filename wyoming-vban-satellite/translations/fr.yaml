@@ -1,37 +1,7 @@
 configuration:
-  satellite_name:
-    name: Nom du satellite
-    description: Nom affiche dans Home Assistant pour ce satellite
-  wyoming_port:
-    name: Port Wyoming
-    description: Port TCP pour le protocole Wyoming
-  vban_receive_port:
-    name: Port de reception VBAN
-    description: Port UDP pour recevoir l'audio VBAN
-  vban_receive_mode:
-    name: Mode de reception VBAN
-    description: Reception en unicast (direct) ou multicast
-  vban_receive_multicast_group:
-    name: Groupe multicast VBAN
-    description: Adresse du groupe multicast (ex. 239.0.0.1). Requis en mode multicast.
-  vban_receive_stream_name:
-    name: Filtre de nom de flux VBAN
-    description: Accepter uniquement l'audio de ce flux VBAN. Laisser vide pour accepter tout.
-  tts_vban_enabled:
-    name: Activer la sortie TTS VBAN
-    description: Envoyer les reponses TTS via VBAN
-  tts_vban_mode:
-    name: Mode TTS VBAN
-    description: Unicast ou multicast pour la sortie TTS
-  tts_vban_address:
-    name: Adresse TTS VBAN
-    description: Adresse IP cible pour la sortie TTS VBAN
-  tts_vban_port:
-    name: Port TTS VBAN
-    description: Port UDP cible pour la sortie TTS VBAN
-  tts_vban_stream_name:
-    name: Nom du flux TTS VBAN
-    description: Nom du flux VBAN sortant pour le TTS
+  satellites:
+    name: Satellites
+    description: Liste des sources satellites VBAN
   debug_logging:
     name: Journalisation de debogage
     description: Activer la journalisation detaillee

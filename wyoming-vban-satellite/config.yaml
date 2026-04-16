@@ -1,6 +1,6 @@
 name: "Wyoming VBAN Satellite"
 description: "Use VBAN audio sources as Wyoming voice assistant satellites for Home Assistant"
-version: "1.0.0"
+version: "1.1.0"
 slug: wyoming-vban-satellite
 url: "https://github.com/powange/Wyoming-STT-VBAN"
 arch:
@@ -14,42 +14,32 @@ homeassistant_api: false
 host_network: true
 map:
   - config:rw
-ports:
-  10700/tcp: 10700
-ports_description:
-  10700/tcp: "Wyoming satellite protocol"
 options:
-  satellite_name: "VBAN Satellite"
-  wyoming_port: 10700
-
-  # VBAN receive (microphone)
-  vban_receive_port: 6980
-  vban_receive_mode: "unicast"
-  vban_receive_multicast_group: ""
-  vban_receive_stream_name: ""
-
-  # VBAN send (TTS playback) - optional
-  tts_vban_enabled: false
-  tts_vban_mode: "unicast"
-  tts_vban_address: ""
-  tts_vban_port: 6980
-  tts_vban_stream_name: "TTS1"
-
+  satellites:
+    - name: "VBAN Satellite 1"
+      wyoming_port: 10700
+      vban_receive_port: 6980
+      vban_receive_mode: "unicast"
+      vban_receive_multicast_group: ""
+      vban_receive_stream_name: ""
+      tts_vban_enabled: false
+      tts_vban_mode: "unicast"
+      tts_vban_address: ""
+      tts_vban_port: 6980
+      tts_vban_stream_name: "TTS1"
   debug_logging: false
 
 schema:
-  satellite_name: str
-  wyoming_port: port
-
-  vban_receive_port: port
-  vban_receive_mode: "list(unicast|multicast)"
-  vban_receive_multicast_group: str
-  vban_receive_stream_name: str
-
-  tts_vban_enabled: bool
-  tts_vban_mode: "list(unicast|multicast)"
-  tts_vban_address: str
-  tts_vban_port: port
-  tts_vban_stream_name: str
-
+  satellites:
+    - name: str
+      wyoming_port: port
+      vban_receive_port: port
+      vban_receive_mode: "list(unicast|multicast)"
+      vban_receive_multicast_group: str
+      vban_receive_stream_name: str
+      tts_vban_enabled: bool
+      tts_vban_mode: "list(unicast|multicast)"
+      tts_vban_address: str
+      tts_vban_port: port
+      tts_vban_stream_name: str
   debug_logging: bool
