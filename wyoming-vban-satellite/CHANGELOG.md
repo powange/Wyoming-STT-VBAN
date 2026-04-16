@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+
+- Handle Wyoming ping/pong keepalive from Home Assistant
+
 ## 1.2.0
 
 - Add broadcast support (SO_BROADCAST) for VBAN sources sending to broadcast addresses (e.g. 192.168.0.255)

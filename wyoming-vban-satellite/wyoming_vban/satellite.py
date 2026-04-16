@@ -81,6 +81,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
             _LOGGER.debug("TTS audio finished")
             return True
 
+        if event.type == "ping":
+            await self.write_event(Event(type="pong"))
+            return True
+
         _LOGGER.debug("Unhandled event type: %s", event.type)
         return True
 
