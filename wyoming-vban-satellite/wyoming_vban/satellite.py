@@ -241,13 +241,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
                         audio=send_pcm,
                     )
                     await self.write_event(chunk.event())
-        except (ConnectionError, asyncio.CancelledError):
+        except (ConnectionError, asyncio.CancelledError, OSError):
             pass
         finally:
             self._streaming = False
             try:
-                await self.write_event(StreamingStopped().event())
-            except (ConnectionError, OSError):
+                if self._is_running:
+                    await self.write_event(StreamingStopped().event())
+            except (ConnectionError, OSError, asyncio.CancelledError):
                 pass
             _LOGGER.info("Audio streaming stopped (total chunks sent: %d)", chunks_sent)
 

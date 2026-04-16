@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.2
+
+- Fix ConnectionResetError when HA disconnects between pipeline cycles
+- Only send StreamingStopped if connection is still active
+
 ## 2.0.1
 
 - Fix pipeline crash: always use end_stage=TTS (HA crashes with KeyError 'tts_output' when end_stage=HANDLE)
