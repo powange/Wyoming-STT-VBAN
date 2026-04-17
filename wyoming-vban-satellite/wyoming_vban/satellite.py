@@ -106,13 +106,22 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return True
 
         if AudioStart.is_type(event.type):
-            _LOGGER.debug("Receiving TTS audio from server")
+            start = AudioStart.from_event(event)
+            _LOGGER.info(
+                "Receiving TTS audio from server: %dHz, %d-bit, %dch",
+                start.rate, start.width * 8, start.channels,
+            )
             return True
 
         if AudioChunk.is_type(event.type):
             if self._vban_sender:
                 chunk = AudioChunk.from_event(event)
-                self._vban_sender.send(chunk.audio)
+                self._vban_sender.send(
+                    chunk.audio,
+                    sample_rate=chunk.rate,
+                    width=chunk.width,
+                    channels=chunk.channels,
+                )
             return True
 
         if AudioStop.is_type(event.type):

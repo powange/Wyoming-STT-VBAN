@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.1
+
+- Fix choppy TTS playback: use actual audio format from AudioChunk events
+- Previously the VBAN sender hardcoded 16kHz, but Piper TTS outputs at 22050Hz
+- Also log the TTS audio format when received for easier debugging
+
 ## 2.2.0
 
 - Refactor VBAN receiver to a persistent pub/sub model
