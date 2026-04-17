@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.0
+
+- Resample TTS audio to match the VBAN speaker's configured rate (16kHz by default)
+- VBAN speakers don't resample — they play at their configured rate
+- Fixes choppy/cut TTS playback when Piper (22050Hz) is played on a 16kHz VBAN speaker
+- Handles sample width and channel count conversion too
+
 ## 2.2.1
 
 - Fix choppy TTS playback: use actual audio format from AudioChunk events

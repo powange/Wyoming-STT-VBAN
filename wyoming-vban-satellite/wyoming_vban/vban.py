@@ -316,6 +316,11 @@ class VbanSender:
         self.channels = channels
         self._socket: Optional[socket.socket] = None
         self._frame_counter = 0
+        self._ratecv_state = None  # audioop.ratecv state for continuous resampling
+
+    def reset_resampler(self) -> None:
+        """Reset the resampler state between TTS streams."""
+        self._ratecv_state = None
 
     def open(self) -> None:
         """Create the send socket."""
@@ -343,34 +348,52 @@ class VbanSender:
     ) -> None:
         """Send PCM audio as VBAN packets.
 
-        sample_rate/width/channels override the defaults (used when forwarding
-        TTS audio that may have a different format than the receive side).
+        Incoming audio is resampled/converted to match the sender's
+        configured format (self.sample_rate, self.channels, 16-bit)
+        because VBAN speakers don't resample — they play raw at their
+        configured rate.
         """
         if not self._socket:
             return
 
-        rate = sample_rate if sample_rate is not None else self.sample_rate
-        ch = channels if channels is not None else self.channels
-        w = width if width is not None else WYOMING_WIDTH
+        src_rate = sample_rate if sample_rate is not None else self.sample_rate
+        src_channels = channels if channels is not None else self.channels
+        src_width = width if width is not None else WYOMING_WIDTH
+
+        pcm = pcm_audio
+
+        # Convert sample width to 16-bit if needed
+        if src_width != WYOMING_WIDTH:
+            pcm = audioop.lin2lin(pcm, src_width, WYOMING_WIDTH)
+
+        # Mix to mono if source is stereo and target is mono
+        if src_channels > 1 and self.channels == 1:
+            pcm = audioop.tomono(pcm, WYOMING_WIDTH, 1.0, 1.0)
+            src_channels = 1
+
+        # Resample to the sender's target rate if needed
+        if src_rate != self.sample_rate:
+            pcm, self._ratecv_state = audioop.ratecv(
+                pcm,
+                WYOMING_WIDTH,
+                src_channels,
+                src_rate,
+                self.sample_rate,
+                self._ratecv_state,
+            )
+
+        # Duplicate to stereo if source is mono and target is stereo
+        if src_channels == 1 and self.channels > 1:
+            pcm = audioop.tostereo(pcm, WYOMING_WIDTH, 1.0, 1.0)
 
         # Split into chunks that fit VBAN packets (max 256 samples per frame)
-        bytes_per_sample = w * ch
+        bytes_per_sample = WYOMING_WIDTH * self.channels
         max_samples = 256
         max_payload = max_samples * bytes_per_sample
 
-        # VBAN data format code (int16 is the only width we currently build)
-        if w == 2:
-            data_format = VBAN_DATATYPE_INT16
-        elif w == 1:
-            data_format = VBAN_DATATYPE_UINT8
-        elif w == 4:
-            data_format = VBAN_DATATYPE_INT32
-        else:
-            data_format = VBAN_DATATYPE_INT16
-
         offset = 0
-        while offset < len(pcm_audio):
-            chunk = pcm_audio[offset : offset + max_payload]
+        while offset < len(pcm):
+            chunk = pcm[offset : offset + max_payload]
             samples_in_chunk = len(chunk) // bytes_per_sample
 
             if samples_in_chunk == 0:
@@ -379,11 +402,11 @@ class VbanSender:
             packet = build_packet(
                 payload=chunk,
                 stream_name=self.stream_name,
-                sample_rate=rate,
-                channels=ch,
+                sample_rate=self.sample_rate,
+                channels=self.channels,
                 samples_per_frame=samples_in_chunk,
                 frame_counter=self._frame_counter,
-                data_format=data_format,
+                data_format=VBAN_DATATYPE_INT16,
             )
 
             try:

@@ -111,6 +111,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 "Receiving TTS audio from server: %dHz, %d-bit, %dch",
                 start.rate, start.width * 8, start.channels,
             )
+            # Reset resampler state for a fresh TTS stream
+            if self._vban_sender:
+                self._vban_sender.reset_resampler()
             return True
 
         if AudioChunk.is_type(event.type):
