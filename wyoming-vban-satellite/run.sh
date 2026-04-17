@@ -7,6 +7,18 @@ DEBUG_LOGGING=$(bashio::config 'debug_logging')
 SATELLITE_COUNT=$(bashio::config 'satellites | length')
 bashio::log.info "Configured ${SATELLITE_COUNT} VBAN satellite(s)"
 
+# Validate: Wyoming ports must be unique across satellites
+USED_PORTS=""
+for (( i=0; i < SATELLITE_COUNT; i++ )); do
+    PORT=$(bashio::config "satellites[${i}].wyoming_port")
+    SAT=$(bashio::config "satellites[${i}].name")
+    if echo "${USED_PORTS}" | grep -qw "${PORT}"; then
+        bashio::log.fatal "Satellite '${SAT}' uses Wyoming port ${PORT} which is already taken by another satellite. Each satellite must have a unique wyoming_port."
+        exit 1
+    fi
+    USED_PORTS="${USED_PORTS} ${PORT}"
+done
+
 PIDS=()
 
 for (( i=0; i < SATELLITE_COUNT; i++ )); do

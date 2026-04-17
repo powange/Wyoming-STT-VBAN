@@ -123,12 +123,26 @@ async def main() -> None:
     try:
         await server.run(handler_factory)
     finally:
+        _LOGGER.info("Shutting down...")
+
+        # Stop VBAN receiver
         vban_receiver.stop()
         receiver_task.cancel()
         try:
             await receiver_task
         except asyncio.CancelledError:
             pass
+
+        # Close VBAN sender (cancels drain task, closes socket)
+        if vban_sender:
+            await vban_sender.close()
+
+        # Unregister Zeroconf service
+        try:
+            await zeroconf._aiozc.async_close()
+            _LOGGER.debug("Zeroconf unregistered")
+        except Exception as err:
+            _LOGGER.debug("Zeroconf cleanup error: %s", err)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.5.2
+
+Robustness fixes from second deep code review:
+
+- **Fix**: cleanup VbanSender and Zeroconf properly on shutdown (was leaking socket and mDNS registration)
+- **Fix**: make VbanSender.close() async and await the drain task to prevent stray execution after close
+- **Fix**: rate-limit "Non-PCM VBAN codec" warning (was logging up to 62/s on non-PCM streams)
+- **Fix**: catch audioop errors when forwarding TTS to VBAN (prevents handler crash on malformed audio)
+- **Add**: hard cap on TTS send buffer (10s max) to prevent unbounded memory growth
+- **Add**: validate unique wyoming_port across satellites in run.sh (fatal error if duplicate)
+
 ## 2.5.1
 
 Fixes from deep code analysis:

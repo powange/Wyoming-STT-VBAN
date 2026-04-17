@@ -122,13 +122,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if AudioChunk.is_type(event.type):
             if self._vban_sender:
-                chunk = AudioChunk.from_event(event)
-                self._vban_sender.send(
-                    chunk.audio,
-                    sample_rate=chunk.rate,
-                    width=chunk.width,
-                    channels=chunk.channels,
-                )
+                try:
+                    chunk = AudioChunk.from_event(event)
+                    self._vban_sender.send(
+                        chunk.audio,
+                        sample_rate=chunk.rate,
+                        width=chunk.width,
+                        channels=chunk.channels,
+                    )
+                except (audioop.error, ValueError, KeyError) as err:
+                    _LOGGER.warning(
+                        "Failed to forward TTS audio chunk to VBAN: %s", err,
+                    )
             return True
 
         if AudioStop.is_type(event.type):

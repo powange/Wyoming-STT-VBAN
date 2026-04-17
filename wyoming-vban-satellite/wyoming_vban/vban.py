@@ -26,6 +26,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Rate-limit non-PCM codec warnings to avoid log spam
+_non_pcm_warned_codecs: set = set()
+
 
 @dataclass
 class VbanPacket:
@@ -70,7 +73,14 @@ def parse_packet(data: bytes) -> Optional[VbanPacket]:
     codec = data_format_codec & 0xF0
 
     if codec != VBAN_CODEC_PCM:
-        _LOGGER.warning("Non-PCM VBAN codec (0x%02x) not supported", codec)
+        # Warn only once per unique codec to avoid log spam (would fire
+        # up to 62 times/second on a continuous non-PCM stream)
+        if codec not in _non_pcm_warned_codecs:
+            _non_pcm_warned_codecs.add(codec)
+            _LOGGER.warning(
+                "Non-PCM VBAN codec (0x%02x) not supported — ignoring packets",
+                codec,
+            )
         return None
 
     stream_name_raw = data[8:24]
@@ -285,6 +295,7 @@ class VbanSender:
     SAMPLES_PER_PACKET = 256
     BATCH_PACKETS = 4  # 4 packets × 16ms = 64ms batch at 16kHz
     PREBUFFER_MS = 50  # wait for this much audio before starting to drain
+    MAX_PENDING_MS = 10_000  # hard cap on pending buffer size (10s of audio)
 
     def __init__(
         self,
@@ -307,6 +318,10 @@ class VbanSender:
         self._pending: bytearray = bytearray()
         self._data_ready: Optional[asyncio.Event] = None
         self._drain_task: Optional[asyncio.Task] = None
+        self._pending_overflow_logged = False
+        self._max_pending_bytes = int(
+            (self.MAX_PENDING_MS / 1000) * sample_rate * WYOMING_WIDTH * channels
+        )
 
     def reset_resampler(self) -> None:
         """Reset the resampler state between TTS streams."""
@@ -381,6 +396,20 @@ class VbanSender:
 
         if src_channels == 1 and self.channels > 1:
             pcm = audioop.tostereo(pcm, WYOMING_WIDTH, 1.0, 1.0)
+
+        # Cap pending buffer to prevent unbounded memory growth if the
+        # drain task falls behind (e.g. network issue, huge TTS response).
+        if len(self._pending) + len(pcm) > self._max_pending_bytes:
+            if not self._pending_overflow_logged:
+                _LOGGER.warning(
+                    "TTS send buffer full (%d ms) — dropping audio",
+                    self.MAX_PENDING_MS,
+                )
+                self._pending_overflow_logged = True
+            return
+
+        if self._pending_overflow_logged and len(self._pending) < self._max_pending_bytes // 4:
+            self._pending_overflow_logged = False
 
         self._pending.extend(pcm)
 
@@ -468,12 +497,24 @@ class VbanSender:
                     # Running behind — resync without oversleeping
                     next_send = now + batch_duration
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close the send socket and stop the drain task."""
-        if self._drain_task:
-            self._drain_task.cancel()
-            self._drain_task = None
+        # Close socket first so the drain loop sees _socket is None and exits
         if self._socket:
             self._socket.close()
             self._socket = None
+
+        # Wake up the drain task if it's waiting on _data_ready
+        if self._data_ready is not None:
+            self._data_ready.set()
+
+        # Cancel and await the drain task
+        if self._drain_task:
+            self._drain_task.cancel()
+            try:
+                await self._drain_task
+            except asyncio.CancelledError:
+                pass
+            self._drain_task = None
+
         _LOGGER.info("VBAN sender closed")
