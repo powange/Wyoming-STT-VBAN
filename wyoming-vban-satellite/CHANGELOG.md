@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.3.2
+
+- Log INFO message "VBAN audio resumed" when audio returns after a silence/timeout
+
 ## 2.3.1
 
 - Log error events received from HA (pipeline failures, STT errors, etc.)

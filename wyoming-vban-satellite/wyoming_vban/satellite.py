@@ -213,6 +213,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         chunks_sent = 0
         timeouts = 0
+        had_timeout = False
         peak_db = -100.0
         # Buffer to accumulate small VBAN packets into larger Wyoming chunks
         # Target: 1024 samples = 2048 bytes at 16-bit mono (64ms at 16kHz)
@@ -225,6 +226,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     pcm = await asyncio.wait_for(self._audio_queue.get(), timeout=2.0)
                 except asyncio.TimeoutError:
                     timeouts += 1
+                    had_timeout = True
                     if timeouts == 1 or timeouts % 5 == 0:
                         _LOGGER.warning(
                             "No VBAN audio received for %d seconds (chunks sent so far: %d)",
@@ -248,12 +250,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     if db > peak_db:
                         peak_db = db
 
-                    # Log every 50 chunks (~3s) with peak level
+                    # Log first chunk, and first chunk after any silence
                     if chunks_sent == 1:
                         _LOGGER.info(
                             "First audio chunk sent to Wyoming (%d bytes, %.1f dB)",
                             len(send_pcm), db,
                         )
+                    elif had_timeout:
+                        _LOGGER.info(
+                            "VBAN audio resumed (chunk #%d, %.1f dB)",
+                            chunks_sent, db,
+                        )
+                        had_timeout = False
                     elif chunks_sent % 50 == 0:
                         _LOGGER.debug(
                             "Audio chunks: %d (peak: %.1f dB, current: %.1f dB)",
