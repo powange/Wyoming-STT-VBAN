@@ -56,6 +56,19 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._first_packet_logged = False
         self._server_ready = False  # True after RunSatellite received
 
+    async def run(self) -> None:
+        """Run the handler, suppressing connection errors from the base class.
+
+        The wyoming library's AsyncEventHandler.run() doesn't catch
+        connection errors from async_read_event, so they propagate as
+        unretrieved task exceptions. HA disconnects between pipeline
+        cycles, which is normal.
+        """
+        try:
+            await super().run()
+        except (ConnectionError, OSError) as err:
+            _LOGGER.debug("Connection closed by client: %s", err)
+
     async def handle_event(self, event: Event) -> bool:
         """Handle an incoming Wyoming event from the HA server."""
 

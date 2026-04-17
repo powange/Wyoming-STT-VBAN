@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.1
+
+- Override AsyncEventHandler.run() to catch ConnectionError/OSError
+- Suppresses "Task exception was never retrieved" warnings from the wyoming base class when HA disconnects between pipeline cycles
+
 ## 2.1.0
 
 - Always declare snd (audio output) in satellite Info, even without TTS VBAN
