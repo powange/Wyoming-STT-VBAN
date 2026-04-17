@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.6.0
+
+Final robustness pass from third deep code review:
+
+- **Fix**: `_send_packet` now checks `self._socket is None` before sendto (prevents AttributeError if close() fires mid-batch)
+- **Fix**: Zeroconf name includes the satellite name + port, so multiple satellites on the same host no longer collide on default MAC-only name
+- **Fix**: rate-limit "VBAN send error" logs to once per 5s (prevents log spam on persistent network failures, e.g. speaker unreachable)
+- **Fix**: rate-limit subscriber callback errors in VBAN receiver for the same reason
+- **Add**: SIGTERM/SIGINT handlers for clean shutdown (HAOS sends SIGTERM to stop containers)
+- **Cleanup**: extract magic ratio (`OVERFLOW_RESET_RATIO`) as a named constant
+
 ## 2.5.2
 
 Robustness fixes from second deep code review:

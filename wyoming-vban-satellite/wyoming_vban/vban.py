@@ -5,6 +5,7 @@ import audioop
 import logging
 import socket
 import struct
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -180,6 +181,7 @@ class VbanReceiver:
         self._socket: Optional[socket.socket] = None
         self._running = False
         self._subscribers: list[Callable[[VbanPacket], None]] = []
+        self._last_subscriber_error_log = 0.0
 
     def subscribe(self, callback: Callable[[VbanPacket], None]) -> None:
         """Register a callback to receive VBAN packets."""
@@ -254,7 +256,11 @@ class VbanReceiver:
                     try:
                         callback(packet)
                     except Exception as err:
-                        _LOGGER.error("Subscriber callback error: %s", err)
+                        # Rate-limit to avoid log spam if a callback fails on every packet
+                        now = time.monotonic()
+                        if now - self._last_subscriber_error_log >= 5.0:
+                            _LOGGER.error("Subscriber callback error: %s", err)
+                            self._last_subscriber_error_log = now
         finally:
             self._close_socket()
             _LOGGER.info("VBAN receiver stopped")
@@ -296,6 +302,8 @@ class VbanSender:
     BATCH_PACKETS = 4  # 4 packets × 16ms = 64ms batch at 16kHz
     PREBUFFER_MS = 50  # wait for this much audio before starting to drain
     MAX_PENDING_MS = 10_000  # hard cap on pending buffer size (10s of audio)
+    SEND_ERROR_LOG_INTERVAL_S = 5.0  # max frequency for send-error log spam
+    OVERFLOW_RESET_RATIO = 4  # reset overflow flag when pending drops below max/N
 
     def __init__(
         self,
@@ -319,6 +327,7 @@ class VbanSender:
         self._data_ready: Optional[asyncio.Event] = None
         self._drain_task: Optional[asyncio.Task] = None
         self._pending_overflow_logged = False
+        self._last_send_error_log = 0.0
         self._max_pending_bytes = int(
             (self.MAX_PENDING_MS / 1000) * sample_rate * WYOMING_WIDTH * channels
         )
@@ -408,7 +417,10 @@ class VbanSender:
                 self._pending_overflow_logged = True
             return
 
-        if self._pending_overflow_logged and len(self._pending) < self._max_pending_bytes // 4:
+        if (
+            self._pending_overflow_logged
+            and len(self._pending) < self._max_pending_bytes // self.OVERFLOW_RESET_RATIO
+        ):
             self._pending_overflow_logged = False
 
         self._pending.extend(pcm)
@@ -419,7 +431,7 @@ class VbanSender:
 
     def _send_packet(self, packet_bytes: int) -> bool:
         """Emit one VBAN packet from the pending buffer. Returns True on success."""
-        if len(self._pending) < packet_bytes:
+        if self._socket is None or len(self._pending) < packet_bytes:
             return False
 
         chunk = bytes(self._pending[:packet_bytes])
@@ -438,7 +450,12 @@ class VbanSender:
         try:
             self._socket.sendto(packet, (self.address, self.port))
         except OSError as err:
-            _LOGGER.error("VBAN send error: %s", err)
+            # Rate-limit send-error logs to avoid spam on persistent failures
+            # (e.g. destination unreachable during an entire TTS response).
+            now = time.monotonic()
+            if now - self._last_send_error_log >= self.SEND_ERROR_LOG_INTERVAL_S:
+                _LOGGER.error("VBAN send error: %s", err)
+                self._last_send_error_log = now
             return False
 
         self._frame_counter = (self._frame_counter + 1) & 0xFFFFFFFF

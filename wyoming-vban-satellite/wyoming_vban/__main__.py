@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 
 from wyoming.server import AsyncServer
@@ -13,6 +14,19 @@ from .satellite import VbanSatelliteHandler, make_satellite_info
 from .vban import VbanReceiver, VbanSender
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _build_zeroconf_name(satellite_name: str, port: int) -> str:
+    """Build a Zeroconf name unique per satellite process.
+
+    The default Wyoming Zeroconf name is just the host MAC address, which
+    collides when multiple satellites run on the same machine. We append
+    the port to disambiguate and sanitize the satellite name for mDNS.
+    """
+    # Keep only alphanumerics and hyphens (mDNS label restrictions)
+    safe_name = "".join(c if c.isalnum() or c == "-" else "-" for c in satellite_name)
+    safe_name = safe_name.strip("-").lower() or "satellite"
+    return f"{safe_name}-{port}"
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,16 +126,52 @@ async def main() -> None:
     server = AsyncServer.from_uri(f"tcp://0.0.0.0:{args.wyoming_port}")
     _LOGGER.info("Wyoming server listening on tcp://0.0.0.0:%d", args.wyoming_port)
 
-    # Register via Zeroconf so HA auto-discovers the satellite
-    zeroconf = HomeAssistantZeroconf(port=args.wyoming_port)
+    # Register via Zeroconf so HA auto-discovers the satellite.
+    # Build a unique name per satellite (MAC + port) so multiple satellites
+    # running on the same host don't collide on the default MAC-only name.
+    zeroconf_name = _build_zeroconf_name(args.name, args.wyoming_port)
+    zeroconf = HomeAssistantZeroconf(
+        port=args.wyoming_port,
+        name=zeroconf_name,
+    )
     await zeroconf.register_server()
     _LOGGER.info("Zeroconf registered: %s on port %d", zeroconf.name, args.wyoming_port)
 
     # Start VBAN receiver in the background (runs for the lifetime of the app)
     receiver_task = asyncio.create_task(vban_receiver.run())
 
+    # Install signal handlers so SIGTERM / SIGINT trigger a clean shutdown
+    # (HAOS sends SIGTERM to stop the container).
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _request_stop(signame: str) -> None:
+        _LOGGER.info("Received %s, stopping...", signame)
+        stop_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _request_stop, sig.name)
+        except NotImplementedError:
+            # Signal handlers not supported on this platform (e.g. Windows)
+            pass
+
+    server_task = asyncio.create_task(server.run(handler_factory))
+    stop_wait_task = asyncio.create_task(stop_event.wait())
+
     try:
-        await server.run(handler_factory)
+        done, _pending = await asyncio.wait(
+            {server_task, stop_wait_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stop_wait_task in done:
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+        else:
+            stop_wait_task.cancel()
     finally:
         _LOGGER.info("Shutting down...")
 
