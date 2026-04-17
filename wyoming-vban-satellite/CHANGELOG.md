@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.5.1
+
+Fixes from deep code analysis:
+
+- **Fix**: clear TTS send buffer on AudioStart to prevent audio from a previous stream leaking into a new one
+- **Fix**: race condition in drain loop pre-buffer — re-check buffer length after clearing the event, avoids waiting 500ms when data is already available
+- **Optim**: lower TTS pre-buffer from 100ms → 50ms (still absorbs LAN jitter, reduces latency)
+- **Cleanup**: remove dead `resample_from_wyoming` function (unused since v2.3.0)
+
 ## 2.5.0
 
 Fluidity improvements:

@@ -148,32 +148,6 @@ def resample_to_wyoming(
     return pcm
 
 
-def resample_from_wyoming(
-    audio: bytes,
-    target_rate: int,
-    target_channels: int,
-    target_width: int = WYOMING_WIDTH,
-) -> bytes:
-    """Convert Wyoming audio (16kHz, 16-bit, mono) to VBAN output format."""
-    pcm = audio
-
-    # Resample from 16kHz
-    if target_rate != WYOMING_RATE:
-        pcm, _ = audioop.ratecv(
-            pcm, WYOMING_WIDTH, 1, WYOMING_RATE, target_rate, None
-        )
-
-    # Convert sample width
-    if target_width != WYOMING_WIDTH:
-        pcm = audioop.lin2lin(pcm, WYOMING_WIDTH, target_width)
-
-    # Convert to multi-channel if needed
-    if target_channels > 1:
-        pcm = audioop.tostereo(pcm, target_width, 1.0, 1.0)
-
-    return pcm
-
-
 class VbanReceiver:
     """Async VBAN packet receiver with pub/sub model.
 
@@ -310,7 +284,7 @@ class VbanSender:
 
     SAMPLES_PER_PACKET = 256
     BATCH_PACKETS = 4  # 4 packets × 16ms = 64ms batch at 16kHz
-    PREBUFFER_MS = 100  # wait for this much audio before starting to drain
+    PREBUFFER_MS = 50  # wait for this much audio before starting to drain
 
     def __init__(
         self,
@@ -337,6 +311,14 @@ class VbanSender:
     def reset_resampler(self) -> None:
         """Reset the resampler state between TTS streams."""
         self._ratecv_state = None
+
+    def clear_pending(self) -> None:
+        """Discard buffered audio waiting to be sent.
+
+        Called when a new TTS stream starts (AudioStart) to prevent
+        leftover audio from a previous stream leaking into the new one.
+        """
+        self._pending.clear()
 
     def open(self) -> None:
         """Create the send socket and start the drain task."""
@@ -453,7 +435,12 @@ class VbanSender:
         while self._socket is not None:
             # Phase 1: wait for enough audio (pre-buffer) or any data after timeout
             while len(self._pending) < prebuffer_bytes:
+                # Clear first, then re-check buffer length before waiting.
+                # This avoids a race where send() fires between the length
+                # check and the clear (we'd wait 500ms for nothing).
                 self._data_ready.clear()
+                if len(self._pending) >= prebuffer_bytes:
+                    break
                 try:
                     await asyncio.wait_for(self._data_ready.wait(), timeout=0.5)
                 except asyncio.TimeoutError:
