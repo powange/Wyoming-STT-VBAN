@@ -135,6 +135,12 @@ class VbanSatelliteHandler(AsyncEventHandler):
             await self.write_event(Event(type="pong"))
             return True
 
+        if event.type == "error":
+            text = (event.data or {}).get("text", "<no text>")
+            code = (event.data or {}).get("code", "<no code>")
+            _LOGGER.error("Error from server: [%s] %s", code, text)
+            return True
+
         _LOGGER.debug("Unhandled event type: %s", event.type)
         return True
 

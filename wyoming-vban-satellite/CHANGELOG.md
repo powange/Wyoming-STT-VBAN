@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.3.1
+
+- Log error events received from HA (pipeline failures, STT errors, etc.)
+
 ## 2.3.0
 
 - Resample TTS audio to match the VBAN speaker's configured rate (16kHz by default)
