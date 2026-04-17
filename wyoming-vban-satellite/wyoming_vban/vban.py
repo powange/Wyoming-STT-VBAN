@@ -297,7 +297,14 @@ class VbanReceiver:
 
 
 class VbanSender:
-    """Sends audio as VBAN packets over UDP (unicast or multicast)."""
+    """Sends audio as VBAN packets over UDP, paced at the audio rate.
+
+    VBAN is a real-time protocol: packets must arrive at the rate the
+    receiver is playing them. A background task drains a PCM buffer
+    and emits packets spaced at samples_per_frame / sample_rate seconds.
+    """
+
+    SAMPLES_PER_PACKET = 256
 
     def __init__(
         self,
@@ -316,14 +323,17 @@ class VbanSender:
         self.channels = channels
         self._socket: Optional[socket.socket] = None
         self._frame_counter = 0
-        self._ratecv_state = None  # audioop.ratecv state for continuous resampling
+        self._ratecv_state = None
+        self._pending: bytearray = bytearray()
+        self._pending_lock: Optional[asyncio.Lock] = None
+        self._drain_task: Optional[asyncio.Task] = None
 
     def reset_resampler(self) -> None:
         """Reset the resampler state between TTS streams."""
         self._ratecv_state = None
 
     def open(self) -> None:
-        """Create the send socket."""
+        """Create the send socket and start the drain task."""
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
         if self.mode == "multicast":
@@ -339,6 +349,9 @@ class VbanSender:
                 self.address, self.port, self.stream_name,
             )
 
+        self._pending_lock = asyncio.Lock()
+        self._drain_task = asyncio.create_task(self._drain_loop())
+
     def send(
         self,
         pcm_audio: bytes,
@@ -346,12 +359,11 @@ class VbanSender:
         width: Optional[int] = None,
         channels: Optional[int] = None,
     ) -> None:
-        """Send PCM audio as VBAN packets.
+        """Queue PCM audio for paced transmission.
 
-        Incoming audio is resampled/converted to match the sender's
-        configured format (self.sample_rate, self.channels, 16-bit)
-        because VBAN speakers don't resample — they play raw at their
-        configured rate.
+        Converts/resamples to the sender's target format, then appends
+        to an internal buffer. The drain task emits packets at the
+        proper playback rate.
         """
         if not self._socket:
             return
@@ -362,16 +374,13 @@ class VbanSender:
 
         pcm = pcm_audio
 
-        # Convert sample width to 16-bit if needed
         if src_width != WYOMING_WIDTH:
             pcm = audioop.lin2lin(pcm, src_width, WYOMING_WIDTH)
 
-        # Mix to mono if source is stereo and target is mono
         if src_channels > 1 and self.channels == 1:
             pcm = audioop.tomono(pcm, WYOMING_WIDTH, 1.0, 1.0)
             src_channels = 1
 
-        # Resample to the sender's target rate if needed
         if src_rate != self.sample_rate:
             pcm, self._ratecv_state = audioop.ratecv(
                 pcm,
@@ -382,29 +391,33 @@ class VbanSender:
                 self._ratecv_state,
             )
 
-        # Duplicate to stereo if source is mono and target is stereo
         if src_channels == 1 and self.channels > 1:
             pcm = audioop.tostereo(pcm, WYOMING_WIDTH, 1.0, 1.0)
 
-        # Split into chunks that fit VBAN packets (max 256 samples per frame)
+        self._pending.extend(pcm)
+
+    async def _drain_loop(self) -> None:
+        """Background task: emit VBAN packets paced at the audio rate."""
         bytes_per_sample = WYOMING_WIDTH * self.channels
-        max_samples = 256
-        max_payload = max_samples * bytes_per_sample
+        packet_bytes = self.SAMPLES_PER_PACKET * bytes_per_sample
+        packet_duration = self.SAMPLES_PER_PACKET / self.sample_rate
+        next_send = None
 
-        offset = 0
-        while offset < len(pcm):
-            chunk = pcm[offset : offset + max_payload]
-            samples_in_chunk = len(chunk) // bytes_per_sample
+        while self._socket is not None:
+            if len(self._pending) < packet_bytes:
+                await asyncio.sleep(0.005)
+                next_send = None  # reset pacing when buffer empties
+                continue
 
-            if samples_in_chunk == 0:
-                break
+            chunk = bytes(self._pending[:packet_bytes])
+            del self._pending[:packet_bytes]
 
             packet = build_packet(
                 payload=chunk,
                 stream_name=self.stream_name,
                 sample_rate=self.sample_rate,
                 channels=self.channels,
-                samples_per_frame=samples_in_chunk,
+                samples_per_frame=self.SAMPLES_PER_PACKET,
                 frame_counter=self._frame_counter,
                 data_format=VBAN_DATATYPE_INT16,
             )
@@ -416,10 +429,25 @@ class VbanSender:
                 return
 
             self._frame_counter = (self._frame_counter + 1) & 0xFFFFFFFF
-            offset += len(chunk)
+
+            # Pace: schedule next send at real-time audio rate
+            now = asyncio.get_running_loop().time()
+            if next_send is None:
+                next_send = now + packet_duration
+            else:
+                next_send += packet_duration
+                delay = next_send - now
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                else:
+                    # We're behind — reset pacing to avoid sending too fast
+                    next_send = now
 
     def close(self) -> None:
-        """Close the send socket."""
+        """Close the send socket and stop the drain task."""
+        if self._drain_task:
+            self._drain_task.cancel()
+            self._drain_task = None
         if self._socket:
             self._socket.close()
             self._socket = None

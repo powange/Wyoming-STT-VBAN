@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.0
+
+- Pace VBAN packet transmission at real-time audio rate
+- TTS audio is now queued in a buffer and drained by a background task
+- Emits one 256-sample packet every 16ms (at 16kHz) instead of bursting all packets at once
+- Fixes choppy TTS playback caused by buffer overflow on the VBAN receiver
+
 ## 2.3.2
 
 - Log INFO message "VBAN audio resumed" when audio returns after a silence/timeout
