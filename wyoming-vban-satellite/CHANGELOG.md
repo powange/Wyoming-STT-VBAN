@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.0
+
+- Refactor VBAN receiver to a persistent pub/sub model
+- Receiver runs once at application startup and stays alive for the whole lifetime
+- Handlers subscribe/unsubscribe on connect/disconnect, no more socket restart
+- Fixes race conditions and audio loss during HA reconnections
+
 ## 2.1.1
 
 - Override AsyncEventHandler.run() to catch ConnectionError/OSError

@@ -117,7 +117,18 @@ async def main() -> None:
     await zeroconf.register_server()
     _LOGGER.info("Zeroconf registered: %s on port %d", zeroconf.name, args.wyoming_port)
 
-    await server.run(handler_factory)
+    # Start VBAN receiver in the background (runs for the lifetime of the app)
+    receiver_task = asyncio.create_task(vban_receiver.run())
+
+    try:
+        await server.run(handler_factory)
+    finally:
+        vban_receiver.stop()
+        receiver_task.cancel()
+        try:
+            await receiver_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":

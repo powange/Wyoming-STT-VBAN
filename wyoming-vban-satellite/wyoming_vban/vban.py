@@ -173,7 +173,12 @@ def resample_from_wyoming(
 
 
 class VbanReceiver:
-    """Async VBAN packet receiver supporting unicast, broadcast, and multicast."""
+    """Async VBAN packet receiver with pub/sub model.
+
+    Designed to run persistently at application startup. Multiple
+    subscribers (handlers) can subscribe/unsubscribe to audio events
+    without affecting the underlying UDP socket.
+    """
 
     def __init__(
         self,
@@ -188,7 +193,19 @@ class VbanReceiver:
         self.stream_name_filter = stream_name_filter
         self._socket: Optional[socket.socket] = None
         self._running = False
-        self._on_audio: Optional[Callable[[VbanPacket], None]] = None
+        self._subscribers: list[Callable[[VbanPacket], None]] = []
+
+    def subscribe(self, callback: Callable[[VbanPacket], None]) -> None:
+        """Register a callback to receive VBAN packets."""
+        if callback not in self._subscribers:
+            self._subscribers.append(callback)
+            _LOGGER.debug("Subscriber added (total: %d)", len(self._subscribers))
+
+    def unsubscribe(self, callback: Callable[[VbanPacket], None]) -> None:
+        """Remove a callback."""
+        if callback in self._subscribers:
+            self._subscribers.remove(callback)
+            _LOGGER.debug("Subscriber removed (total: %d)", len(self._subscribers))
 
     def _create_socket(self) -> socket.socket:
         """Create and configure the UDP socket."""
@@ -221,41 +238,44 @@ class VbanReceiver:
         sock.setblocking(False)
         return sock
 
-    async def start(
-        self, on_audio: Callable[[VbanPacket], None]
-    ) -> None:
-        """Start receiving VBAN packets."""
-        self._on_audio = on_audio
+    async def run(self) -> None:
+        """Run the receiver loop. Should be started once at application startup."""
         self._socket = self._create_socket()
         self._running = True
 
         loop = asyncio.get_running_loop()
         _LOGGER.info("VBAN receiver started (mode=%s)", self.mode)
 
-        while self._running:
-            try:
-                data = await loop.sock_recv(self._socket, 2048)
-            except OSError as err:
-                if self._running:
-                    _LOGGER.error("VBAN receive error: %s", err)
-                break
+        try:
+            while self._running:
+                try:
+                    data = await loop.sock_recv(self._socket, 2048)
+                except OSError as err:
+                    if self._running:
+                        _LOGGER.error("VBAN receive error: %s", err)
+                    break
 
-            packet = parse_packet(data)
-            if packet is None:
-                continue
+                packet = parse_packet(data)
+                if packet is None:
+                    continue
 
-            # Filter by stream name if configured
-            if self.stream_name_filter and packet.stream_name != self.stream_name_filter:
-                continue
+                # Filter by stream name if configured
+                if self.stream_name_filter and packet.stream_name != self.stream_name_filter:
+                    continue
 
-            if self._on_audio:
-                self._on_audio(packet)
+                # Broadcast to all subscribers
+                for callback in list(self._subscribers):
+                    try:
+                        callback(packet)
+                    except Exception as err:
+                        _LOGGER.error("Subscriber callback error: %s", err)
+        finally:
+            self._close_socket()
+            _LOGGER.info("VBAN receiver stopped")
 
-    def stop(self) -> None:
-        """Stop receiving VBAN packets."""
-        self._running = False
+    def _close_socket(self) -> None:
+        """Close the socket and leave multicast group if applicable."""
         if self._socket:
-            # Leave multicast group before closing
             if self.mode == "multicast" and self.multicast_group:
                 try:
                     group = socket.inet_aton(self.multicast_group)
@@ -267,7 +287,11 @@ class VbanReceiver:
                     pass
             self._socket.close()
             self._socket = None
-        _LOGGER.info("VBAN receiver stopped")
+
+    def stop(self) -> None:
+        """Stop the receiver (shuts down the socket)."""
+        self._running = False
+        self._close_socket()
 
 
 class VbanSender:

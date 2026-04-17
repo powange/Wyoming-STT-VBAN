@@ -52,7 +52,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
         self._streaming = False
         self._streaming_task: Optional[asyncio.Task] = None
-        self._receiver_started = False
+        self._subscribed = False
         self._first_packet_logged = False
         self._server_ready = False  # True after RunSatellite received
 
@@ -88,7 +88,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._server_ready = True
             # Don't start streaming yet — wait for the next Describe
             # which HA sends inside _run_pipeline_loop
-            self._ensure_vban_receiver()
+            self._subscribe_to_vban()
             return True
 
         if PauseSatellite.is_type(event.type):
@@ -126,14 +126,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         _LOGGER.debug("Unhandled event type: %s", event.type)
         return True
 
-    def _ensure_vban_receiver(self) -> None:
-        """Start the VBAN receiver if not already running."""
-        if not self._receiver_started:
-            self._receiver_started = True
-            asyncio.create_task(
-                self._vban_receiver.start(self._on_vban_audio)
-            )
-            _LOGGER.info("VBAN receiver started")
+    def _subscribe_to_vban(self) -> None:
+        """Subscribe this handler to VBAN audio packets."""
+        if not self._subscribed:
+            self._vban_receiver.subscribe(self._on_vban_audio)
+            self._subscribed = True
 
     async def _send_pipeline_and_stream(self) -> None:
         """Send RunPipeline to HA, wait for it to be processed, then stream audio.
@@ -296,7 +293,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._server_ready = False
         await self._stop_streaming()
 
-        self._vban_receiver.stop()
+        # Unsubscribe from VBAN audio (receiver keeps running for other handlers)
+        if self._subscribed:
+            self._vban_receiver.unsubscribe(self._on_vban_audio)
+            self._subscribed = False
 
 
 def make_satellite_info(name: str) -> Info:
