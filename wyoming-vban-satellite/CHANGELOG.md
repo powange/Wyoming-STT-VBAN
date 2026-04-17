@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.5.0
+
+Fluidity improvements:
+
+- **TTS drain loop**: batch 4 packets per wake-up (64ms) instead of 1 (16ms), reduces timer jitter impact 4x
+- **TTS pre-buffer**: wait for 100ms of audio before emitting first packet, absorbs HA arrival jitter
+- **Event-driven drain**: replaces 5ms polling loop with asyncio.Event — no CPU spin when idle
+- **Mic queue size**: reduced from 100 (~1.6s) to 32 (~500ms) for lower max latency
+- **Queue overflow**: drop new packets instead of oldest — preserves audio continuity for wake word detection
+- **Non-blocking pipeline start**: 300ms grace delay before streaming runs in background task, doesn't block HA event reader
+
 ## 2.4.0
 
 - Pace VBAN packet transmission at real-time audio rate

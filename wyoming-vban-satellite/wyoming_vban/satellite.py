@@ -49,11 +49,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._info = satellite_info
         self._vban_receiver = vban_receiver
         self._vban_sender = vban_sender
-        self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
+        # Max ~500ms of buffering: at 16kHz VBAN packets (~16ms each), 32 slots
+        self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=32)
         self._streaming = False
         self._streaming_task: Optional[asyncio.Task] = None
         self._subscribed = False
         self._first_packet_logged = False
+        self._queue_full_logged = False  # rate-limit queue-full warnings
         self._server_ready = False  # True after RunSatellite received
 
     async def run(self) -> None:
@@ -151,17 +153,15 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._subscribed = True
 
     async def _send_pipeline_and_stream(self) -> None:
-        """Send RunPipeline to HA, wait for it to be processed, then stream audio.
+        """Send RunPipeline to HA, schedule audio streaming after a short delay.
 
-        This must be called AFTER responding to Describe, so HA has the Info
+        Must be called AFTER responding to Describe, so HA has the Info
         before it receives RunPipeline. Audio chunks must arrive after HA
         has processed RunPipeline (set _is_pipeline_running=True).
+
+        The 300ms grace period is scheduled as a background task so we
+        don't block the event reader while waiting.
         """
-        # Tell HA to start the voice pipeline with wake word detection.
-        # Always use TTS as end_stage — HA's pipeline crashes with KeyError
-        # on 'tts_output' if end_stage is HANDLE because RUN_START event
-        # data doesn't include tts_output. TTS audio is simply ignored
-        # if no VBAN sender is configured.
         run_pipeline = RunPipeline(
             start_stage=PipelineStage.WAKE,
             end_stage=PipelineStage.TTS,
@@ -173,12 +173,21 @@ class VbanSatelliteHandler(AsyncEventHandler):
             PipelineStage.WAKE.value, PipelineStage.TTS.value,
         )
 
-        # Give HA time to process RunPipeline before we send audio
-        await asyncio.sleep(0.3)
-
-        # Now start the audio streaming task
+        # Mark streaming as pending and schedule startup in the background,
+        # so handle_event can return immediately and keep reading HA events.
         self._streaming = True
-        self._streaming_task = asyncio.create_task(self._stream_audio())
+        self._streaming_task = asyncio.create_task(
+            self._delayed_stream_start(0.3)
+        )
+
+    async def _delayed_stream_start(self, delay: float) -> None:
+        """Wait for HA to process RunPipeline, then run the audio stream loop."""
+        try:
+            await asyncio.sleep(delay)
+            if self._streaming and self._is_running:
+                await self._stream_audio()
+        except asyncio.CancelledError:
+            pass
 
     async def _stop_streaming(self) -> None:
         """Stop the audio streaming loop (VBAN receiver stays alive)."""
@@ -233,6 +242,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
                             timeouts * 2, chunks_sent,
                         )
                     continue
+
+                # Reset queue-full flag once we've drained past the threshold
+                if self._queue_full_logged and self._audio_queue.qsize() < 4:
+                    self._queue_full_logged = False
 
                 timeouts = 0
                 audio_buffer.extend(pcm)
@@ -307,11 +320,16 @@ class VbanSatelliteHandler(AsyncEventHandler):
         try:
             self._audio_queue.put_nowait(pcm)
         except asyncio.QueueFull:
-            try:
-                self._audio_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-            self._audio_queue.put_nowait(pcm)
+            # Drop this new packet rather than the oldest — preserves
+            # audio continuity (no discontinuity jump for wake word detection).
+            # A full queue means the Wyoming writer is backlogged; log once
+            # per overflow burst to help diagnose without log spam.
+            if not self._queue_full_logged:
+                _LOGGER.warning(
+                    "Audio queue full — dropping incoming VBAN packets "
+                    "(HA may be slow to consume)"
+                )
+                self._queue_full_logged = True
 
     async def disconnect(self) -> None:
         """Called when the client disconnects."""

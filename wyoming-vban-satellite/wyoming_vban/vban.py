@@ -301,10 +301,16 @@ class VbanSender:
 
     VBAN is a real-time protocol: packets must arrive at the rate the
     receiver is playing them. A background task drains a PCM buffer
-    and emits packets spaced at samples_per_frame / sample_rate seconds.
+    and emits packets in batches spaced at the audio rate.
+
+    Batching (BATCH_PACKETS packets per wake-up) reduces timer jitter
+    impact. Pre-buffering (PREBUFFER_MS of audio before first emit)
+    absorbs arrival jitter from HA.
     """
 
     SAMPLES_PER_PACKET = 256
+    BATCH_PACKETS = 4  # 4 packets × 16ms = 64ms batch at 16kHz
+    PREBUFFER_MS = 100  # wait for this much audio before starting to drain
 
     def __init__(
         self,
@@ -325,7 +331,7 @@ class VbanSender:
         self._frame_counter = 0
         self._ratecv_state = None
         self._pending: bytearray = bytearray()
-        self._pending_lock: Optional[asyncio.Lock] = None
+        self._data_ready: Optional[asyncio.Event] = None
         self._drain_task: Optional[asyncio.Task] = None
 
     def reset_resampler(self) -> None:
@@ -349,7 +355,7 @@ class VbanSender:
                 self.address, self.port, self.stream_name,
             )
 
-        self._pending_lock = asyncio.Lock()
+        self._data_ready = asyncio.Event()
         self._drain_task = asyncio.create_task(self._drain_loop())
 
     def send(
@@ -396,52 +402,84 @@ class VbanSender:
 
         self._pending.extend(pcm)
 
+        # Notify the drain task that data is available
+        if self._data_ready is not None:
+            self._data_ready.set()
+
+    def _send_packet(self, packet_bytes: int) -> bool:
+        """Emit one VBAN packet from the pending buffer. Returns True on success."""
+        if len(self._pending) < packet_bytes:
+            return False
+
+        chunk = bytes(self._pending[:packet_bytes])
+        del self._pending[:packet_bytes]
+
+        packet = build_packet(
+            payload=chunk,
+            stream_name=self.stream_name,
+            sample_rate=self.sample_rate,
+            channels=self.channels,
+            samples_per_frame=self.SAMPLES_PER_PACKET,
+            frame_counter=self._frame_counter,
+            data_format=VBAN_DATATYPE_INT16,
+        )
+
+        try:
+            self._socket.sendto(packet, (self.address, self.port))
+        except OSError as err:
+            _LOGGER.error("VBAN send error: %s", err)
+            return False
+
+        self._frame_counter = (self._frame_counter + 1) & 0xFFFFFFFF
+        return True
+
     async def _drain_loop(self) -> None:
-        """Background task: emit VBAN packets paced at the audio rate."""
+        """Emit VBAN packets in batches, paced at the audio rate.
+
+        1. Wait (event-driven) until enough audio is buffered to start (pre-buffer)
+        2. Emit BATCH_PACKETS packets, then sleep batch_duration
+        3. Continue until buffer empties, then go back to step 1
+        """
         bytes_per_sample = WYOMING_WIDTH * self.channels
         packet_bytes = self.SAMPLES_PER_PACKET * bytes_per_sample
         packet_duration = self.SAMPLES_PER_PACKET / self.sample_rate
-        next_send = None
+        batch_duration = self.BATCH_PACKETS * packet_duration
+        prebuffer_bytes = int(
+            (self.PREBUFFER_MS / 1000) * self.sample_rate * bytes_per_sample
+        )
+
+        loop = asyncio.get_running_loop()
 
         while self._socket is not None:
-            if len(self._pending) < packet_bytes:
-                await asyncio.sleep(0.005)
-                next_send = None  # reset pacing when buffer empties
-                continue
+            # Phase 1: wait for enough audio (pre-buffer) or any data after timeout
+            while len(self._pending) < prebuffer_bytes:
+                self._data_ready.clear()
+                try:
+                    await asyncio.wait_for(self._data_ready.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    # No new data for 500ms — if we have any data, flush it
+                    if len(self._pending) >= packet_bytes:
+                        break
+                if self._socket is None:
+                    return
 
-            chunk = bytes(self._pending[:packet_bytes])
-            del self._pending[:packet_bytes]
+            # Phase 2: drain at real-time rate until buffer runs low
+            next_send = loop.time() + batch_duration
+            while len(self._pending) >= packet_bytes:
+                # Emit a batch of packets
+                for _ in range(self.BATCH_PACKETS):
+                    if not self._send_packet(packet_bytes):
+                        break
 
-            packet = build_packet(
-                payload=chunk,
-                stream_name=self.stream_name,
-                sample_rate=self.sample_rate,
-                channels=self.channels,
-                samples_per_frame=self.SAMPLES_PER_PACKET,
-                frame_counter=self._frame_counter,
-                data_format=VBAN_DATATYPE_INT16,
-            )
-
-            try:
-                self._socket.sendto(packet, (self.address, self.port))
-            except OSError as err:
-                _LOGGER.error("VBAN send error: %s", err)
-                return
-
-            self._frame_counter = (self._frame_counter + 1) & 0xFFFFFFFF
-
-            # Pace: schedule next send at real-time audio rate
-            now = asyncio.get_running_loop().time()
-            if next_send is None:
-                next_send = now + packet_duration
-            else:
-                next_send += packet_duration
+                # Pace: sleep until next batch time
+                now = loop.time()
                 delay = next_send - now
                 if delay > 0:
                     await asyncio.sleep(delay)
+                    next_send += batch_duration
                 else:
-                    # We're behind — reset pacing to avoid sending too fast
-                    next_send = now
+                    # Running behind — resync without oversleeping
+                    next_send = now + batch_duration
 
     def close(self) -> None:
         """Close the send socket and stop the drain task."""
