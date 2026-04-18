@@ -301,7 +301,11 @@ class VbanSender:
     SAMPLES_PER_PACKET = 256
     BATCH_PACKETS = 4  # 4 packets × 16ms = 64ms batch at 16kHz
     PREBUFFER_MS = 50  # wait for this much audio before starting to drain
-    MAX_PENDING_MS = 10_000  # hard cap on pending buffer size (10s of audio)
+    # Hard cap on pending buffer size. Must be >= longest expected TTS response
+    # since HA sends the full TTS as a burst over localhost TCP (fills the
+    # buffer in milliseconds while drain emits at real-time). 60s = ~1.9 MB
+    # at 16kHz mono 16-bit, covers long assistant responses.
+    MAX_PENDING_MS = 60_000
     SEND_ERROR_LOG_INTERVAL_S = 5.0  # max frequency for send-error log spam
     OVERFLOW_RESET_RATIO = 4  # reset overflow flag when pending drops below max/N
 

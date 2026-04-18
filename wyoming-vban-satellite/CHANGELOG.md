@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.7.1
+
+- **Fix**: raise TTS send buffer cap from 10s to 60s
+- HA sends the full TTS as a burst over localhost TCP (fills the buffer in ms while drain plays in real-time). A 10s cap truncated long TTS responses.
+
 ## 2.7.0
 
 - Add `tts_vban_volume` per-satellite option (0.0–2.0, default 1.0)
