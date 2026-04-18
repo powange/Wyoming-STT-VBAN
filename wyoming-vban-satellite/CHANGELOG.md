@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.0
+
+- Add `tts_vban_volume` per-satellite option (0.0–2.0, default 1.0)
+- Applies a digital volume multiplier to TTS audio before sending via VBAN
+- Uses `audioop.mul` which clips at 16-bit range — factor > 1.0 saturates loud samples gracefully instead of wrapping
+
 ## 2.6.0
 
 Final robustness pass from third deep code review:

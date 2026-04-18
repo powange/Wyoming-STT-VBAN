@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tts-vban-address", default="", help="Target IP for TTS VBAN output")
     parser.add_argument("--tts-vban-port", type=int, default=DEFAULT_VBAN_PORT)
     parser.add_argument("--tts-vban-stream-name", default="TTS1")
+    parser.add_argument(
+        "--tts-vban-volume",
+        type=float,
+        default=1.0,
+        help="Volume multiplier for TTS audio (0.0-2.0, default 1.0)",
+    )
 
     # Logging
     parser.add_argument("--debug", action="store_true", default=False)
@@ -93,16 +99,26 @@ async def main() -> None:
         if not args.tts_vban_address:
             _LOGGER.error("TTS VBAN enabled but no --tts-vban-address specified")
             sys.exit(1)
+
+        # Clamp volume to safe range
+        volume = max(0.0, min(2.0, args.tts_vban_volume))
+        if volume != args.tts_vban_volume:
+            _LOGGER.warning(
+                "tts_vban_volume %.2f clamped to %.2f (valid range 0.0-2.0)",
+                args.tts_vban_volume, volume,
+            )
+
         vban_sender = VbanSender(
             address=args.tts_vban_address,
             port=args.tts_vban_port,
             mode=args.tts_vban_mode,
             stream_name=args.tts_vban_stream_name,
+            volume=volume,
         )
         _LOGGER.info(
-            "  TTS VBAN: mode=%s address=%s:%d stream=%s",
+            "  TTS VBAN: mode=%s address=%s:%d stream=%s volume=%.2f",
             args.tts_vban_mode, args.tts_vban_address,
-            args.tts_vban_port, args.tts_vban_stream_name,
+            args.tts_vban_port, args.tts_vban_stream_name, volume,
         )
 
     # Open TTS sender socket

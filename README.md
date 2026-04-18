@@ -50,6 +50,7 @@ The addon uses a `satellites` list. Each entry creates a separate Wyoming satell
 | `tts_vban_address` | | Target IP for TTS output |
 | `tts_vban_port` | `6980` | Target UDP port |
 | `tts_vban_stream_name` | `TTS1` | Outgoing VBAN stream name |
+| `tts_vban_volume` | `1.0` | Volume multiplier for TTS audio (0.0–2.0). 0.5 = half, 1.5 = +50% louder (with clipping protection) |
 
 ### Global options
 

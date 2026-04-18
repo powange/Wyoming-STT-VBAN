@@ -313,6 +313,7 @@ class VbanSender:
         stream_name: str = "TTS1",
         sample_rate: int = WYOMING_RATE,
         channels: int = WYOMING_CHANNELS,
+        volume: float = 1.0,
     ):
         self.address = address
         self.port = port
@@ -320,6 +321,7 @@ class VbanSender:
         self.stream_name = stream_name
         self.sample_rate = sample_rate
         self.channels = channels
+        self.volume = volume
         self._socket: Optional[socket.socket] = None
         self._frame_counter = 0
         self._ratecv_state = None
@@ -405,6 +407,12 @@ class VbanSender:
 
         if src_channels == 1 and self.channels > 1:
             pcm = audioop.tostereo(pcm, WYOMING_WIDTH, 1.0, 1.0)
+
+        # Apply volume multiplier. audioop.mul clips at the 16-bit range
+        # automatically, so factor > 1.0 gracefully saturates loud samples
+        # rather than wrapping around.
+        if self.volume != 1.0:
+            pcm = audioop.mul(pcm, WYOMING_WIDTH, self.volume)
 
         # Cap pending buffer to prevent unbounded memory growth if the
         # drain task falls behind (e.g. network issue, huge TTS response).

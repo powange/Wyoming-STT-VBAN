@@ -33,6 +33,7 @@ for (( i=0; i < SATELLITE_COUNT; i++ )); do
     TTS_VBAN_ADDRESS=$(bashio::config "satellites[${i}].tts_vban_address")
     TTS_VBAN_PORT=$(bashio::config "satellites[${i}].tts_vban_port")
     TTS_VBAN_STREAM_NAME=$(bashio::config "satellites[${i}].tts_vban_stream_name")
+    TTS_VBAN_VOLUME=$(bashio::config "satellites[${i}].tts_vban_volume")
 
     ARGS=(
         --name "${SAT_NAME}"
@@ -58,6 +59,9 @@ for (( i=0; i < SATELLITE_COUNT; i++ )); do
         )
         if [ -n "${TTS_VBAN_ADDRESS}" ]; then
             ARGS+=(--tts-vban-address "${TTS_VBAN_ADDRESS}")
+        fi
+        if [ -n "${TTS_VBAN_VOLUME}" ]; then
+            ARGS+=(--tts-vban-volume "${TTS_VBAN_VOLUME}")
         fi
     fi
 
