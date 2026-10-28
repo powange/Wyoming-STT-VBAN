@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.2
+
+- **Fix**: restart the wake→TTS pipeline after a server error
+- After an `error` event from HA (`duplicate_wake_up_detected`, `stt-no-text-recognized`, `wake_word_detection_aborted`), HA ends the pipeline and does not restart it, even with `restart_on_end=True`. The satellite kept streaming audio that HA rejected ("Unexpected event from satellite: audio-chunk"), openWakeWord received no session, and the satellite stayed deaf until the app restarted.
+- The satellite now stops streaming and re-sends `run-pipeline` in the background (0.5s later) after an error. With two satellites hearing the same wake word, the one receiving `duplicate_wake_up_detected` goes back to listening.
+
 ## 2.7.1
 
 - **Fix**: raise TTS send buffer cap from 10s to 60s

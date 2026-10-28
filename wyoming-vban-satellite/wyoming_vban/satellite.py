@@ -57,6 +57,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._first_packet_logged = False
         self._queue_full_logged = False  # rate-limit queue-full warnings
         self._server_ready = False  # True after RunSatellite received
+        self._restart_task: Optional[asyncio.Task] = None
 
     async def run(self) -> None:
         """Run the handler, suppressing connection errors from the base class.
@@ -148,6 +149,12 @@ class VbanSatelliteHandler(AsyncEventHandler):
             text = (event.data or {}).get("text", "<no text>")
             code = (event.data or {}).get("code", "<no code>")
             _LOGGER.error("Error from server: [%s] %s", code, text)
+            # After an error (duplicate_wake_up_detected, stt-no-text-recognized,
+            # wake_word_detection_aborted...), HA ends the pipeline and does NOT
+            # restart it, even with restart_on_end=True. Audio chunks we keep
+            # sending are rejected, leaving the satellite deaf. Re-send
+            # RunPipeline ourselves so we go back to listening for the wake word.
+            self._schedule_pipeline_restart()
             return True
 
         _LOGGER.debug("Unhandled event type: %s", event.type)
@@ -217,6 +224,24 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 self._audio_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+
+    def _schedule_pipeline_restart(self, delay: float = 0.5) -> None:
+        """Restart the wake→TTS pipeline in the background after an error."""
+        if self._restart_task and not self._restart_task.done():
+            return
+        self._restart_task = asyncio.create_task(
+            self._restart_pipeline_after_error(delay)
+        )
+
+    async def _restart_pipeline_after_error(self, delay: float) -> None:
+        try:
+            await self._stop_streaming()
+            await asyncio.sleep(delay)
+            if self._server_ready and self._is_running and not self._streaming:
+                _LOGGER.info("Restarting pipeline after server error")
+                await self._send_pipeline_and_stream()
+        except (ConnectionError, OSError, asyncio.CancelledError):
+            pass
 
     async def _stream_audio(self) -> None:
         """Continuously read from the VBAN queue and send audio-chunk events.
@@ -342,6 +367,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
         """Called when the client disconnects."""
         _LOGGER.info("Client disconnected")
         self._server_ready = False
+        if self._restart_task and not self._restart_task.done():
+            self._restart_task.cancel()
+            try:
+                await self._restart_task
+            except asyncio.CancelledError:
+                pass
+        self._restart_task = None
         await self._stop_streaming()
 
         # Unsubscribe from VBAN audio (receiver keeps running for other handlers)
