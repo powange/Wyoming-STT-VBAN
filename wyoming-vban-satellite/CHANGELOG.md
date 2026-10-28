@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.8.0
+
+- **New**: per-satellite TTS output to a Home Assistant `media_player` (e.g. Google Nest via Cast), in addition to VBAN
+- New options: `tts_output` (`vban` | `media_player`, default `vban` — existing configs unchanged), `tts_media_player`, `tts_http_port` (default 10800 + satellite index), `tts_http_host` (default: auto-detected LAN IP)
+- The response is buffered as received (no resampling), served as a WAV by a small HTTP server (`/tts/<uuid>.wav`, last 5 kept), and played with `media_player.play_media` through the Supervisor API (`homeassistant_api: true`)
+- The satellite sends the Wyoming `played` event once the WAV has played (duration + 1.5 s for Cast startup), so the satellite entity returns to idle when the speaker finishes. VBAN mode is unchanged (no `played`, HA uses its own timeout)
+- If `play_media` fails (HTTP error or 5 s timeout), the response falls back to VBAN when it is configured
+- New dependency: `aiohttp`
+
 ## 2.7.4
 
 - **Fix**: app failed to start when `tts_vban_batch_packets` was missing from the config (e.g. configs created before 2.7.3)

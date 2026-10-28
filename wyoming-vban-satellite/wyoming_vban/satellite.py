@@ -17,11 +17,17 @@ from wyoming.satellite import (
     StreamingStopped,
 )
 from wyoming.server import AsyncEventHandler
+from wyoming.snd import Played
 
 from .const import WYOMING_CHANNELS, WYOMING_RATE, WYOMING_WIDTH
+from .media_player import MediaPlayerOutput, build_wav
 from .vban import VbanPacket, VbanReceiver, VbanSender, resample_to_wyoming
 
 _LOGGER = logging.getLogger(__name__)
+
+# Media player playbacks outlive their handler (HA may reconnect while a
+# response plays); keep strong references so they aren't garbage-collected.
+_PLAYBACK_TASKS: "set[asyncio.Task]" = set()
 
 
 class VbanSatelliteHandler(AsyncEventHandler):
@@ -37,6 +43,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
     they are silently dropped (HA only forwards them when _is_pipeline_running=True).
     """
 
+    MAX_TTS_BUFFER_S = 300  # media_player mode: longest response buffered
+    CAST_START_DELAY_S = 1.5  # time for Cast to fetch the WAV and start playing
+
     def __init__(
         self,
         reader: asyncio.StreamReader,
@@ -44,11 +53,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
         satellite_info: Info,
         vban_receiver: VbanReceiver,
         vban_sender: Optional[VbanSender],
+        media_output: Optional[MediaPlayerOutput] = None,
     ):
         super().__init__(reader, writer)
         self._info = satellite_info
         self._vban_receiver = vban_receiver
         self._vban_sender = vban_sender
+        # When set, TTS goes to a HA media_player; VBAN is only a fallback.
+        self._media_output = media_output
+        self._tts_pcm = bytearray()
+        self._tts_format = (WYOMING_RATE, WYOMING_WIDTH, WYOMING_CHANNELS)
+        self._tts_overflow_logged = False
+        self._playback_task: Optional[asyncio.Task] = None
         # Max ~500ms of buffering: at 16kHz VBAN packets (~16ms each), 32 slots
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=32)
         self._streaming = False
@@ -114,6 +130,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 "Receiving TTS audio from server: %dHz, %d-bit, %dch",
                 start.rate, start.width * 8, start.channels,
             )
+            if self._media_output:
+                # Buffer the whole response as-is (no resampling); it is
+                # played as a WAV file once AudioStop arrives.
+                self._tts_format = (start.rate, start.width, start.channels)
+                self._tts_pcm = bytearray()
+                self._tts_overflow_logged = False
+                return True
             # Reset resampler state AND drop any leftover audio from a
             # previous stream so the new TTS starts cleanly.
             if self._vban_sender:
@@ -122,6 +145,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return True
 
         if AudioChunk.is_type(event.type):
+            if self._media_output:
+                self._buffer_tts_chunk(AudioChunk.from_event(event).audio)
+                return True
             if self._vban_sender:
                 try:
                     chunk = AudioChunk.from_event(event)
@@ -139,6 +165,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if AudioStop.is_type(event.type):
             _LOGGER.debug("TTS audio finished")
+            if self._media_output and self._tts_pcm:
+                pcm, self._tts_pcm = bytes(self._tts_pcm), bytearray()
+                # A newer response replaces one still waiting to report played
+                if self._playback_task and not self._playback_task.done():
+                    self._playback_task.cancel()
+                # Run in the background so the event reader isn't blocked
+                # while play_media runs and the response plays.
+                self._playback_task = asyncio.create_task(
+                    self._play_on_media_player(pcm, *self._tts_format)
+                )
+                _PLAYBACK_TASKS.add(self._playback_task)
+                self._playback_task.add_done_callback(_PLAYBACK_TASKS.discard)
             return True
 
         if event.type == "ping":
@@ -159,6 +197,62 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         _LOGGER.debug("Unhandled event type: %s", event.type)
         return True
+
+    def _buffer_tts_chunk(self, audio: bytes) -> None:
+        """Append TTS PCM to the response buffer, capped in duration."""
+        rate, width, channels = self._tts_format
+        max_bytes = self.MAX_TTS_BUFFER_S * rate * width * channels
+        if len(self._tts_pcm) + len(audio) > max_bytes:
+            if not self._tts_overflow_logged:
+                _LOGGER.warning(
+                    "TTS response longer than %ds — truncating",
+                    self.MAX_TTS_BUFFER_S,
+                )
+                self._tts_overflow_logged = True
+            return
+        self._tts_pcm.extend(audio)
+
+    async def _play_on_media_player(
+        self, pcm: bytes, rate: int, width: int, channels: int
+    ) -> None:
+        """Publish the response as a WAV, play it, then report played to HA.
+
+        If play_media fails, the response goes to VBAN when configured.
+        """
+        assert self._media_output is not None
+        duration = len(pcm) / (rate * width * channels)
+        url = self._media_output.publish(build_wav(pcm, rate, width, channels))
+        _LOGGER.info(
+            "TTS published at %s (%.1fs WAV) for %s",
+            url, duration, self._media_output.entity_id,
+        )
+
+        if not await self._media_output.play(url):
+            if self._vban_sender is None:
+                _LOGGER.error("No VBAN output configured — response dropped")
+                return
+            _LOGGER.warning("Falling back to VBAN output for this response")
+            try:
+                self._vban_sender.reset_resampler()
+                self._vban_sender.clear_pending()
+                self._vban_sender.send(
+                    pcm, sample_rate=rate, width=width, channels=channels,
+                )
+            except (audioop.error, ValueError) as err:
+                _LOGGER.warning("Failed to send TTS audio to VBAN: %s", err)
+            return
+
+        # Tell HA the response finished playing, like a satellite with its
+        # own speaker would (entity goes back to idle, announcements stop
+        # waiting). Cast needs a moment to fetch the file and start playing.
+        await asyncio.sleep(duration + self.CAST_START_DELAY_S)
+        if self.writer.is_closing():
+            return
+        try:
+            await self.write_event(Played().event())
+            _LOGGER.debug("Sent played")
+        except (ConnectionError, OSError) as err:
+            _LOGGER.debug("Could not send played: %s", err)
 
     def _subscribe_to_vban(self) -> None:
         """Subscribe this handler to VBAN audio packets."""

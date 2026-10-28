@@ -2,6 +2,19 @@ configuration:
   satellites:
     name: Satellites
     description: List of VBAN satellite sources
+    fields:
+      tts_output:
+        name: TTS output
+        description: "Where responses are played: vban or media_player"
+      tts_media_player:
+        name: TTS media player
+        description: media_player entity used when TTS output is media_player (e.g. media_player.nestmini7039)
+      tts_http_port:
+        name: TTS HTTP port
+        description: Port serving TTS audio to the media player (default 10800 + satellite position)
+      tts_http_host:
+        name: TTS HTTP host
+        description: LAN IP of this host used in the TTS URL (empty = auto-detect)
   debug_logging:
     name: Debug Logging
     description: Enable verbose debug logging

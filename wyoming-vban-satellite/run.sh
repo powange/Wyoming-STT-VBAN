@@ -42,6 +42,10 @@ for (( i=0; i < SATELLITE_COUNT; i++ )); do
     TTS_VBAN_STREAM_NAME=$(bashio::config "satellites[${i}].tts_vban_stream_name")
     TTS_VBAN_VOLUME=$(bashio::config "satellites[${i}].tts_vban_volume")
     TTS_VBAN_BATCH_PACKETS=$(bashio::config "satellites[${i}].tts_vban_batch_packets")
+    TTS_OUTPUT=$(bashio::config "satellites[${i}].tts_output")
+    TTS_MEDIA_PLAYER=$(bashio::config "satellites[${i}].tts_media_player")
+    TTS_HTTP_PORT=$(bashio::config "satellites[${i}].tts_http_port")
+    TTS_HTTP_HOST=$(bashio::config "satellites[${i}].tts_http_host")
 
     ARGS=(
         --name "${SAT_NAME}"
@@ -73,6 +77,23 @@ for (( i=0; i < SATELLITE_COUNT; i++ )); do
         fi
         if has_value "${TTS_VBAN_BATCH_PACKETS}"; then
             ARGS+=(--tts-vban-batch-packets "${TTS_VBAN_BATCH_PACKETS}")
+        fi
+    fi
+
+    if [ "${TTS_OUTPUT}" = "media_player" ]; then
+        # Default HTTP port: 10800 + satellite index (unique per satellite)
+        if ! has_value "${TTS_HTTP_PORT}"; then
+            TTS_HTTP_PORT=$((10800 + i))
+        fi
+        ARGS+=(
+            --tts-output media_player
+            --tts-http-port "${TTS_HTTP_PORT}"
+        )
+        if has_value "${TTS_MEDIA_PLAYER}"; then
+            ARGS+=(--tts-media-player "${TTS_MEDIA_PLAYER}")
+        fi
+        if has_value "${TTS_HTTP_HOST}"; then
+            ARGS+=(--tts-http-host "${TTS_HTTP_HOST}")
         fi
     fi
 

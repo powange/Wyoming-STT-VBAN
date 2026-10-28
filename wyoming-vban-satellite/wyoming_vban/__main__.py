@@ -10,6 +10,7 @@ from wyoming.server import AsyncServer
 from wyoming.zeroconf import HomeAssistantZeroconf
 
 from .const import DEFAULT_VBAN_PORT
+from .media_player import MediaPlayerOutput, detect_local_ip
 from .satellite import VbanSatelliteHandler, make_satellite_info
 from .vban import VbanReceiver, VbanSender
 
@@ -61,6 +62,28 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="VBAN packets (256 samples each) sent per wake-up (1-8, default 1)",
+    )
+
+    # TTS output target
+    parser.add_argument(
+        "--tts-output",
+        choices=["vban", "media_player"],
+        default="vban",
+        help="Where TTS responses are played (default: vban)",
+    )
+    parser.add_argument(
+        "--tts-media-player", default="", help="media_player entity_id for TTS output",
+    )
+    parser.add_argument(
+        "--tts-http-port",
+        type=int,
+        default=10800,
+        help="Port of the HTTP server serving TTS WAV files to the media_player",
+    )
+    parser.add_argument(
+        "--tts-http-host",
+        default="",
+        help="LAN IP put in TTS URLs (empty = auto-detect)",
     )
 
     # Logging
@@ -135,9 +158,40 @@ async def main() -> None:
             args.tts_vban_port, args.tts_vban_stream_name, volume, batch_packets,
         )
 
+    # Media player TTS output (optional)
+    media_output = None
+    if args.tts_output == "media_player":
+        if not args.tts_media_player.startswith("media_player."):
+            _LOGGER.error(
+                "tts_output is media_player but tts_media_player is not a "
+                "media_player entity_id: '%s'", args.tts_media_player,
+            )
+            sys.exit(1)
+        http_host = args.tts_http_host or detect_local_ip()
+        media_output = MediaPlayerOutput(
+            entity_id=args.tts_media_player,
+            http_host=http_host,
+            http_port=args.tts_http_port,
+        )
+        _LOGGER.info(
+            "  TTS output: media_player %s (HTTP %s:%d)%s",
+            args.tts_media_player, http_host, args.tts_http_port,
+            ", VBAN fallback" if vban_sender else "",
+        )
+
     # Open TTS sender socket
     if vban_sender:
         vban_sender.open()
+
+    if media_output:
+        try:
+            await media_output.start()
+        except OSError as err:
+            _LOGGER.error(
+                "Cannot start TTS HTTP server on port %d: %s",
+                args.tts_http_port, err,
+            )
+            sys.exit(1)
 
     # Build satellite info
     satellite_info = make_satellite_info(name=args.name)
@@ -150,6 +204,7 @@ async def main() -> None:
             satellite_info=satellite_info,
             vban_receiver=vban_receiver,
             vban_sender=vban_sender,
+            media_output=media_output,
         )
 
     # Start Wyoming server
@@ -216,6 +271,9 @@ async def main() -> None:
         # Close VBAN sender (cancels drain task, closes socket)
         if vban_sender:
             await vban_sender.close()
+
+        if media_output:
+            await media_output.stop()
 
         # Unregister Zeroconf service
         try:
