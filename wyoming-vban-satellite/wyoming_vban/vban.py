@@ -293,13 +293,14 @@ class VbanSender:
     receiver is playing them. A background task drains a PCM buffer
     and emits packets in batches spaced at the audio rate.
 
-    Batching (BATCH_PACKETS packets per wake-up) reduces timer jitter
-    impact. Pre-buffering (PREBUFFER_MS of audio before first emit)
-    absorbs arrival jitter from HA.
+    batch_packets (default 1) sets how many packets are sent per wake-up.
+    One packet every 16ms keeps the stream smooth for receivers with a
+    tiny UDP queue (ESP32/lwIP drops packets from bursts). Pre-buffering
+    (PREBUFFER_MS of audio before first emit) absorbs arrival jitter from HA.
     """
 
     SAMPLES_PER_PACKET = 256
-    BATCH_PACKETS = 4  # 4 packets × 16ms = 64ms batch at 16kHz
+    DEFAULT_BATCH_PACKETS = 1  # 1 packet × 16ms at 16kHz
     PREBUFFER_MS = 50  # wait for this much audio before starting to drain
     # Hard cap on pending buffer size. Must be >= longest expected TTS response
     # since HA sends the full TTS as a burst over localhost TCP (fills the
@@ -318,6 +319,7 @@ class VbanSender:
         sample_rate: int = WYOMING_RATE,
         channels: int = WYOMING_CHANNELS,
         volume: float = 1.0,
+        batch_packets: int = DEFAULT_BATCH_PACKETS,
     ):
         self.address = address
         self.port = port
@@ -326,6 +328,7 @@ class VbanSender:
         self.sample_rate = sample_rate
         self.channels = channels
         self.volume = volume
+        self.batch_packets = max(1, batch_packets)
         self._socket: Optional[socket.socket] = None
         self._frame_counter = 0
         self._ratecv_state = None
@@ -477,13 +480,16 @@ class VbanSender:
         """Emit VBAN packets in batches, paced at the audio rate.
 
         1. Wait (event-driven) until enough audio is buffered to start (pre-buffer)
-        2. Emit BATCH_PACKETS packets, then sleep batch_duration
+        2. Emit batch_packets packets every batch_duration
         3. Continue until buffer empties, then go back to step 1
+
+        Batches are never sent back-to-back to catch up after a late
+        wake-up: the schedule restarts from the late batch instead.
         """
         bytes_per_sample = WYOMING_WIDTH * self.channels
         packet_bytes = self.SAMPLES_PER_PACKET * bytes_per_sample
         packet_duration = self.SAMPLES_PER_PACKET / self.sample_rate
-        batch_duration = self.BATCH_PACKETS * packet_duration
+        batch_duration = self.batch_packets * packet_duration
         prebuffer_bytes = int(
             (self.PREBUFFER_MS / 1000) * self.sample_rate * bytes_per_sample
         )
@@ -508,23 +514,30 @@ class VbanSender:
                 if self._socket is None:
                     return
 
-            # Phase 2: drain at real-time rate until buffer runs low
-            next_send = loop.time() + batch_duration
+            # Phase 2: drain at real-time rate until buffer runs low.
+            # next_send is the time the next batch is due.
+            next_send = loop.time()
             while len(self._pending) >= packet_bytes:
-                # Emit a batch of packets
-                for _ in range(self.BATCH_PACKETS):
+                delay = next_send - loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                if self._socket is None:
+                    return
+
+                sent_at = loop.time()
+                for _ in range(self.batch_packets):
                     if not self._send_packet(packet_bytes):
                         break
 
-                # Pace: sleep until next batch time
-                now = loop.time()
-                delay = next_send - now
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                    next_send += batch_duration
-                else:
-                    # Running behind — resync without oversleeping
-                    next_send = now + batch_duration
+                # Small lateness (sleep overshoot) is absorbed by keeping the
+                # schedule. If this batch went out more than half an interval
+                # late, restart the schedule from now rather than catching up:
+                # catching up would emit batches back-to-back, which a small
+                # receiver queue drops. Batches are thus always >= half an
+                # interval apart.
+                if sent_at - next_send > batch_duration / 2:
+                    next_send = sent_at
+                next_send += batch_duration
 
     async def close(self) -> None:
         """Close the send socket and stop the drain task."""

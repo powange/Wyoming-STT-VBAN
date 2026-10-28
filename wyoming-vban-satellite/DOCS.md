@@ -33,6 +33,8 @@ Optionally, TTS responses can be sent back to a VBAN output stream.
 - **tts_vban_address**: Target IP address for TTS output
 - **tts_vban_port**: Target UDP port (default: 6980)
 - **tts_vban_stream_name**: Name of the outgoing VBAN stream
+- **tts_vban_volume**: Volume multiplier for TTS audio, 0.0–2.0 (default: 1.0). Values above 1.0 clip loud samples.
+- **tts_vban_batch_packets**: Number of VBAN packets (256 samples, 16 ms at 16 kHz) sent per wake-up, 1–8 (default: 1). 1 sends one packet every 16 ms, the smoothest stream for receivers with a small UDP queue (e.g. ESP32). Higher values send bursts, which are less sensitive to timer jitter on a busy host but may overflow small receivers.
 
 ### Other
 

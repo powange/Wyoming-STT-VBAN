@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.7.3
+
+- **Fix**: smooth TTS VBAN output — send one packet every 16 ms instead of bursts of 4 every 64 ms
+- ESP32 receivers (tiny lwIP UDP queue) dropped ~17% of packets from the 4-packet bursts.
+- Pacing no longer sends batches back-to-back after a late wake-up: if a batch goes out more than half an interval late, the schedule restarts from that batch instead of catching up.
+- New per-satellite option `tts_vban_batch_packets` (1–8, default 1) to restore larger batches if needed.
+
 ## 2.7.2
 
 - **Fix**: restart the wake→TTS pipeline after a server error

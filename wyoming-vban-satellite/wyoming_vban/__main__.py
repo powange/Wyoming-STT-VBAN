@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Volume multiplier for TTS audio (0.0-2.0, default 1.0)",
     )
+    parser.add_argument(
+        "--tts-vban-batch-packets",
+        type=int,
+        default=1,
+        help="VBAN packets (256 samples each) sent per wake-up (1-8, default 1)",
+    )
 
     # Logging
     parser.add_argument("--debug", action="store_true", default=False)
@@ -108,17 +114,25 @@ async def main() -> None:
                 args.tts_vban_volume, volume,
             )
 
+        batch_packets = max(1, min(8, args.tts_vban_batch_packets))
+        if batch_packets != args.tts_vban_batch_packets:
+            _LOGGER.warning(
+                "tts_vban_batch_packets %d clamped to %d (valid range 1-8)",
+                args.tts_vban_batch_packets, batch_packets,
+            )
+
         vban_sender = VbanSender(
             address=args.tts_vban_address,
             port=args.tts_vban_port,
             mode=args.tts_vban_mode,
             stream_name=args.tts_vban_stream_name,
             volume=volume,
+            batch_packets=batch_packets,
         )
         _LOGGER.info(
-            "  TTS VBAN: mode=%s address=%s:%d stream=%s volume=%.2f",
+            "  TTS VBAN: mode=%s address=%s:%d stream=%s volume=%.2f batch=%d",
             args.tts_vban_mode, args.tts_vban_address,
-            args.tts_vban_port, args.tts_vban_stream_name, volume,
+            args.tts_vban_port, args.tts_vban_stream_name, volume, batch_packets,
         )
 
     # Open TTS sender socket
