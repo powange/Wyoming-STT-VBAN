@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.9.0
+
+- **Fix**: satellites sharing a `vban_receive_port` no longer steal each other's audio
+- Each satellite used to run in its own process with its own UDP socket on the port (SO_REUSEADDR/SO_REUSEPORT). Linux spreads unicast datagrams across such sockets instead of duplicating them, so a satellite received part of another satellite's stream and dropped it (seen in production: the AtomBureau stream reaching the Salon satellite).
+- All satellites now run in a single process with one VBAN socket per port, shared by the satellites on that port. Packets are routed by stream name: exact `vban_receive_stream_name` match first, otherwise to the satellite(s) of that port with an empty stream name (catch-all), otherwise ignored.
+- Config is unchanged. New startup checks: satellites sharing a port must use the same receive mode / multicast group; warning when several satellites share a port without stream names; duplicate TTS HTTP ports are rejected.
+- Log lines are prefixed with the satellite name. If one satellite fails (e.g. port in use), the whole app stops, as before.
+- `run.sh` now just starts the process, which reads `/data/options.json` directly (defaults for missing/null options are applied in Python).
+- Added tests (`tests/`, run with `python3 -m unittest discover tests`): two streams on one port, catch-all routing, config defaults and validation.
+
 ## 2.8.0
 
 - **New**: per-satellite TTS output to a Home Assistant `media_player` (e.g. Google Nest via Cast), in addition to VBAN

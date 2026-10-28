@@ -1,121 +1,13 @@
 #!/usr/bin/with-contenv bashio
 # shellcheck shell=bash
 
-DEBUG_LOGGING=$(bashio::config 'debug_logging')
+# All satellites run in a single process, which reads /data/options.json
+# directly: satellites sharing a VBAN receive port must share one UDP
+# socket (separate sockets on one port split unicast datagrams between
+# them instead of duplicating them). Defaults for missing/null options and
+# config validation are handled in Python (wyoming_vban/config.py).
 
-# Count satellites
 SATELLITE_COUNT=$(bashio::config 'satellites | length')
 bashio::log.info "Configured ${SATELLITE_COUNT} VBAN satellite(s)"
 
-# Validate: Wyoming ports must be unique across satellites
-USED_PORTS=""
-for (( i=0; i < SATELLITE_COUNT; i++ )); do
-    PORT=$(bashio::config "satellites[${i}].wyoming_port")
-    SAT=$(bashio::config "satellites[${i}].name")
-    if echo "${USED_PORTS}" | grep -qw "${PORT}"; then
-        bashio::log.fatal "Satellite '${SAT}' uses Wyoming port ${PORT} which is already taken by another satellite. Each satellite must have a unique wyoming_port."
-        exit 1
-    fi
-    USED_PORTS="${USED_PORTS} ${PORT}"
-done
-
-# bashio::config prints "null" for an option missing from the config
-# (optional schema entries, or older configs). Treat that like empty so
-# the Python default applies instead of passing the literal "null".
-has_value() {
-    [ -n "$1" ] && [ "$1" != "null" ]
-}
-
-PIDS=()
-
-for (( i=0; i < SATELLITE_COUNT; i++ )); do
-    SAT_NAME=$(bashio::config "satellites[${i}].name")
-    WYOMING_PORT=$(bashio::config "satellites[${i}].wyoming_port")
-    VBAN_RECEIVE_PORT=$(bashio::config "satellites[${i}].vban_receive_port")
-    VBAN_RECEIVE_MODE=$(bashio::config "satellites[${i}].vban_receive_mode")
-    VBAN_RECEIVE_MULTICAST_GROUP=$(bashio::config "satellites[${i}].vban_receive_multicast_group")
-    VBAN_RECEIVE_STREAM_NAME=$(bashio::config "satellites[${i}].vban_receive_stream_name")
-    TTS_VBAN_ENABLED=$(bashio::config "satellites[${i}].tts_vban_enabled")
-    TTS_VBAN_MODE=$(bashio::config "satellites[${i}].tts_vban_mode")
-    TTS_VBAN_ADDRESS=$(bashio::config "satellites[${i}].tts_vban_address")
-    TTS_VBAN_PORT=$(bashio::config "satellites[${i}].tts_vban_port")
-    TTS_VBAN_STREAM_NAME=$(bashio::config "satellites[${i}].tts_vban_stream_name")
-    TTS_VBAN_VOLUME=$(bashio::config "satellites[${i}].tts_vban_volume")
-    TTS_VBAN_BATCH_PACKETS=$(bashio::config "satellites[${i}].tts_vban_batch_packets")
-    TTS_OUTPUT=$(bashio::config "satellites[${i}].tts_output")
-    TTS_MEDIA_PLAYER=$(bashio::config "satellites[${i}].tts_media_player")
-    TTS_HTTP_PORT=$(bashio::config "satellites[${i}].tts_http_port")
-    TTS_HTTP_HOST=$(bashio::config "satellites[${i}].tts_http_host")
-
-    ARGS=(
-        --name "${SAT_NAME}"
-        --wyoming-port "${WYOMING_PORT}"
-        --vban-receive-port "${VBAN_RECEIVE_PORT}"
-        --vban-receive-mode "${VBAN_RECEIVE_MODE}"
-    )
-
-    if has_value "${VBAN_RECEIVE_MULTICAST_GROUP}"; then
-        ARGS+=(--vban-receive-multicast-group "${VBAN_RECEIVE_MULTICAST_GROUP}")
-    fi
-
-    if has_value "${VBAN_RECEIVE_STREAM_NAME}"; then
-        ARGS+=(--vban-receive-stream-name "${VBAN_RECEIVE_STREAM_NAME}")
-    fi
-
-    if [ "${TTS_VBAN_ENABLED}" = "true" ]; then
-        ARGS+=(
-            --tts-vban-enabled
-            --tts-vban-mode "${TTS_VBAN_MODE}"
-            --tts-vban-port "${TTS_VBAN_PORT}"
-            --tts-vban-stream-name "${TTS_VBAN_STREAM_NAME}"
-        )
-        if has_value "${TTS_VBAN_ADDRESS}"; then
-            ARGS+=(--tts-vban-address "${TTS_VBAN_ADDRESS}")
-        fi
-        if has_value "${TTS_VBAN_VOLUME}"; then
-            ARGS+=(--tts-vban-volume "${TTS_VBAN_VOLUME}")
-        fi
-        if has_value "${TTS_VBAN_BATCH_PACKETS}"; then
-            ARGS+=(--tts-vban-batch-packets "${TTS_VBAN_BATCH_PACKETS}")
-        fi
-    fi
-
-    if [ "${TTS_OUTPUT}" = "media_player" ]; then
-        # Default HTTP port: 10800 + satellite index (unique per satellite)
-        if ! has_value "${TTS_HTTP_PORT}"; then
-            TTS_HTTP_PORT=$((10800 + i))
-        fi
-        ARGS+=(
-            --tts-output media_player
-            --tts-http-port "${TTS_HTTP_PORT}"
-        )
-        if has_value "${TTS_MEDIA_PLAYER}"; then
-            ARGS+=(--tts-media-player "${TTS_MEDIA_PLAYER}")
-        fi
-        if has_value "${TTS_HTTP_HOST}"; then
-            ARGS+=(--tts-http-host "${TTS_HTTP_HOST}")
-        fi
-    fi
-
-    if [ "${DEBUG_LOGGING}" = "true" ]; then
-        ARGS+=(--debug)
-    fi
-
-    bashio::log.info "Starting satellite '${SAT_NAME}' on Wyoming port ${WYOMING_PORT}..."
-    python3 -m wyoming_vban "${ARGS[@]}" &
-    PIDS+=($!)
-done
-
-bashio::log.info "All ${SATELLITE_COUNT} satellite(s) started"
-
-# Wait for any child to exit — if one crashes, stop all
-wait -n "${PIDS[@]}" 2>/dev/null
-EXIT_CODE=$?
-
-bashio::log.warning "A satellite process exited (code=${EXIT_CODE}), stopping all..."
-for pid in "${PIDS[@]}"; do
-    kill "${pid}" 2>/dev/null
-done
-wait
-
-exit "${EXIT_CODE}"
+exec python3 -m wyoming_vban --options /data/options.json

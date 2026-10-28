@@ -24,7 +24,26 @@ Optionally, TTS responses can be sent back to a VBAN output stream.
 - **vban_receive_port**: UDP port to listen on (default: 6980)
 - **vban_receive_mode**: `unicast` or `multicast`
 - **vban_receive_multicast_group**: Multicast group address (e.g. `239.0.0.1`), required when mode is `multicast`
-- **vban_receive_stream_name**: Filter by VBAN stream name. Leave empty to accept any stream.
+- **vban_receive_stream_name**: VBAN stream name routed to this satellite. Leave empty to accept any stream not claimed by another satellite on the same port.
+
+#### Several satellites on the same VBAN port
+
+Several satellites can share one `vban_receive_port` (e.g. two ESP32
+microphones both sending to port 6980). The app opens a single UDP socket
+per port and routes each packet by its stream name:
+
+- a packet goes to the satellite whose `vban_receive_stream_name` matches it exactly;
+- if no satellite claims that stream name, it goes to the satellite(s) on that port with an empty `vban_receive_stream_name`;
+- otherwise it is ignored (logged once per stream).
+
+Give each microphone a distinct VBAN stream name and set it on its
+satellite. Satellites sharing a port must use the same
+`vban_receive_mode` (and multicast group). If several satellites on a
+shared port have no stream name, each of them receives every unclaimed
+stream (a warning is logged at startup).
+
+Example: `Bureau` with `vban_receive_stream_name: AtomBureau` and
+`Salon` with `vban_receive_stream_name: AtomSalon`, both on port 6980.
 
 ### TTS VBAN Output (optional)
 

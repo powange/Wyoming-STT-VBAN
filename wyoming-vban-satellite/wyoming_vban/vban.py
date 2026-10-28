@@ -160,11 +160,17 @@ def resample_to_wyoming(
 
 
 class VbanReceiver:
-    """Async VBAN packet receiver with pub/sub model.
+    """Async VBAN packet receiver with pub/sub model, one per UDP port.
 
-    Designed to run persistently at application startup. Multiple
-    subscribers (handlers) can subscribe/unsubscribe to audio events
-    without affecting the underlying UDP socket.
+    Designed to run persistently at application startup. All satellites
+    receiving on the same port share this receiver: with several sockets
+    bound to one port (SO_REUSEADDR/SO_REUSEPORT), Linux spreads unicast
+    datagrams across them instead of duplicating them, so a satellite
+    would get (and drop) another satellite's stream.
+
+    Each subscriber gives the stream name it wants. A packet goes to the
+    subscribers of its exact stream name; if there are none, it goes to
+    the catch-all subscribers (empty stream name).
     """
 
     def __init__(
@@ -172,28 +178,53 @@ class VbanReceiver:
         port: int = DEFAULT_VBAN_PORT,
         mode: str = "unicast",
         multicast_group: str = "",
-        stream_name_filter: str = "",
     ):
         self.port = port
         self.mode = mode
         self.multicast_group = multicast_group
-        self.stream_name_filter = stream_name_filter
         self._socket: Optional[socket.socket] = None
         self._running = False
-        self._subscribers: list[Callable[[VbanPacket], None]] = []
+        # stream name ("" = catch-all) -> callbacks
+        self._subscribers: dict[str, list[Callable[[VbanPacket], None]]] = {}
         self._last_subscriber_error_log = 0.0
+        self._unrouted_logged: set[str] = set()  # log each unrouted stream once
 
-    def subscribe(self, callback: Callable[[VbanPacket], None]) -> None:
-        """Register a callback to receive VBAN packets."""
-        if callback not in self._subscribers:
-            self._subscribers.append(callback)
-            _LOGGER.debug("Subscriber added (total: %d)", len(self._subscribers))
+    def subscribe(
+        self, callback: Callable[[VbanPacket], None], stream_name: str = ""
+    ) -> None:
+        """Register a callback for one stream name ("" = any unclaimed stream)."""
+        callbacks = self._subscribers.setdefault(stream_name, [])
+        if callback not in callbacks:
+            callbacks.append(callback)
+            _LOGGER.debug(
+                "Port %d: subscriber added for stream '%s'",
+                self.port, stream_name or "<any>",
+            )
 
     def unsubscribe(self, callback: Callable[[VbanPacket], None]) -> None:
-        """Remove a callback."""
-        if callback in self._subscribers:
-            self._subscribers.remove(callback)
-            _LOGGER.debug("Subscriber removed (total: %d)", len(self._subscribers))
+        """Remove a callback (whatever stream it subscribed to)."""
+        for stream_name, callbacks in list(self._subscribers.items()):
+            if callback in callbacks:
+                callbacks.remove(callback)
+                if not callbacks:
+                    del self._subscribers[stream_name]
+                _LOGGER.debug(
+                    "Port %d: subscriber removed for stream '%s'",
+                    self.port, stream_name or "<any>",
+                )
+
+    def _targets(self, stream_name: str) -> list[Callable[[VbanPacket], None]]:
+        """Subscribers that should receive a packet of this stream."""
+        callbacks = self._subscribers.get(stream_name) or self._subscribers.get("")
+        if not callbacks:
+            if self._subscribers and stream_name not in self._unrouted_logged:
+                _LOGGER.info(
+                    "Port %d: ignoring VBAN stream '%s' (no satellite for it)",
+                    self.port, stream_name,
+                )
+                self._unrouted_logged.add(stream_name)
+            return []
+        return list(callbacks)
 
     def _create_socket(self) -> socket.socket:
         """Create and configure the UDP socket."""
@@ -232,7 +263,7 @@ class VbanReceiver:
         self._running = True
 
         loop = asyncio.get_running_loop()
-        _LOGGER.info("VBAN receiver started (mode=%s)", self.mode)
+        _LOGGER.info("VBAN receiver started (port=%d mode=%s)", self.port, self.mode)
 
         try:
             while self._running:
@@ -247,12 +278,7 @@ class VbanReceiver:
                 if packet is None:
                     continue
 
-                # Filter by stream name if configured
-                if self.stream_name_filter and packet.stream_name != self.stream_name_filter:
-                    continue
-
-                # Broadcast to all subscribers
-                for callback in list(self._subscribers):
+                for callback in self._targets(packet.stream_name):
                     try:
                         callback(packet)
                     except Exception as err:

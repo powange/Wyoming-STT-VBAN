@@ -54,10 +54,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
         vban_receiver: VbanReceiver,
         vban_sender: Optional[VbanSender],
         media_output: Optional[MediaPlayerOutput] = None,
+        vban_stream_name: str = "",
     ):
         super().__init__(reader, writer)
         self._info = satellite_info
         self._vban_receiver = vban_receiver
+        # VBAN stream routed to this satellite ("" = any unclaimed stream)
+        self._vban_stream_name = vban_stream_name
         self._vban_sender = vban_sender
         # When set, TTS goes to a HA media_player; VBAN is only a fallback.
         self._media_output = media_output
@@ -257,7 +260,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
     def _subscribe_to_vban(self) -> None:
         """Subscribe this handler to VBAN audio packets."""
         if not self._subscribed:
-            self._vban_receiver.subscribe(self._on_vban_audio)
+            self._vban_receiver.subscribe(self._on_vban_audio, self._vban_stream_name)
             self._subscribed = True
 
     async def _send_pipeline_and_stream(self) -> None:
