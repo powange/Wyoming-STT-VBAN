@@ -19,6 +19,13 @@ for (( i=0; i < SATELLITE_COUNT; i++ )); do
     USED_PORTS="${USED_PORTS} ${PORT}"
 done
 
+# bashio::config prints "null" for an option missing from the config
+# (optional schema entries, or older configs). Treat that like empty so
+# the Python default applies instead of passing the literal "null".
+has_value() {
+    [ -n "$1" ] && [ "$1" != "null" ]
+}
+
 PIDS=()
 
 for (( i=0; i < SATELLITE_COUNT; i++ )); do
@@ -43,11 +50,11 @@ for (( i=0; i < SATELLITE_COUNT; i++ )); do
         --vban-receive-mode "${VBAN_RECEIVE_MODE}"
     )
 
-    if [ -n "${VBAN_RECEIVE_MULTICAST_GROUP}" ]; then
+    if has_value "${VBAN_RECEIVE_MULTICAST_GROUP}"; then
         ARGS+=(--vban-receive-multicast-group "${VBAN_RECEIVE_MULTICAST_GROUP}")
     fi
 
-    if [ -n "${VBAN_RECEIVE_STREAM_NAME}" ]; then
+    if has_value "${VBAN_RECEIVE_STREAM_NAME}"; then
         ARGS+=(--vban-receive-stream-name "${VBAN_RECEIVE_STREAM_NAME}")
     fi
 
@@ -58,13 +65,13 @@ for (( i=0; i < SATELLITE_COUNT; i++ )); do
             --tts-vban-port "${TTS_VBAN_PORT}"
             --tts-vban-stream-name "${TTS_VBAN_STREAM_NAME}"
         )
-        if [ -n "${TTS_VBAN_ADDRESS}" ]; then
+        if has_value "${TTS_VBAN_ADDRESS}"; then
             ARGS+=(--tts-vban-address "${TTS_VBAN_ADDRESS}")
         fi
-        if [ -n "${TTS_VBAN_VOLUME}" ]; then
+        if has_value "${TTS_VBAN_VOLUME}"; then
             ARGS+=(--tts-vban-volume "${TTS_VBAN_VOLUME}")
         fi
-        if [ -n "${TTS_VBAN_BATCH_PACKETS}" ]; then
+        if has_value "${TTS_VBAN_BATCH_PACKETS}"; then
             ARGS+=(--tts-vban-batch-packets "${TTS_VBAN_BATCH_PACKETS}")
         fi
     fi

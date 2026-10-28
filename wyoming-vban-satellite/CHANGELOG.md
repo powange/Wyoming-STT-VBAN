@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.4
+
+- **Fix**: app failed to start when `tts_vban_batch_packets` was missing from the config (e.g. configs created before 2.7.3)
+- bashio returns the string `null` for a missing optional option, and `run.sh` passed `--tts-vban-batch-packets null`, which argparse rejected; both satellites stopped and the app went into error.
+- `run.sh` now skips any optional option whose value is empty or `null` (`tts_vban_batch_packets`, `tts_vban_volume`, `tts_vban_address`, `vban_receive_multicast_group`, `vban_receive_stream_name`), so the Python default applies.
+
 ## 2.7.3
 
 - **Fix**: smooth TTS VBAN output — send one packet every 16 ms instead of bursts of 4 every 64 ms
