@@ -15,7 +15,7 @@ from wyoming.zeroconf import HomeAssistantZeroconf
 from .config import ConfigError, SatelliteConfig, load_options, validate
 from .const import DEFAULT_VBAN_PORT
 from .media_player import MediaPlayerOutput, detect_local_ip
-from .satellite import VbanSatelliteHandler, make_satellite_info
+from .satellite import MicMute, VbanSatelliteHandler, make_satellite_info
 from .vban import VbanReceiver, VbanSender
 
 _LOGGER = logging.getLogger(__name__)
@@ -109,6 +109,13 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="LAN IP put in TTS URLs (empty = auto-detect)",
     )
+    parser.add_argument(
+        "--mic-mute-tail-ms",
+        type=int,
+        default=700,
+        help="media_player output: keep the mic muted this long after the "
+        "response has played (default 700, 0 = no tail)",
+    )
 
     # Logging
     parser.add_argument("--debug", action="store_true", default=False)
@@ -155,6 +162,7 @@ async def run_satellite(cfg: SatelliteConfig, vban_receiver: VbanReceiver) -> No
 
     # Media player TTS output (optional)
     media_output: Optional[MediaPlayerOutput] = None
+    mic_mute: Optional[MicMute] = None
     if cfg.tts_output == "media_player":
         http_host = cfg.tts_http_host or detect_local_ip()
         media_output = MediaPlayerOutput(
@@ -162,10 +170,16 @@ async def run_satellite(cfg: SatelliteConfig, vban_receiver: VbanReceiver) -> No
             http_host=http_host,
             http_port=cfg.tts_http_port,
         )
+        # Shared by all connections of this satellite
+        mic_mute = MicMute(
+            tail_s=cfg.mic_mute_tail_ms / 1000,
+            max_muted_s=VbanSatelliteHandler.MAX_TTS_BUFFER_S,
+        )
         _LOGGER.info(
-            "  TTS output: media_player %s (HTTP %s:%d)%s",
+            "  TTS output: media_player %s (HTTP %s:%d)%s, mic muted during "
+            "playback + %d ms",
             cfg.tts_media_player, http_host, cfg.tts_http_port,
-            ", VBAN fallback" if vban_sender else "",
+            ", VBAN fallback" if vban_sender else "", cfg.mic_mute_tail_ms,
         )
 
     satellite_info = make_satellite_info(name=cfg.name)
@@ -180,6 +194,7 @@ async def run_satellite(cfg: SatelliteConfig, vban_receiver: VbanReceiver) -> No
             vban_sender=vban_sender,
             media_output=media_output,
             vban_stream_name=cfg.vban_receive_stream_name,
+            mic_mute=mic_mute,
         )
 
     server: Optional[AsyncServer] = None

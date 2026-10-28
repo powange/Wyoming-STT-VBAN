@@ -37,6 +37,7 @@ class SatelliteConfig:
     tts_media_player: str = ""
     tts_http_port: int = DEFAULT_TTS_HTTP_PORT
     tts_http_host: str = ""
+    mic_mute_tail_ms: int = 700
 
     @classmethod
     def from_options(cls, options: dict[str, Any], index: int) -> "SatelliteConfig":
@@ -67,6 +68,14 @@ class SatelliteConfig:
                 self.name, self.tts_vban_batch_packets, batch,
             )
             self.tts_vban_batch_packets = batch
+
+        tail = max(0, min(5000, self.mic_mute_tail_ms))
+        if tail != self.mic_mute_tail_ms:
+            _LOGGER.warning(
+                "[%s] mic_mute_tail_ms %d clamped to %d (valid range 0-5000)",
+                self.name, self.mic_mute_tail_ms, tail,
+            )
+            self.mic_mute_tail_ms = tail
 
 
 def load_options(path: str) -> tuple[list[SatelliteConfig], bool]:

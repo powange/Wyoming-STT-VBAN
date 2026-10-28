@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.9.1
+
+- **Fix**: media_player output — mute the microphone while the response plays, so the satellite no longer answers its own voice
+- HA restarts wake word detection as soon as the pipeline run ends, before the response has played on the media_player. The speaker's voice reached the microphone, openWakeWord detected a false wake word and Whisper transcribed the end of the response (e.g. "Quelque temps de montrer").
+- From `audio-start` (before `play_media`) until the response has played (duration + 1.5 s for Cast) plus `mic_mute_tail_ms`, the satellite sends silent audio chunks instead of the microphone (the stream keeps flowing so HA's wake word stage doesn't time out). Unmuted at once if `play_media` fails, if the response is empty, or if HA disconnects mid-response; safety unmute after 300 s.
+- Mute state is shared by all connections of a satellite, so a reconnect from HA during playback keeps the mic muted.
+- New per-satellite option `mic_mute_tail_ms` (0–5000, default 700).
+- VBAN output is unchanged (the receiver is half-duplex).
+
 ## 2.9.0
 
 - **Fix**: satellites sharing a `vban_receive_port` no longer steal each other's audio

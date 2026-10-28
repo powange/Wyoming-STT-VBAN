@@ -15,6 +15,9 @@ configuration:
       tts_http_host:
         name: Hote HTTP TTS
         description: IP LAN de cet hote utilisee dans l'URL TTS (vide = detection automatique)
+      mic_mute_tail_ms:
+        name: Marge de coupure micro (ms)
+        description: Sortie media_player - garder le micro coupe ce temps apres la lecture de la reponse (defaut 700, 0 = aucune)
   debug_logging:
     name: Journalisation de debogage
     description: Activer la journalisation detaillee

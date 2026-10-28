@@ -4,6 +4,7 @@ import asyncio
 import audioop
 import logging
 import math
+import time
 from typing import Optional
 
 from wyoming.audio import AudioChunk, AudioFormat, AudioStart, AudioStop
@@ -30,6 +31,56 @@ _LOGGER = logging.getLogger(__name__)
 _PLAYBACK_TASKS: "set[asyncio.Task]" = set()
 
 
+class MicMute:
+    """Mutes the microphone while a response plays on the media_player.
+
+    HA restarts wake word detection as soon as the pipeline run ends, which
+    is before the response has played on the media_player: the speaker's
+    voice would reach the microphone and trigger false wake-ups. (VBAN
+    output doesn't need this: the receiver is half-duplex.)
+
+    Shared by all connections of one satellite, so a reconnect from HA
+    while a response plays keeps the microphone muted.
+    """
+
+    def __init__(self, tail_s: float, max_muted_s: float):
+        self.tail_s = tail_s  # extra mute after playback (echo, Cast end)
+        self._max_muted_s = max_muted_s
+        self._muted = False  # a response is being received or played
+        self._muted_since = 0.0
+        self._muted_until = 0.0  # time.monotonic() deadline after playback
+        self._generation = 0  # increments with each response
+
+    def start_response(self) -> int:
+        """Mute when HA starts sending a response; returns its id."""
+        self._generation += 1
+        self._muted = True
+        self._muted_since = time.monotonic()
+        return self._generation
+
+    def playing(self, seconds: float) -> None:
+        """Playback started: stay muted for seconds plus the tail."""
+        self._muted_until = time.monotonic() + seconds + self.tail_s
+
+    def end_response(self, generation: int) -> None:
+        """Response done (played, failed or dropped).
+
+        Ignored if a newer response has started since: it owns the mute.
+        """
+        if generation == self._generation:
+            self._muted = False
+
+    def is_muted(self) -> bool:
+        now = time.monotonic()
+        if self._muted and now - self._muted_since > self._max_muted_s:
+            # Safety net: never stay muted if a response never completes
+            _LOGGER.warning(
+                "Microphone muted for over %ds — unmuting", self._max_muted_s,
+            )
+            self._muted = False
+        return self._muted or now < self._muted_until
+
+
 class VbanSatelliteHandler(AsyncEventHandler):
     """Handles a single Wyoming client connection (Home Assistant server).
 
@@ -45,6 +96,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
     MAX_TTS_BUFFER_S = 300  # media_player mode: longest response buffered
     CAST_START_DELAY_S = 1.5  # time for Cast to fetch the WAV and start playing
+    MIC_UNMUTE_TAIL_S = 0.7  # default mute kept after playback (mic_mute_tail_ms)
 
     def __init__(
         self,
@@ -55,6 +107,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         vban_sender: Optional[VbanSender],
         media_output: Optional[MediaPlayerOutput] = None,
         vban_stream_name: str = "",
+        mic_mute: Optional[MicMute] = None,
     ):
         super().__init__(reader, writer)
         self._info = satellite_info
@@ -68,6 +121,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._tts_format = (WYOMING_RATE, WYOMING_WIDTH, WYOMING_CHANNELS)
         self._tts_overflow_logged = False
         self._playback_task: Optional[asyncio.Task] = None
+        # media_player mode: mic muted while a response plays (shared state)
+        self._mic_mute = mic_mute
+        self._tts_generation = 0  # MicMute id of the response being received
+        self._tts_receiving = False  # between AudioStart and AudioStop
         # Max ~500ms of buffering: at 16kHz VBAN packets (~16ms each), 32 slots
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=32)
         self._streaming = False
@@ -139,6 +196,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 self._tts_format = (start.rate, start.width, start.channels)
                 self._tts_pcm = bytearray()
                 self._tts_overflow_logged = False
+                self._tts_receiving = True
+                # Mute the mic right away, before play_media
+                if self._mic_mute:
+                    self._tts_generation = self._mic_mute.start_response()
                 return True
             # Reset resampler state AND drop any leftover audio from a
             # previous stream so the new TTS starts cleanly.
@@ -168,7 +229,12 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if AudioStop.is_type(event.type):
             _LOGGER.debug("TTS audio finished")
-            if self._media_output and self._tts_pcm:
+            self._tts_receiving = False
+            if self._media_output and not self._tts_pcm:
+                # Nothing to play: unmute now
+                if self._mic_mute:
+                    self._mic_mute.end_response(self._tts_generation)
+            elif self._media_output:
                 pcm, self._tts_pcm = bytes(self._tts_pcm), bytearray()
                 # A newer response replaces one still waiting to report played
                 if self._playback_task and not self._playback_task.done():
@@ -176,7 +242,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 # Run in the background so the event reader isn't blocked
                 # while play_media runs and the response plays.
                 self._playback_task = asyncio.create_task(
-                    self._play_on_media_player(pcm, *self._tts_format)
+                    self._play_on_media_player(
+                        pcm, *self._tts_format, self._tts_generation,
+                    )
                 )
                 _PLAYBACK_TASKS.add(self._playback_task)
                 self._playback_task.add_done_callback(_PLAYBACK_TASKS.discard)
@@ -216,6 +284,21 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._tts_pcm.extend(audio)
 
     async def _play_on_media_player(
+        self, pcm: bytes, rate: int, width: int, channels: int, generation: int,
+    ) -> None:
+        """Play the response on the media_player, keeping the mic muted.
+
+        The mic stays muted until the response has played (plus the tail);
+        it is unmuted on failure or cancellation unless a newer response
+        has started.
+        """
+        try:
+            await self._play_response(pcm, rate, width, channels)
+        finally:
+            if self._mic_mute:
+                self._mic_mute.end_response(generation)
+
+    async def _play_response(
         self, pcm: bytes, rate: int, width: int, channels: int
     ) -> None:
         """Publish the response as a WAV, play it, then report played to HA.
@@ -244,6 +327,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
             except (audioop.error, ValueError) as err:
                 _LOGGER.warning("Failed to send TTS audio to VBAN: %s", err)
             return
+
+        if self._mic_mute:
+            self._mic_mute.playing(duration + self.CAST_START_DELAY_S)
 
         # Tell HA the response finished playing, like a satellite with its
         # own speaker would (entity goes back to idle, announcements stop
@@ -357,6 +443,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # Target: 1024 samples = 2048 bytes at 16-bit mono (64ms at 16kHz)
         target_bytes = 1024 * WYOMING_WIDTH * WYOMING_CHANNELS
         audio_buffer = bytearray()
+        mic_muted = False
 
         try:
             while self._streaming and self._is_running:
@@ -411,6 +498,20 @@ class VbanSatelliteHandler(AsyncEventHandler):
                         )
                         peak_db = -100.0
 
+                    # While a response plays on the media_player, send silence
+                    # instead of the mic. Keep sending chunks: HA's wake word
+                    # stage would otherwise starve and time out.
+                    if self._mic_mute:
+                        muted = self._mic_mute.is_muted()
+                        if muted != mic_muted:
+                            _LOGGER.debug(
+                                "mic muted (TTS on media_player)" if muted
+                                else "mic unmuted"
+                            )
+                            mic_muted = muted
+                        if muted:
+                            send_pcm = bytes(len(send_pcm))
+
                     chunk = AudioChunk(
                         rate=WYOMING_RATE,
                         width=WYOMING_WIDTH,
@@ -464,6 +565,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
         """Called when the client disconnects."""
         _LOGGER.info("Client disconnected")
         self._server_ready = False
+        # A response cut off mid-transfer will never play: unmute
+        if self._tts_receiving and self._mic_mute:
+            self._mic_mute.end_response(self._tts_generation)
+        self._tts_receiving = False
         if self._restart_task and not self._restart_task.done():
             self._restart_task.cancel()
             try:
