@@ -379,6 +379,17 @@ class VbanSender:
         """
         self._pending.clear()
 
+    def pending_seconds(self) -> float:
+        """Duration of the audio still waiting to be sent."""
+        return len(self._pending) / (self.sample_rate * WYOMING_WIDTH * self.channels)
+
+    async def wait_sent(self, max_wait: float = 300.0) -> None:
+        """Return once the buffered audio has been sent (or max_wait)."""
+        packet_seconds = self.SAMPLES_PER_PACKET / self.sample_rate
+        deadline = time.monotonic() + max_wait
+        while self.pending_seconds() >= packet_seconds and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+
     def open(self) -> None:
         """Create the send socket and start the drain task."""
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)

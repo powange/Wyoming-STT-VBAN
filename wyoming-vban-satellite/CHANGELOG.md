@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.11.0
+
+- **New**: follow-up without wake word — when a response is a question (text ending with `?`), the satellite listens for the answer right away, with a short beep (150 ms, 880 Hz) on its output
+- HA computes `continue_conversation` but does not pass it to Wyoming satellites, and `restart_on_end` always restarts at the wake word stage. The satellite reads the response text from the `synthesize` event instead.
+- A follow-up run can't be started while HA's auto-restarted wake run is active: sending `audio-stop` ends that run *without* an error, so HA restarts it again, and starting a run while another is active cancels the old one, whose run-end then makes HA reject the new run's audio. So with follow-ups enabled, the satellite drives the runs itself (`restart_on_end=False`): once the response has played (media_player end of playback, or VBAN sent + 0.3 s), it starts a wake run, or an ASR run after a question. Errors start a new wake run after 0.5 s.
+- No speech within `followup_timeout_s` (default 8 s): the satellite sends `audio-stop` and goes back to the wake word. At most 3 follow-ups in a row.
+- Announcements (TTS audio without a transcript) don't end a run. A run that ends with no spoken response nor error (empty response) is detected after 60 s.
+- Wake word detection now resumes only once the response has played (previously HA restarted it as soon as the run ended); mic audio is no longer sent between runs.
+- New per-satellite options `followup_enabled` (default on — off keeps the previous behavior), `followup_beep` (default on), `followup_timeout_s` (3–30, default 8).
+
 ## 2.10.0
 
 - **Fix**: media_player output — unmute the microphone when the speaker has actually finished playing, instead of an estimate 1.5–2 s too long

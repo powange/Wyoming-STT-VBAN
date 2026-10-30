@@ -112,6 +112,34 @@ Nest Mini:
   tts_media_player: media_player.nestmini7039
 ```
 
+### Follow-up without wake word
+
+When a response is a question (its text ends with `?`, e.g. "Which light
+do you want to turn off?"), the satellite listens for the answer right
+away, without the wake word. After any other response, the wake word is
+needed as usual.
+
+- **followup_enabled**: Enable follow-ups (default: `true`)
+- **followup_beep**: Play a short beep (150 ms, 880 Hz) on the satellite's output (VBAN or media player) when it starts listening for the answer (default: `true`)
+- **followup_timeout_s**: If no speech is detected within this time, go back to wake word listening, 3–30 s (default: 8)
+
+At most 3 follow-ups in a row; then the wake word is required again.
+
+How it works: Home Assistant does not tell Wyoming satellites to continue
+the conversation, and its automatic restart (`restart_on_end`) always
+restarts at the wake word stage. With follow-ups enabled, the satellite
+starts each pipeline run itself: once the response has played, it asks for
+a run starting at the wake word stage, or at the speech-to-text stage after
+a question (the conversation keeps its context, so the answer is
+understood). In the Home Assistant debug view, a follow-up run starts at
+`stt-start`, without `wake_word-start`. With follow-ups disabled, the
+satellite behaves as before (Home Assistant restarts wake word detection
+itself).
+
+Wake word detection now resumes only once the response has played. If a
+run ends without a spoken response nor an error (empty response), the
+satellite goes back to wake word listening after 60 s.
+
 ### Other
 
 - **satellite_name**: Name shown in Home Assistant

@@ -38,6 +38,9 @@ class SatelliteConfig:
     tts_http_port: int = DEFAULT_TTS_HTTP_PORT
     tts_http_host: str = ""
     mic_mute_tail_ms: int = 250
+    followup_enabled: bool = True
+    followup_beep: bool = True
+    followup_timeout_s: int = 8
 
     @classmethod
     def from_options(cls, options: dict[str, Any], index: int) -> "SatelliteConfig":
@@ -76,6 +79,14 @@ class SatelliteConfig:
                 self.name, self.mic_mute_tail_ms, tail,
             )
             self.mic_mute_tail_ms = tail
+
+        timeout = max(3, min(30, self.followup_timeout_s))
+        if timeout != self.followup_timeout_s:
+            _LOGGER.warning(
+                "[%s] followup_timeout_s %d clamped to %d (valid range 3-30)",
+                self.name, self.followup_timeout_s, timeout,
+            )
+            self.followup_timeout_s = timeout
 
 
 def load_options(path: str) -> tuple[list[SatelliteConfig], bool]:

@@ -4,8 +4,10 @@ import asyncio
 import audioop
 import logging
 import math
+import struct
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 from wyoming.audio import AudioChunk, AudioFormat, AudioStart, AudioStop
 from wyoming.event import Event
@@ -19,6 +21,7 @@ from wyoming.satellite import (
 )
 from wyoming.server import AsyncEventHandler
 from wyoming.snd import Played
+from wyoming.tts import Synthesize
 
 from .const import WYOMING_CHANNELS, WYOMING_RATE, WYOMING_WIDTH
 from .media_player import MediaPlayerOutput, build_wav
@@ -43,6 +46,26 @@ def _warn_timing_fallback(reason: str) -> None:
             "%s — estimating the end of playback from the WAV duration", reason,
         )
         _last_fallback_warning = now
+
+
+@dataclass
+class FollowupSettings:
+    """Listening without the wake word after a question (per satellite)."""
+
+    enabled: bool = True
+    beep: bool = True
+    timeout_s: float = 8.0
+
+
+def make_beep(rate: int, seconds: float = 0.15, freq: float = 880.0) -> bytes:
+    """Short 16-bit mono sine beep with 10 ms fades (no clicks)."""
+    count = int(rate * seconds)
+    fade = max(1, int(rate * 0.01))
+    samples = []
+    for i in range(count):
+        gain = min(1.0, i / fade, (count - 1 - i) / fade)
+        samples.append(int(0.3 * 32767 * gain * math.sin(2 * math.pi * freq * i / rate)))
+    return struct.pack(f"<{count}h", *samples)
 
 
 class MicMute:
@@ -109,6 +132,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
     PLAY_START_TIMEOUT_S = 5.0  # max wait for the media_player to be playing
     PLAY_END_MARGIN_S = 5.0  # max wait for the end: WAV duration + this
 
+    # Follow-up (satellite-driven runs)
+    MAX_FOLLOWUPS = 3  # consecutive follow-ups before requiring the wake word
+    STREAM_GRACE_S = 0.3  # let HA process RunPipeline before sending audio
+    ERROR_RESTART_DELAY_S = 0.5  # let HA end the failed run first
+    # A transcript with no TTS response nor error within this time means HA
+    # skipped TTS (empty response): the run is over.
+    RESPONSE_TIMEOUT_S = 60.0
+    # Run end not seen this long after stopping a follow-up: assume it ended
+    FOLLOWUP_END_TIMEOUT_S = 10.0
+    # VBAN receiver (e.g. Atom) buffering after the last packet is sent
+    VBAN_PLAYBACK_LATENCY_S = 0.3
+
     def __init__(
         self,
         reader: asyncio.StreamReader,
@@ -119,6 +154,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         media_output: Optional[MediaPlayerOutput] = None,
         vban_stream_name: str = "",
         mic_mute: Optional[MicMute] = None,
+        followup: Optional[FollowupSettings] = None,
     ):
         super().__init__(reader, writer)
         self._info = satellite_info
@@ -145,6 +181,29 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._queue_full_logged = False  # rate-limit queue-full warnings
         self._server_ready = False  # True after RunSatellite received
         self._restart_task: Optional[asyncio.Task] = None
+
+        # Follow-up: when enabled, the satellite drives the pipeline runs
+        # itself (restart_on_end=False) so it can start a run at the ASR
+        # stage after a question. HA's restart_on_end always restarts at
+        # the wake stage, and a run started while another is active gets
+        # its audio rejected (the cancelled run's run-end resets HA's
+        # "pipeline running" flag), so there must never be two runs.
+        self._followup = followup or FollowupSettings(enabled=False)
+        self._driven = self._followup.enabled
+        self._run_seq = 0  # increments with each RunPipeline we send
+        self._run_ended_seq = 0  # last run whose end was handled
+        self._awaiting_response = False  # transcript received in this run
+        self._response_audio = False  # incoming TTS is this run's response
+        self._expect_followup = False  # the response is a question
+        self._followup_count = 0  # consecutive follow-ups
+        self._followup_active = False  # current run is a follow-up (ASR)
+        self._followup_timed_out = False
+        self._next_run_task: Optional[asyncio.Task] = None
+        self._watchdog_task: Optional[asyncio.Task] = None
+        # Mic audio is not sent between runs (HA would reject it), nor
+        # before the grace period after RunPipeline.
+        self._mic_paused = False
+        self._mic_resume_at = 0.0
 
     async def run(self) -> None:
         """Run the handler, suppressing connection errors from the base class.
@@ -184,7 +243,32 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if PauseSatellite.is_type(event.type):
             _LOGGER.info("Server paused — stopping audio streaming")
             self._server_ready = False
+            self._cancel_followup_tasks()
             await self._stop_streaming()
+            return True
+
+        if event.type == "transcript":
+            # STT done: a TTS response (or an error) normally follows. TTS
+            # audio from now on is this run's response, not an announcement.
+            self._awaiting_response = True
+            if self._driven:
+                self._set_watchdog(self.RESPONSE_TIMEOUT_S, self._on_response_timeout)
+            return True
+
+        if event.type == "voice-started":
+            # Speech in a follow-up run: no more no-speech timeout
+            if self._followup_active and not self._followup_timed_out:
+                self._cancel_watchdog()
+            return True
+
+        if Synthesize.is_type(event.type):
+            text = Synthesize.from_event(event).text or ""
+            if self._driven:
+                self._expect_followup = text.strip().endswith("?")
+                _LOGGER.debug(
+                    "Response text%s: %s",
+                    " (question)" if self._expect_followup else "", text,
+                )
             return True
 
         if RunPipeline.is_type(event.type):
@@ -201,6 +285,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 "Receiving TTS audio from server: %dHz, %d-bit, %dch",
                 start.rate, start.width * 8, start.channels,
             )
+            # After a transcript, this is the run's response; otherwise an
+            # announcement (it doesn't end a run).
+            self._response_audio = self._awaiting_response
+            self._awaiting_response = False
+            if self._response_audio and self._driven:
+                self._cancel_watchdog()
+                self._mic_paused = True  # the run is over: HA rejects mic audio
             if self._media_output:
                 # Buffer the whole response as-is (no resampling); it is
                 # played as a WAV file once AudioStop arrives.
@@ -241,10 +332,15 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if AudioStop.is_type(event.type):
             _LOGGER.debug("TTS audio finished")
             self._tts_receiving = False
+            # Run to end once the response has played (follow-up mode)
+            seq = self._run_seq if (self._response_audio and self._driven) else None
+            self._response_audio = False
             if self._media_output and not self._tts_pcm:
                 # Nothing to play: unmute now
                 if self._mic_mute:
                     self._mic_mute.end_response(self._tts_generation)
+                if seq is not None:
+                    self._run_ended(seq)
             elif self._media_output:
                 pcm, self._tts_pcm = bytes(self._tts_pcm), bytearray()
                 # A newer response replaces one still waiting to report played
@@ -255,10 +351,20 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 self._playback_task = asyncio.create_task(
                     self._play_on_media_player(
                         pcm, *self._tts_format, self._tts_generation,
+                        on_played=(
+                            (lambda: self._run_ended(seq)) if seq is not None else None
+                        ),
                     )
                 )
                 _PLAYBACK_TASKS.add(self._playback_task)
                 self._playback_task.add_done_callback(_PLAYBACK_TASKS.discard)
+            elif seq is not None:
+                if self._vban_sender:
+                    task = asyncio.create_task(self._run_ended_after_vban(seq))
+                    _PLAYBACK_TASKS.add(task)
+                    task.add_done_callback(_PLAYBACK_TASKS.discard)
+                else:
+                    self._run_ended(seq)
             return True
 
         if event.type == "ping":
@@ -269,6 +375,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
             text = (event.data or {}).get("text", "<no text>")
             code = (event.data or {}).get("code", "<no code>")
             _LOGGER.error("Error from server: [%s] %s", code, text)
+            if self._driven:
+                # The run is over (no response). Start the next one once HA
+                # has finished ending it; an error never leads to a follow-up.
+                self._awaiting_response = False
+                self._expect_followup = False
+                self._run_ended(self._run_seq, delay=self.ERROR_RESTART_DELAY_S)
+                return True
             # After an error (duplicate_wake_up_detected, stt-no-text-recognized,
             # wake_word_detection_aborted...), HA ends the pipeline and does NOT
             # restart it, even with restart_on_end=True. Audio chunks we keep
@@ -296,6 +409,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
     async def _play_on_media_player(
         self, pcm: bytes, rate: int, width: int, channels: int, generation: int,
+        on_played: Optional[Callable[[], None]] = None,
     ) -> None:
         """Play the response on the media_player, keeping the mic muted.
 
@@ -308,6 +422,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
         finally:
             if self._mic_mute:
                 self._mic_mute.end_response(generation)
+        # Not reached when cancelled by a newer response (which reports itself)
+        if on_played:
+            on_played()
 
     async def _play_response(
         self, pcm: bytes, rate: int, width: int, channels: int, generation: int,
@@ -338,6 +455,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 )
             except (audioop.error, ValueError) as err:
                 _LOGGER.warning("Failed to send TTS audio to VBAN: %s", err)
+            await self._wait_vban_played()
             return
 
         await self._wait_playback_end(url, duration, requested_at)
@@ -433,16 +551,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         The 300ms grace period is scheduled as a background task so we
         don't block the event reader while waiting.
         """
-        run_pipeline = RunPipeline(
-            start_stage=PipelineStage.WAKE,
-            end_stage=PipelineStage.TTS,
-            restart_on_end=True,
-        )
-        await self.write_event(run_pipeline.event())
-        _LOGGER.info(
-            "Sent run-pipeline: start=%s end=%s restart=True",
-            PipelineStage.WAKE.value, PipelineStage.TTS.value,
-        )
+        await self._send_run_pipeline(PipelineStage.WAKE)
 
         # Mark streaming as pending and schedule startup in the background,
         # so handle_event can return immediately and keep reading HA events.
@@ -450,6 +559,162 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._streaming_task = asyncio.create_task(
             self._delayed_stream_start(0.3)
         )
+
+    async def _send_run_pipeline(self, start_stage: PipelineStage) -> None:
+        """Send RunPipeline (start_stage → TTS) and reset per-run state.
+
+        Without follow-up, HA restarts the wake run itself (restart_on_end).
+        """
+        restart = not self._driven
+        await self.write_event(
+            RunPipeline(
+                start_stage=start_stage,
+                end_stage=PipelineStage.TTS,
+                restart_on_end=restart,
+            ).event()
+        )
+        self._run_seq += 1
+        self._awaiting_response = False
+        self._mic_paused = False
+        self._mic_resume_at = time.monotonic() + self.STREAM_GRACE_S
+        _LOGGER.info(
+            "Sent run-pipeline: start=%s end=%s restart=%s",
+            start_stage.value, PipelineStage.TTS.value, restart,
+        )
+
+    # ------------------------------------------------------------------
+    # Follow-up: satellite-driven runs
+
+    def _set_watchdog(self, delay: float, callback: Callable[[], None]) -> None:
+        """(Re)arm the single per-run watchdog."""
+        self._cancel_watchdog()
+
+        async def fire() -> None:
+            await asyncio.sleep(delay)
+            callback()
+
+        self._watchdog_task = asyncio.create_task(fire())
+
+    def _cancel_watchdog(self) -> None:
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+        self._watchdog_task = None
+
+    def _on_response_timeout(self) -> None:
+        _LOGGER.info("No response after transcript (empty response?): run over")
+        self._run_ended(self._run_seq)
+
+    def _on_followup_timeout(self) -> None:
+        """No speech in time after a question: stop listening."""
+        _LOGGER.info("Follow-up: no speech, back to wake word")
+        self._followup_timed_out = True
+        self._mic_paused = True
+        # Ends the ASR run (normally with stt-no-text-recognized)
+        task = asyncio.create_task(self._write_quietly(AudioStop().event()))
+        _PLAYBACK_TASKS.add(task)
+        task.add_done_callback(_PLAYBACK_TASKS.discard)
+        seq = self._run_seq
+        self._set_watchdog(
+            self.FOLLOWUP_END_TIMEOUT_S, lambda: self._run_ended(seq),
+        )
+
+    async def _write_quietly(self, event: Event) -> None:
+        try:
+            await self.write_event(event)
+        except (ConnectionError, OSError):
+            pass
+
+    def _run_ended(self, seq: int, delay: float = 0.0) -> None:
+        """The run seq is over (response played, error or timeout).
+
+        Starts the next run: a follow-up if the response was a question,
+        otherwise wake word listening. Ignored if that run's end was
+        already handled or a newer run has started.
+        """
+        if not self._driven or seq != self._run_seq or seq == self._run_ended_seq:
+            return
+        self._run_ended_seq = seq
+        self._cancel_watchdog()
+        self._mic_paused = True
+        if self._next_run_task and not self._next_run_task.done():
+            self._next_run_task.cancel()
+        self._next_run_task = asyncio.create_task(self._start_next_run(delay))
+
+    async def _start_next_run(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            if not (self._server_ready and self._is_running) or self.writer.is_closing():
+                return
+
+            if self._followup_active:
+                if not self._followup_timed_out:
+                    _LOGGER.info("Follow-up: done")
+                self._followup_active = False
+                self._followup_timed_out = False
+
+            expect, self._expect_followup = self._expect_followup, False
+            if expect and self._followup_count < self.MAX_FOLLOWUPS:
+                self._followup_count += 1
+                _LOGGER.info(
+                    "Follow-up: response is a question → listening without wake word"
+                )
+                if self._followup.beep:
+                    await self._play_beep()
+                self._followup_active = True
+                await self._send_run_pipeline(PipelineStage.ASR)
+                self._set_watchdog(
+                    self.STREAM_GRACE_S + self._followup.timeout_s,
+                    self._on_followup_timeout,
+                )
+                return
+
+            if expect:
+                _LOGGER.info(
+                    "Follow-up: %d in a row, back to wake word", self._followup_count,
+                )
+            self._followup_count = 0
+            await self._send_run_pipeline(PipelineStage.WAKE)
+        except (ConnectionError, OSError):
+            pass
+
+    async def _play_beep(self) -> None:
+        """Signal "I'm listening" on the satellite's output; returns once played."""
+        if self._media_output:
+            rate = 22050
+            url = self._media_output.publish(build_wav(make_beep(rate), rate, 2, 1))
+            requested_at = time.monotonic()
+            if await self._media_output.play(url):
+                await self._wait_playback_end(url, 0.15, requested_at)
+                return
+        if self._vban_sender:
+            self._vban_sender.reset_resampler()
+            self._vban_sender.clear_pending()
+            self._vban_sender.send(make_beep(WYOMING_RATE), sample_rate=WYOMING_RATE)
+            await self._wait_vban_played()
+
+    async def _wait_vban_played(self) -> None:
+        """Return once the VBAN output has been sent and played."""
+        assert self._vban_sender is not None
+        await self._vban_sender.wait_sent()
+        await asyncio.sleep(self.VBAN_PLAYBACK_LATENCY_S)
+
+    async def _run_ended_after_vban(self, seq: int) -> None:
+        await self._wait_vban_played()
+        self._run_ended(seq)
+
+    def _cancel_followup_tasks(self) -> None:
+        self._cancel_watchdog()
+        if self._next_run_task and not self._next_run_task.done():
+            self._next_run_task.cancel()
+        self._next_run_task = None
+        self._followup_active = False
+        self._followup_timed_out = False
+        self._expect_followup = False
+        self._followup_count = 0
+        self._awaiting_response = False
+        self._response_audio = False
+
+    # ------------------------------------------------------------------
 
     async def _delayed_stream_start(self, delay: float) -> None:
         """Wait for HA to process RunPipeline, then run the audio stream loop."""
@@ -544,6 +809,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 while len(audio_buffer) >= target_bytes:
                     send_pcm = bytes(audio_buffer[:target_bytes])
                     del audio_buffer[:target_bytes]
+
+                    # Between runs, or right after RunPipeline: don't send
+                    if self._mic_paused or time.monotonic() < self._mic_resume_at:
+                        continue
 
                     chunks_sent += 1
 
@@ -643,6 +912,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if self._tts_receiving and self._mic_mute:
             self._mic_mute.end_response(self._tts_generation)
         self._tts_receiving = False
+        self._cancel_followup_tasks()
         if self._restart_task and not self._restart_task.done():
             self._restart_task.cancel()
             try:

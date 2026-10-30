@@ -16,7 +16,12 @@ from .config import ConfigError, SatelliteConfig, load_options, validate
 from .const import DEFAULT_VBAN_PORT
 from .ha_ws import HaStateWatcher
 from .media_player import MediaPlayerOutput, detect_local_ip
-from .satellite import MicMute, VbanSatelliteHandler, make_satellite_info
+from .satellite import (
+    FollowupSettings,
+    MicMute,
+    VbanSatelliteHandler,
+    make_satellite_info,
+)
 from .vban import VbanReceiver, VbanSender
 
 _LOGGER = logging.getLogger(__name__)
@@ -118,6 +123,26 @@ def parse_args() -> argparse.Namespace:
         "response has played (default 250, 0 = no tail)",
     )
 
+    # Follow-up: answer a question without the wake word
+    parser.add_argument(
+        "--followup-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After a response ending with '?', listen without the wake word",
+    )
+    parser.add_argument(
+        "--followup-beep",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Beep on the satellite output before listening for a follow-up",
+    )
+    parser.add_argument(
+        "--followup-timeout-s",
+        type=int,
+        default=8,
+        help="Back to the wake word if no speech within this time (3-30)",
+    )
+
     # Logging
     parser.add_argument("--debug", action="store_true", default=False)
 
@@ -189,6 +214,16 @@ async def run_satellite(
         )
 
     satellite_info = make_satellite_info(name=cfg.name)
+    followup = FollowupSettings(
+        enabled=cfg.followup_enabled,
+        beep=cfg.followup_beep,
+        timeout_s=cfg.followup_timeout_s,
+    )
+    _LOGGER.info(
+        "  Follow-up without wake word: %s",
+        f"on (beep={'on' if cfg.followup_beep else 'off'}, "
+        f"timeout={cfg.followup_timeout_s}s)" if cfg.followup_enabled else "off",
+    )
 
     # Handler factory — creates a new handler per connection
     def handler_factory(reader, writer):
@@ -201,6 +236,7 @@ async def run_satellite(
             media_output=media_output,
             vban_stream_name=cfg.vban_receive_stream_name,
             mic_mute=mic_mute,
+            followup=followup,
         )
 
     server: Optional[AsyncServer] = None

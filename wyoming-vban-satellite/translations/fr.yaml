@@ -18,6 +18,15 @@ configuration:
       mic_mute_tail_ms:
         name: Marge de coupure micro (ms)
         description: Sortie media_player - garder le micro coupe ce temps apres la lecture de la reponse (defaut 250, 0 = aucune)
+      followup_enabled:
+        name: Relance sans mot-cle
+        description: Quand la reponse est une question, ecouter la reponse sans mot-cle (active par defaut)
+      followup_beep:
+        name: Bip de relance
+        description: Bip sur la sortie du satellite quand il ecoute la reponse (active par defaut)
+      followup_timeout_s:
+        name: Delai de relance (s)
+        description: Retour a l'ecoute du mot-cle si personne ne parle dans ce delai (3-30, defaut 8)
   debug_logging:
     name: Journalisation de debogage
     description: Activer la journalisation detaillee
