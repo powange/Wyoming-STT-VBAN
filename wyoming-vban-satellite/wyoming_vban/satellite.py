@@ -30,6 +30,20 @@ _LOGGER = logging.getLogger(__name__)
 # response plays); keep strong references so they aren't garbage-collected.
 _PLAYBACK_TASKS: "set[asyncio.Task]" = set()
 
+FALLBACK_WARNING_INTERVAL_S = 60.0
+_last_fallback_warning = 0.0
+
+
+def _warn_timing_fallback(reason: str) -> None:
+    """Warn (at most once a minute) that playback end is estimated."""
+    global _last_fallback_warning
+    now = time.monotonic()
+    if now - _last_fallback_warning >= FALLBACK_WARNING_INTERVAL_S:
+        _LOGGER.warning(
+            "%s — estimating the end of playback from the WAV duration", reason,
+        )
+        _last_fallback_warning = now
+
 
 class MicMute:
     """Mutes the microphone while a response plays on the media_player.
@@ -48,7 +62,6 @@ class MicMute:
         self._max_muted_s = max_muted_s
         self._muted = False  # a response is being received or played
         self._muted_since = 0.0
-        self._muted_until = 0.0  # time.monotonic() deadline after playback
         self._generation = 0  # increments with each response
 
     def start_response(self) -> int:
@@ -58,12 +71,8 @@ class MicMute:
         self._muted_since = time.monotonic()
         return self._generation
 
-    def playing(self, seconds: float) -> None:
-        """Playback started: stay muted for seconds plus the tail."""
-        self._muted_until = time.monotonic() + seconds + self.tail_s
-
     def end_response(self, generation: int) -> None:
-        """Response done (played, failed or dropped).
+        """Response done (played plus tail, failed or dropped): unmute.
 
         Ignored if a newer response has started since: it owns the mute.
         """
@@ -71,14 +80,13 @@ class MicMute:
             self._muted = False
 
     def is_muted(self) -> bool:
-        now = time.monotonic()
-        if self._muted and now - self._muted_since > self._max_muted_s:
+        if self._muted and time.monotonic() - self._muted_since > self._max_muted_s:
             # Safety net: never stay muted if a response never completes
             _LOGGER.warning(
                 "Microphone muted for over %ds — unmuting", self._max_muted_s,
             )
             self._muted = False
-        return self._muted or now < self._muted_until
+        return self._muted
 
 
 class VbanSatelliteHandler(AsyncEventHandler):
@@ -95,8 +103,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
     """
 
     MAX_TTS_BUFFER_S = 300  # media_player mode: longest response buffered
-    CAST_START_DELAY_S = 1.5  # time for Cast to fetch the WAV and start playing
-    MIC_UNMUTE_TAIL_S = 0.7  # default mute kept after playback (mic_mute_tail_ms)
+    # Estimated time for Cast to fetch the WAV and start playing, used only
+    # when the media_player state can't be watched
+    CAST_START_DELAY_S = 1.5
+    PLAY_START_TIMEOUT_S = 5.0  # max wait for the media_player to be playing
+    PLAY_END_MARGIN_S = 5.0  # max wait for the end: WAV duration + this
 
     def __init__(
         self,
@@ -288,18 +299,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
     ) -> None:
         """Play the response on the media_player, keeping the mic muted.
 
-        The mic stays muted until the response has played (plus the tail);
-        it is unmuted on failure or cancellation unless a newer response
-        has started.
+        The mic stays muted until the response has played plus the tail; it
+        is unmuted on failure or cancellation unless a newer response has
+        started (which then owns the mute: no gap between the two).
         """
         try:
-            await self._play_response(pcm, rate, width, channels)
+            await self._play_response(pcm, rate, width, channels, generation)
         finally:
             if self._mic_mute:
                 self._mic_mute.end_response(generation)
 
     async def _play_response(
-        self, pcm: bytes, rate: int, width: int, channels: int
+        self, pcm: bytes, rate: int, width: int, channels: int, generation: int,
     ) -> None:
         """Publish the response as a WAV, play it, then report played to HA.
 
@@ -313,6 +324,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             url, duration, self._media_output.entity_id,
         )
 
+        requested_at = time.monotonic()
         if not await self._media_output.play(url):
             if self._vban_sender is None:
                 _LOGGER.error("No VBAN output configured — response dropped")
@@ -328,13 +340,16 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 _LOGGER.warning("Failed to send TTS audio to VBAN: %s", err)
             return
 
+        await self._wait_playback_end(url, duration, requested_at)
+
+        # Margin for echo / the very end of the Cast output
         if self._mic_mute:
-            self._mic_mute.playing(duration + self.CAST_START_DELAY_S)
+            await asyncio.sleep(self._mic_mute.tail_s)
+            self._mic_mute.end_response(generation)
 
         # Tell HA the response finished playing, like a satellite with its
         # own speaker would (entity goes back to idle, announcements stop
-        # waiting). Cast needs a moment to fetch the file and start playing.
-        await asyncio.sleep(duration + self.CAST_START_DELAY_S)
+        # waiting).
         if self.writer.is_closing():
             return
         try:
@@ -342,6 +357,65 @@ class VbanSatelliteHandler(AsyncEventHandler):
             _LOGGER.debug("Sent played")
         except (ConnectionError, OSError) as err:
             _LOGGER.debug("Could not send played: %s", err)
+
+    async def _wait_playback_end(
+        self, url: str, duration: float, requested_at: float
+    ) -> None:
+        """Return when the media_player has finished playing url.
+
+        Follows the media_player state over the HA WebSocket: wait for it to
+        be playing our file, then to stop playing it. Without the WebSocket,
+        or if playback is never seen starting, estimate the end from the WAV
+        duration and CAST_START_DELAY_S (counted from the play_media call).
+        """
+        assert self._media_output is not None
+        watcher = self._media_output.state_watcher
+        entity_id = self._media_output.entity_id
+
+        file_name = url.rsplit("/", 1)[-1]
+
+        def is_ours(change) -> bool:
+            # media_content_id is our URL on Cast; accept a missing one
+            return file_name in str(change.attributes.get("media_content_id", url))
+
+        started = None
+        if watcher is None or not watcher.connected:
+            _warn_timing_fallback("HA WebSocket not connected")
+        else:
+            started = await watcher.wait_for(
+                entity_id,
+                lambda c: c.state == "playing" and is_ours(c),
+                since=requested_at,
+                timeout=self.PLAY_START_TIMEOUT_S,
+            )
+            if started is None:
+                _warn_timing_fallback(
+                    f"{entity_id} not seen playing within "
+                    f"{self.PLAY_START_TIMEOUT_S:.0f}s"
+                )
+
+        if started is None:
+            estimated_end = requested_at + duration + self.CAST_START_DELAY_S
+            await asyncio.sleep(max(0.0, estimated_end - time.monotonic()))
+            return
+
+        _LOGGER.debug("Cast playing after %.2fs", started.time - requested_at)
+        finished = await watcher.wait_for(
+            entity_id,
+            lambda c: c.state not in ("playing", "buffering") or not is_ours(c),
+            since=started.time,
+            timeout=duration + self.PLAY_END_MARGIN_S,
+        )
+        if finished is None:
+            # Timed out, or WebSocket lost: fall back to the WAV duration
+            _LOGGER.debug("Cast end not seen, using the WAV duration")
+            await asyncio.sleep(max(0.0, started.time + duration - time.monotonic()))
+            return
+
+        _LOGGER.debug(
+            "Cast finished after %.2fs (WAV %.2fs)",
+            finished.time - started.time, duration,
+        )
 
     def _subscribe_to_vban(self) -> None:
         """Subscribe this handler to VBAN audio packets."""

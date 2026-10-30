@@ -14,6 +14,7 @@ from wyoming.zeroconf import HomeAssistantZeroconf
 
 from .config import ConfigError, SatelliteConfig, load_options, validate
 from .const import DEFAULT_VBAN_PORT
+from .ha_ws import HaStateWatcher
 from .media_player import MediaPlayerOutput, detect_local_ip
 from .satellite import MicMute, VbanSatelliteHandler, make_satellite_info
 from .vban import VbanReceiver, VbanSender
@@ -112,9 +113,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mic-mute-tail-ms",
         type=int,
-        default=700,
+        default=250,
         help="media_player output: keep the mic muted this long after the "
-        "response has played (default 700, 0 = no tail)",
+        "response has played (default 250, 0 = no tail)",
     )
 
     # Logging
@@ -132,7 +133,11 @@ def _config_from_args(args: argparse.Namespace) -> SatelliteConfig:
     return SatelliteConfig(**values)
 
 
-async def run_satellite(cfg: SatelliteConfig, vban_receiver: VbanReceiver) -> None:
+async def run_satellite(
+    cfg: SatelliteConfig,
+    vban_receiver: VbanReceiver,
+    state_watcher: Optional[HaStateWatcher] = None,
+) -> None:
     """Run one satellite (Wyoming server, TTS outputs, Zeroconf) until cancelled."""
     _SATELLITE_NAME.set(cfg.name)
 
@@ -170,6 +175,7 @@ async def run_satellite(cfg: SatelliteConfig, vban_receiver: VbanReceiver) -> No
             http_host=http_host,
             http_port=cfg.tts_http_port,
         )
+        media_output.state_watcher = state_watcher
         # Shared by all connections of this satellite
         mic_mute = MicMute(
             tail_s=cfg.mic_mute_tail_ms / 1000,
@@ -309,12 +315,22 @@ async def main() -> int:
             # Signal handlers not supported on this platform (e.g. Windows)
             pass
 
+    # One HA WebSocket for the app, following the media_players used for TTS
+    # output (real start/end of playback, to unmute the mic on time)
+    media_players = [s.tts_media_player for s in satellites if s.tts_output == "media_player"]
+    state_watcher = HaStateWatcher(media_players) if media_players else None
+    watcher_task = (
+        asyncio.create_task(state_watcher.run()) if state_watcher else None
+    )
+
     # Receivers run for the lifetime of the app
     receiver_tasks = [
         asyncio.create_task(receiver.run()) for receiver in receivers.values()
     ]
     satellite_tasks = {
-        asyncio.create_task(run_satellite(sat, receivers[sat.vban_receive_port])): sat.name
+        asyncio.create_task(
+            run_satellite(sat, receivers[sat.vban_receive_port], state_watcher)
+        ): sat.name
         for sat in satellites
     }
     stop_wait_task = asyncio.create_task(stop_event.wait())
@@ -346,6 +362,10 @@ async def main() -> int:
         for task in satellite_tasks:
             task.cancel()
         await asyncio.gather(*satellite_tasks, return_exceptions=True)
+
+        if watcher_task:
+            watcher_task.cancel()
+            await asyncio.gather(watcher_task, return_exceptions=True)
 
         # Stop VBAN receivers
         for receiver in receivers.values():

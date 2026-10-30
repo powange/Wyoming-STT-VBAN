@@ -37,7 +37,7 @@ class SatelliteConfig:
     tts_media_player: str = ""
     tts_http_port: int = DEFAULT_TTS_HTTP_PORT
     tts_http_host: str = ""
-    mic_mute_tail_ms: int = 700
+    mic_mute_tail_ms: int = 250
 
     @classmethod
     def from_options(cls, options: dict[str, Any], index: int) -> "SatelliteConfig":

@@ -65,7 +65,7 @@ the VBAN source.
 - **tts_media_player**: Target entity, e.g. `media_player.nestmini7039` (required when `tts_output` is `media_player`)
 - **tts_http_port**: Port of the small HTTP server that serves the response to the speaker (default: 10800 + satellite position in the list, i.e. 10800 for the first satellite, 10801 for the second…)
 - **tts_http_host**: LAN IP of the Home Assistant host, used in the URL given to the speaker. Leave empty to auto-detect.
-- **mic_mute_tail_ms**: How long the microphone stays muted after the response has played, 0–5000 ms (default: 700). See below.
+- **mic_mute_tail_ms**: How long the microphone stays muted after the response has played, 0–5000 ms (default: 250). See below.
 
 How it works: the full response is buffered, turned into a WAV file served at
 `http://<host>:<port>/tts/<id>.wav`, and played with the
@@ -81,10 +81,17 @@ While a response plays on the media player, the satellite sends silence
 instead of the microphone audio, so the speaker's voice cannot trigger the
 wake word (Home Assistant starts listening again before the response has
 played). The microphone is muted as soon as Home Assistant starts sending
-the response, and unmuted once it has played (duration + 1.5 s for Cast)
-plus `mic_mute_tail_ms`. Increase the tail if the end of a response still
+the response, and unmuted `mic_mute_tail_ms` after the media player has
+finished playing it. Increase the tail if the end of a response still
 triggers false wake-ups; lower it if the satellite misses commands spoken
 right after a response.
+
+The end of playback is read from the media player state (`playing` →
+`idle`…) through the Home Assistant WebSocket API (one connection for the
+app, reconnecting automatically). If the WebSocket is not connected, or the
+media player is not seen playing within 5 s, the end is estimated from the
+response duration + 1.5 s for Cast to start, and a warning is logged (at
+most once a minute).
 
 Example — the "Bureau" satellite keeps its VBAN microphone but answers on a
 Nest Mini:

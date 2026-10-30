@@ -18,6 +18,8 @@ from typing import Optional
 import aiohttp
 from aiohttp import web
 
+from .ha_ws import HaStateWatcher
+
 _LOGGER = logging.getLogger(__name__)
 
 SUPERVISOR_API = "http://supervisor/core/api"
@@ -65,6 +67,9 @@ class MediaPlayerOutput:
         self._runner: Optional[web.AppRunner] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._token = os.environ.get("SUPERVISOR_TOKEN", "")
+        # Shared media_player state watcher (set by the app), used to follow
+        # the real start and end of playback
+        self.state_watcher: Optional[HaStateWatcher] = None
 
     async def start(self) -> None:
         """Start the HTTP server serving /tts/<name>.wav."""

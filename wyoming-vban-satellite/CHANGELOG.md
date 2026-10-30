@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.10.0
+
+- **Fix**: media_player output — unmute the microphone when the speaker has actually finished playing, instead of an estimate 1.5–2 s too long
+- 2.9.1 kept the mic muted for WAV duration + 1.5 s (Cast start estimate) + tail from the `play_media` call. Cast actually starts in 0.2–0.8 s, so commands spoken right after a response were missed.
+- The app now follows the media_player state through the HA WebSocket API (`ws://supervisor/core/websocket`, one connection shared by all satellites, `subscribe_trigger` on the TTS media_players only, reconnect with 1 s → 30 s backoff). After `play_media`: wait for the entity to be `playing` our file (max 5 s), then for it to stop playing it (max WAV duration + 5 s), then `mic_mute_tail_ms`; the mic is unmuted and `played` sent to HA.
+- Fallback to the 2.9.1 estimate when the WebSocket is not connected or playback is not seen starting within 5 s, with a warning at most once a minute.
+- `mic_mute_tail_ms` default lowered from 700 to 250 ms (existing configs that set it explicitly keep their value).
+- A new response arriving during the wait still keeps the mic muted without a gap (the newer response owns the mute).
+
 ## 2.9.1
 
 - **Fix**: media_player output — mute the microphone while the response plays, so the satellite no longer answers its own voice

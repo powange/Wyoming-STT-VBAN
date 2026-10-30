@@ -17,7 +17,7 @@ configuration:
         description: LAN IP of this host used in the TTS URL (empty = auto-detect)
       mic_mute_tail_ms:
         name: Mic mute tail (ms)
-        description: media_player output - keep the mic muted this long after the response has played (default 700, 0 = none)
+        description: media_player output - keep the mic muted this long after the response has played (default 250, 0 = none)
   debug_logging:
     name: Debug Logging
     description: Enable verbose debug logging
