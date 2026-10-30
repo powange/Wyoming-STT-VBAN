@@ -1,6 +1,6 @@
 name: "Wyoming VBAN Satellite"
 description: "Use VBAN audio sources as Wyoming voice assistant satellites for Home Assistant"
-version: "2.12.2"
+version: "2.13.0"
 slug: wyoming-vban-satellite
 url: "https://github.com/powange/Wyoming-STT-VBAN"
 arch:
@@ -29,6 +29,7 @@ options:
       tts_vban_volume: 1.0
       tts_vban_batch_packets: 1
       tts_output: "vban"
+  publish_exchanges: true
   debug_logging: false
 
 schema:
@@ -54,4 +55,5 @@ schema:
       followup_enabled: "bool?"
       followup_beep: "bool?"
       followup_timeout_s: "int(3,30)?"
+  publish_exchanges: "bool?"
   debug_logging: bool

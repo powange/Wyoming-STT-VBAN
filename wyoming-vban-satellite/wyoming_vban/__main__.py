@@ -143,6 +143,14 @@ def parse_args() -> argparse.Namespace:
         help="Back to the wake word if no speech within this time (3-30)",
     )
 
+    # Publish each voice exchange as a HA event (needs the Supervisor API)
+    parser.add_argument(
+        "--publish-exchanges",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fire a jarvis_echange HA event for each voice exchange",
+    )
+
     # Logging
     parser.add_argument("--debug", action="store_true", default=False)
 
@@ -162,6 +170,7 @@ async def run_satellite(
     cfg: SatelliteConfig,
     vban_receiver: VbanReceiver,
     state_watcher: Optional[HaStateWatcher] = None,
+    publish_exchanges: bool = False,
 ) -> None:
     """Run one satellite (Wyoming server, TTS outputs, Zeroconf) until cancelled."""
     _SATELLITE_NAME.set(cfg.name)
@@ -237,6 +246,8 @@ async def run_satellite(
             vban_stream_name=cfg.vban_receive_stream_name,
             mic_mute=mic_mute,
             followup=followup,
+            exchange_publisher=state_watcher if publish_exchanges else None,
+            satellite_name=cfg.name,
         )
 
     server: Optional[AsyncServer] = None
@@ -294,9 +305,10 @@ async def main() -> int:
     args = parse_args()
 
     debug = args.debug
+    publish_exchanges = args.publish_exchanges
     try:
         if args.options:
-            satellites, debug_option = load_options(args.options)
+            satellites, debug_option, publish_exchanges = load_options(args.options)
             debug = debug or debug_option
         else:
             if not args.name:
@@ -351,10 +363,17 @@ async def main() -> int:
             # Signal handlers not supported on this platform (e.g. Windows)
             pass
 
-    # One HA WebSocket for the app, following the media_players used for TTS
-    # output (real start/end of playback, to unmute the mic on time)
+    # One HA WebSocket for the app: follows the media_players used for TTS
+    # output (real start/end of playback, to unmute the mic on time) and
+    # publishes voice exchanges as HA events
     media_players = [s.tts_media_player for s in satellites if s.tts_output == "media_player"]
-    state_watcher = HaStateWatcher(media_players) if media_players else None
+    state_watcher = (
+        HaStateWatcher(media_players) if media_players or publish_exchanges else None
+    )
+    _LOGGER.info(
+        "Voice exchanges %s",
+        "published as jarvis_echange events" if publish_exchanges else "not published",
+    )
     watcher_task = (
         asyncio.create_task(state_watcher.run()) if state_watcher else None
     )
@@ -365,7 +384,9 @@ async def main() -> int:
     ]
     satellite_tasks = {
         asyncio.create_task(
-            run_satellite(sat, receivers[sat.vban_receive_port], state_watcher)
+            run_satellite(
+                sat, receivers[sat.vban_receive_port], state_watcher, publish_exchanges,
+            )
         ): sat.name
         for sat in satellites
     }

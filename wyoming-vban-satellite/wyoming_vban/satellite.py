@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from wyoming.asr import Transcript
 from wyoming.audio import AudioChunk, AudioFormat, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import Attribution, Describe, Info, Satellite, SndProgram
@@ -25,6 +26,7 @@ from wyoming.snd import Played
 from wyoming.tts import Synthesize
 
 from .const import WYOMING_CHANNELS, WYOMING_RATE, WYOMING_WIDTH
+from .ha_ws import HaStateWatcher
 from .media_player import MediaPlayerOutput, build_wav
 from .vban import VbanPacket, VbanReceiver, VbanSender, resample_to_wyoming
 
@@ -33,6 +35,8 @@ _LOGGER = logging.getLogger(__name__)
 # Media player playbacks outlive their handler (HA may reconnect while a
 # response plays); keep strong references so they aren't garbage-collected.
 _PLAYBACK_TASKS: "set[asyncio.Task]" = set()
+
+EXCHANGE_EVENT_TYPE = "jarvis_echange"  # HA event fired for each exchange
 
 FALLBACK_WARNING_INTERVAL_S = 60.0
 _last_fallback_warning = 0.0
@@ -166,6 +170,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
         vban_stream_name: str = "",
         mic_mute: Optional[MicMute] = None,
         followup: Optional[FollowupSettings] = None,
+        exchange_publisher: Optional[HaStateWatcher] = None,
+        satellite_name: str = "",
     ):
         super().__init__(reader, writer)
         self._info = satellite_info
@@ -192,6 +198,12 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._queue_full_logged = False  # rate-limit queue-full warnings
         self._server_ready = False  # True after RunSatellite received
         self._restart_task: Optional[asyncio.Task] = None
+
+        # Publishes each exchange (transcript + response) as a HA event
+        self._exchange_publisher = exchange_publisher
+        self._satellite_name = satellite_name
+        self._last_transcript = ""
+        self._last_transcript_at = 0.0
 
         # Follow-up: when enabled, the satellite drives the pipeline runs
         # itself (restart_on_end=False) so it can start a run at the ASR
@@ -267,6 +279,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
             # STT done: a TTS response (or an error) normally follows. TTS
             # audio from now on is this run's response, not an announcement.
             self._awaiting_response = True
+            self._last_transcript = Transcript.from_event(event).text or ""
+            self._last_transcript_at = time.monotonic()
             if self._driven:
                 self._set_watchdog(self.RESPONSE_TIMEOUT_S, self._on_response_timeout)
             return True
@@ -283,6 +297,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if Synthesize.is_type(event.type):
             text = Synthesize.from_event(event).text or ""
+            self._publish_exchange(text)
             if self._driven:
                 self._expect_followup = text.strip().endswith("?")
                 _LOGGER.debug(
@@ -395,6 +410,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             text = (event.data or {}).get("text", "<no text>")
             code = (event.data or {}).get("code", "<no code>")
             _LOGGER.error("Error from server: [%s] %s", code, text)
+            self._last_transcript = ""
             if self._driven:
                 # The run is over (no response). Start the next one once HA
                 # has finished ending it; an error never leads to a follow-up.
@@ -412,6 +428,33 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         _LOGGER.debug("Unhandled event type: %s", event.type)
         return True
+
+    def _publish_exchange(self, response: str) -> None:
+        """Fire a HA event with the user's request and the response.
+
+        Only for a response following a transcript in the same run (not for
+        announcements). Dropped if the HA WebSocket isn't connected.
+        """
+        transcript, self._last_transcript = self._last_transcript, ""
+        if not transcript or self._exchange_publisher is None:
+            return
+        data = {
+            "satellite": self._satellite_name,
+            "transcript": transcript,
+            "response": response,
+            "followup": self._followup_active,
+        }
+
+        async def publish() -> None:
+            assert self._exchange_publisher is not None
+            if await self._exchange_publisher.fire_event(EXCHANGE_EVENT_TYPE, data):
+                _LOGGER.debug("Published exchange: %s", data)
+            else:
+                _LOGGER.debug("HA WebSocket not connected, exchange not published")
+
+        task = asyncio.create_task(publish())
+        _PLAYBACK_TASKS.add(task)
+        task.add_done_callback(_PLAYBACK_TASKS.discard)
 
     def _buffer_tts_chunk(self, audio: bytes) -> None:
         """Append TTS PCM to the response buffer, capped in duration."""
@@ -595,6 +638,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         )
         self._run_seq += 1
         self._awaiting_response = False
+        self._last_transcript = ""
         self._mic_paused = False
         self._mic_resume_at = time.monotonic() + self.STREAM_GRACE_S
         _LOGGER.info(

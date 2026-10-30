@@ -1,8 +1,9 @@
-"""Watch media_player states through the Home Assistant WebSocket API.
+"""Home Assistant WebSocket API connection, shared by the whole app.
 
-One connection for the whole app (via the Supervisor proxy), subscribed to
-state changes of the media_players used for TTS output, reconnecting with
-a backoff. Lets satellites wait for the real start and end of playback.
+One connection (via the Supervisor proxy), reconnecting with a backoff:
+- subscribed to state changes of the media_players used for TTS output,
+  so satellites can wait for the real start and end of playback;
+- used to fire events on the HA event bus (voice exchanges).
 """
 
 import asyncio
@@ -29,7 +30,7 @@ class StateChange:
 
 
 class HaStateWatcher:
-    """Shared WebSocket subscription to media_player state changes."""
+    """Shared WebSocket connection: media_player states and fire_event."""
 
     BACKOFF_MIN_S = 1.0
     BACKOFF_MAX_S = 30.0
@@ -45,6 +46,9 @@ class HaStateWatcher:
             for entity_id in self.entity_ids
         }
         self._changed = asyncio.Condition()
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._next_id = 1  # message id, per connection
+        self._send_lock = asyncio.Lock()
 
     @property
     def connected(self) -> bool:
@@ -58,18 +62,23 @@ class HaStateWatcher:
                 try:
                     async with session.ws_connect(self.url, heartbeat=30) as ws:
                         await self._authenticate(ws)
-                        await self._subscribe(ws)
+                        self._next_id = 1
+                        if self.entity_ids:
+                            await self._subscribe(ws)
+                        self._ws = ws
                         self._connected = True
                         backoff = self.BACKOFF_MIN_S
                         _LOGGER.info(
-                            "HA WebSocket connected, watching %s",
-                            ", ".join(self.entity_ids),
+                            "HA WebSocket connected%s",
+                            f", watching {', '.join(self.entity_ids)}"
+                            if self.entity_ids else "",
                         )
                         await self._receive(ws)
                     _LOGGER.warning("HA WebSocket closed")
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as err:
                     _LOGGER.warning("HA WebSocket error: %s", err or type(err).__name__)
                 finally:
+                    self._ws = None
                     if self._connected:
                         self._connected = False
                         await self._notify()
@@ -91,7 +100,7 @@ class HaStateWatcher:
         # A state trigger with only entity_id also fires on attribute
         # changes, e.g. a new media_content_id while already playing.
         await ws.send_json({
-            "id": 1,
+            "id": self._take_id(),
             "type": "subscribe_trigger",
             "trigger": {"platform": "state", "entity_id": self.entity_ids},
         })
@@ -99,11 +108,39 @@ class HaStateWatcher:
         if not msg.get("success"):
             raise ValueError(f"subscribe_trigger failed: {msg.get('error', msg)}")
 
+    def _take_id(self) -> int:
+        msg_id = self._next_id
+        self._next_id += 1
+        return msg_id
+
+    async def fire_event(self, event_type: str, event_data: dict[str, Any]) -> bool:
+        """Fire an event on the HA event bus. False if not connected.
+
+        Fire-and-forget: HA's result message is not awaited.
+        """
+        ws = self._ws
+        if ws is None or not self._connected:
+            return False
+        try:
+            async with self._send_lock:
+                await ws.send_json({
+                    "id": self._take_id(),
+                    "type": "fire_event",
+                    "event_type": event_type,
+                    "event_data": event_data,
+                })
+        except (aiohttp.ClientError, ConnectionError, RuntimeError) as err:
+            _LOGGER.debug("fire_event %s failed: %s", event_type, err)
+            return False
+        return True
+
     async def _receive(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         async for message in ws:
             if message.type != aiohttp.WSMsgType.TEXT:
                 break
             msg = message.json()
+            if msg.get("type") == "result" and not msg.get("success"):
+                _LOGGER.warning("HA WebSocket command failed: %s", msg.get("error", msg))
             if msg.get("type") != "event":
                 continue
             trigger = msg.get("event", {}).get("variables", {}).get("trigger", {})

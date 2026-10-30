@@ -66,18 +66,34 @@ class FakeVbanSender:
         pass
 
 
+class FakePublisher:
+    """Records fired HA events."""
+
+    def __init__(self, connected: bool = True) -> None:
+        self.connected = connected
+        self.events: list[tuple[str, dict]] = []
+
+    async def fire_event(self, event_type: str, event_data: dict) -> bool:
+        if not self.connected:
+            return False
+        self.events.append((event_type, event_data))
+        return True
+
+
 class FollowupTest(unittest.IsolatedAsyncioTestCase):
     followup = FollowupSettings(enabled=True, beep=False, timeout_s=0.5)
 
     async def asyncSetUp(self) -> None:
         self.sender = FakeVbanSender()
         self.receiver = FakeReceiver()
+        self.publisher = FakePublisher()
         port = _free_tcp_port()
         self.server = AsyncServer.from_uri(f"tcp://127.0.0.1:{port}")
         await self.server.start(
             lambda reader, writer: VbanSatelliteHandler(
                 reader, writer, make_satellite_info("Bureau"), self.receiver,
                 self.sender, followup=self.followup,
+                exchange_publisher=self.publisher, satellite_name="Bureau",
             )
         )
         self.ha = AsyncTcpClient("127.0.0.1", port)
@@ -108,9 +124,9 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         event = await self.next_event("run-pipeline", timeout)
         return RunPipeline.from_event(event) if event else None
 
-    async def respond(self, text: str) -> None:
+    async def respond(self, text: str, transcript: str = "...") -> None:
         """A run's end as HA sends it: transcript, synthesize, TTS audio."""
-        await self.ha.write_event(Transcript(text="...").event())
+        await self.ha.write_event(Transcript(text=transcript).event())
         await self.ha.write_event(Synthesize(text=text).event())
         await self.tts_audio()
 
@@ -177,6 +193,33 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         # TTS audio without a transcript: an announcement during the wake run
         await self.tts_audio()
         self.assertIsNone(await self.next_run(timeout=1.0))
+        self.assertEqual(self.publisher.events, [])  # nor an exchange event
+
+    async def test_exchanges_published(self) -> None:
+        await self.next_run()
+        await self.respond("Quelle lumière ?", transcript="Éteins la lumière")
+        await self.next_run()
+        await self.ha.write_event(VoiceStarted().event())
+        await self.respond("Éteint.", transcript="Celle du bureau")
+        await self.next_run()
+        self.assertEqual(self.publisher.events, [
+            ("jarvis_echange", {
+                "satellite": "Bureau", "transcript": "Éteins la lumière",
+                "response": "Quelle lumière ?", "followup": False,
+            }),
+            ("jarvis_echange", {
+                "satellite": "Bureau", "transcript": "Celle du bureau",
+                "response": "Éteint.", "followup": self.followup.enabled,
+            }),
+        ])
+
+    async def test_exchange_dropped_when_not_connected(self) -> None:
+        self.publisher.connected = False
+        await self.next_run()
+        await self.respond("Il est 9 heures.", transcript="Quelle heure est-il")
+        run = await self.next_run()
+        self.assertEqual(run.start_stage, "wake")
+        self.assertEqual(self.publisher.events, [])
 
     async def test_question_reply_is_played_before_next_run(self) -> None:
         await self.next_run()
@@ -276,6 +319,19 @@ class FollowupDisabledTest(FollowupTest):
         pass
 
     async def test_question_reply_is_played_before_next_run(self) -> None:
+        pass
+
+    async def test_exchanges_published(self) -> None:
+        # HA restarts the runs itself: just check the exchange is published
+        await self.next_run()
+        await self.respond("Allumé.", transcript="Allume la lumière")
+        await asyncio.sleep(0.2)
+        self.assertEqual(self.publisher.events, [("jarvis_echange", {
+            "satellite": "Bureau", "transcript": "Allume la lumière",
+            "response": "Allumé.", "followup": False,
+        })])
+
+    async def test_exchange_dropped_when_not_connected(self) -> None:
         pass
 
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.13.0
+
+- **New**: each voice exchange is published as a `jarvis_echange` event on the Home Assistant event bus, e.g. for a "last commands" dashboard: `{"satellite", "transcript", "response", "followup"}`
+- HA doesn't put the text of voice exchanges on its event bus; the satellite receives it (`transcript`, then `synthesize`) and fires the event through the shared HA WebSocket connection (`fire_event`). `followup` is true for an answer given without the wake word.
+- Announcements (TTS without a transcript) produce no event. When the WebSocket is down, the event is dropped (debug log), not queued.
+- New app option `publish_exchanges` (default on) to turn it off.
+- The HA WebSocket connection is now also opened when no satellite uses media_player output (without the state subscription), unless `publish_exchanges` is off.
+
 ## 2.12.2
 
 - **Fix**: the HA configuration form refused to save a unicast satellite ("please fill in multicast group") — `vban_receive_multicast_group` was a required string, empty in unicast mode

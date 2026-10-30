@@ -30,6 +30,7 @@ class FakeHomeAssistant:
         self.token = token
         self.sockets: list[web.WebSocketResponse] = []
         self.subscriptions: list[dict] = []
+        self.received: list[dict] = []  # messages after the subscription
         self.subscribed = asyncio.Event()
         self.port = _free_tcp_port()
         self._runner: web.AppRunner
@@ -66,6 +67,7 @@ class FakeHomeAssistant:
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
                 break
+            self.received.append(msg.json())
         return ws
 
     async def set_state(self, state: str, media_content_id: str = "") -> None:
@@ -146,6 +148,22 @@ class HaStateWatcherTest(unittest.IsolatedAsyncioTestCase):
             ENTITY, lambda c: c.state == "playing", time.monotonic(), timeout=0.2,
         )
         self.assertIsNone(result)
+
+    async def test_fire_event(self) -> None:
+        data = {"satellite": "Bureau", "transcript": "a", "response": "b",
+                "followup": False}
+        self.assertTrue(await self.watcher.fire_event("jarvis_echange", data))
+        await asyncio.sleep(0.1)
+        msg = self.ha.received[-1]
+        self.assertEqual(msg["type"], "fire_event")
+        self.assertEqual(msg["event_type"], "jarvis_echange")
+        self.assertEqual(msg["event_data"], data)
+        self.assertGreater(msg["id"], self.ha.subscriptions[0]["id"])
+
+    async def test_fire_event_not_connected(self) -> None:
+        await self.ha.drop_connections()
+        await asyncio.sleep(0.05)
+        self.assertFalse(await self.watcher.fire_event("jarvis_echange", {}))
 
     async def test_disconnect_returns_none_and_reconnects(self) -> None:
         waiter = asyncio.create_task(self.watcher.wait_for(

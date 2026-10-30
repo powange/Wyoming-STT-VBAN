@@ -27,6 +27,9 @@ configuration:
       followup_timeout_s:
         name: Delai de relance (s)
         description: Retour a l'ecoute du mot-cle si personne ne parle dans ce delai (3-30, defaut 8)
+  publish_exchanges:
+    name: Publier les echanges
+    description: Envoyer un evenement Home Assistant jarvis_echange pour chaque demande et reponse (satellite, transcript, reponse, relance)
   debug_logging:
     name: Journalisation de debogage
     description: Activer la journalisation detaillee

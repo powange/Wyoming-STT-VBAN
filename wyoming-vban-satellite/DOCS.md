@@ -145,6 +145,21 @@ Wake word detection now resumes only once the response has played. If a
 run ends without a spoken response nor an error (empty response), the
 satellite goes back to wake word listening after 60 s.
 
+### Voice exchanges as Home Assistant events
+
+- **publish_exchanges** (app option, default: `true`): after each voice request, fire a `jarvis_echange` event on the Home Assistant event bus, e.g. to show the last commands on a dashboard:
+
+```json
+{"satellite": "Bureau", "transcript": "Allume la lumière",
+ "response": "Allumé", "followup": false}
+```
+
+`followup` is `true` for an answer given without the wake word after a
+question. Announcements produce no event. Events are dropped (not queued)
+while the Home Assistant WebSocket connection is down. Set to `false` to
+publish nothing. To check: Developer tools → Events → listen to
+`jarvis_echange`.
+
 ### Other
 
 - **satellite_name**: Name shown in Home Assistant

@@ -96,8 +96,11 @@ class SatelliteConfig:
             self.followup_timeout_s = timeout
 
 
-def load_options(path: str) -> tuple[list[SatelliteConfig], bool]:
-    """Read the app options file. Returns (satellites, debug_logging)."""
+def load_options(path: str) -> tuple[list[SatelliteConfig], bool, bool]:
+    """Read the app options file.
+
+    Returns (satellites, debug_logging, publish_exchanges).
+    """
     with open(path, encoding="utf-8") as options_file:
         options = json.load(options_file)
 
@@ -105,7 +108,12 @@ def load_options(path: str) -> tuple[list[SatelliteConfig], bool]:
         SatelliteConfig.from_options(entry, index)
         for index, entry in enumerate(options.get("satellites") or [])
     ]
-    return satellites, bool(options.get("debug_logging"))
+    publish = options.get("publish_exchanges")
+    return (
+        satellites,
+        bool(options.get("debug_logging")),
+        True if publish is None else bool(publish),
+    )
 
 
 def validate(satellites: list[SatelliteConfig]) -> None:
