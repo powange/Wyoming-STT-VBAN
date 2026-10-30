@@ -55,7 +55,14 @@ class SatelliteConfig:
         return cls(**values)
 
     def normalize(self) -> None:
-        """Clamp numeric options to their valid range (with a warning)."""
+        """Clean up options and clamp numeric ones to their valid range."""
+        # The multicast group is only used in multicast mode (and optional
+        # in the schema): ignore a leftover value in unicast mode.
+        self.vban_receive_multicast_group = (
+            self.vban_receive_multicast_group.strip()
+            if self.vban_receive_mode == "multicast" else ""
+        )
+
         volume = max(0.0, min(2.0, self.tts_vban_volume))
         if volume != self.tts_vban_volume:
             _LOGGER.warning(
@@ -128,8 +135,9 @@ def validate(satellites: list[SatelliteConfig]) -> None:
 
         if sat.vban_receive_mode == "multicast" and not sat.vban_receive_multicast_group:
             raise ConfigError(
-                f"Satellite '{sat.name}': multicast mode requires "
-                "vban_receive_multicast_group"
+                f"Satellite '{sat.name}': vban_receive_mode is multicast but "
+                "vban_receive_multicast_group is empty. Set the multicast group "
+                "address (e.g. 239.0.0.1), or use unicast mode."
             )
 
         if sat.tts_vban_enabled and not sat.tts_vban_address:

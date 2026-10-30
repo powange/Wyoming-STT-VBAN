@@ -23,7 +23,7 @@ Optionally, TTS responses can be sent back to a VBAN output stream.
 
 - **vban_receive_port**: UDP port to listen on (default: 6980)
 - **vban_receive_mode**: `unicast` or `multicast`
-- **vban_receive_multicast_group**: Multicast group address (e.g. `239.0.0.1`), required when mode is `multicast`
+- **vban_receive_multicast_group**: Multicast group address (e.g. `239.0.0.1`), required when mode is `multicast` (optional, ignored in `unicast` mode)
 - **vban_receive_stream_name**: VBAN stream name routed to this satellite. Leave empty to accept any stream not claimed by another satellite on the same port.
 
 #### Several satellites on the same VBAN port
@@ -101,7 +101,6 @@ Nest Mini:
   wyoming_port: 10700
   vban_receive_port: 6980
   vban_receive_mode: unicast
-  vban_receive_multicast_group: ""
   vban_receive_stream_name: ""
   tts_vban_enabled: false
   tts_vban_mode: unicast

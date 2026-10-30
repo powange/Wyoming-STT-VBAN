@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.12.2
+
+- **Fix**: the HA configuration form refused to save a unicast satellite ("please fill in multicast group") — `vban_receive_multicast_group` was a required string, empty in unicast mode
+- `vban_receive_multicast_group` is now optional (`str?`) and no longer in the default satellite options. Absent, null or empty is accepted in unicast mode, where the value is ignored (a leftover value no longer counts as a different setting for satellites sharing a port).
+- Multicast mode without a group stops the app at startup with an explicit error.
+
 ## 2.12.1
 
 - **Fix**: follow-up — the answer given right after the beep was lost

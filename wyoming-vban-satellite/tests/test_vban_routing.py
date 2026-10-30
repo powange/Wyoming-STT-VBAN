@@ -117,6 +117,26 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             validate(sats)
 
+    def test_multicast_group_optional_in_unicast(self) -> None:
+        sats = self._load([
+            {"name": "Bureau", "wyoming_port": 10700},  # group absent
+            {"name": "Salon", "wyoming_port": 10701,
+             "vban_receive_multicast_group": None},
+            # Leftover group in unicast: ignored (no shared-port conflict)
+            {"name": "Cuisine", "wyoming_port": 10702,
+             "vban_receive_multicast_group": "239.0.0.1"},
+        ])
+        validate(sats)
+        self.assertEqual([s.vban_receive_multicast_group for s in sats], ["", "", ""])
+
+    def test_multicast_without_group_is_rejected(self) -> None:
+        for group in (None, "", "  "):
+            entry = {"name": "Bureau", "vban_receive_mode": "multicast"}
+            if group is not None:
+                entry["vban_receive_multicast_group"] = group
+            with self.assertRaisesRegex(ConfigError, "multicast group"):
+                validate(self._load([entry]))
+
     def test_duplicate_wyoming_port(self) -> None:
         sats = self._load([
             {"name": "Bureau", "wyoming_port": 10700},
