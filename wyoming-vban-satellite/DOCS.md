@@ -125,6 +125,12 @@ needed as usual.
 
 At most 3 follow-ups in a row; then the wake word is required again.
 
+The follow-up run starts together with the beep. The microphone is replaced
+by silence while the beep plays (0.45 s on a media player, 0.55 s on VBAN),
+so the beep isn't captured; if you already started answering by then, the
+audio recorded during that time is sent first. The no-speech timeout starts
+once the microphone is open.
+
 How it works: Home Assistant does not tell Wyoming satellites to continue
 the conversation, and its automatic restart (`restart_on_end`) always
 restarts at the wake word stage. With follow-ups enabled, the satellite

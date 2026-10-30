@@ -7,6 +7,7 @@ Run from wyoming-vban-satellite/:  python3 -m unittest discover tests
 
 import asyncio
 import socket
+import time
 import unittest
 from typing import Optional
 
@@ -27,6 +28,7 @@ from wyoming_vban.satellite import (
     VbanSatelliteHandler,
     make_satellite_info,
 )
+from wyoming_vban.vban import VbanPacket
 
 
 def _free_tcp_port() -> int:
@@ -36,8 +38,10 @@ def _free_tcp_port() -> int:
 
 
 class FakeReceiver:
+    callback = None
+
     def subscribe(self, callback, stream_name="") -> None:
-        pass
+        self.callback = callback
 
     def unsubscribe(self, callback) -> None:
         pass
@@ -67,11 +71,12 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.sender = FakeVbanSender()
+        self.receiver = FakeReceiver()
         port = _free_tcp_port()
         self.server = AsyncServer.from_uri(f"tcp://127.0.0.1:{port}")
         await self.server.start(
             lambda reader, writer: VbanSatelliteHandler(
-                reader, writer, make_satellite_info("Bureau"), FakeReceiver(),
+                reader, writer, make_satellite_info("Bureau"), self.receiver,
                 self.sender, followup=self.followup,
             )
         )
@@ -182,13 +187,70 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
 
 class FollowupBeepTest(FollowupTest):
     followup = FollowupSettings(enabled=True, beep=True, timeout_s=0.5)
+    GUARD = VbanSatelliteHandler.BEEP_SECONDS + VbanSatelliteHandler.VBAN_PLAYBACK_LATENCY_S
 
     async def test_question_reply_is_played_before_next_run(self) -> None:
         await self.next_run()
         await self.respond("Quelle lumière ?")
         await self.next_run()
-        # The response, then the 150 ms beep (16 kHz, 16-bit), before the run
+        await asyncio.sleep(0.1)
+        # The response, then the 150 ms beep (16 kHz, 16-bit), sent with the run
         self.assertEqual(self.sender.sent, [4410, int(16000 * 0.15) * 2])
+
+    async def _mic(self, seconds: float) -> None:
+        """Loud microphone audio, in real time."""
+        for i in range(int(seconds / 0.016)):
+            self.receiver.callback(VbanPacket(
+                sample_rate=16000, samples_per_frame=256, channels=1,
+                data_format=1, codec=0, stream_name="AtomBureau",
+                frame_counter=i, payload=b"\x00\x40" * 256,
+            ))
+            await asyncio.sleep(0.016)
+
+    async def _chunks_after_run(self, seconds: float) -> tuple[float, list]:
+        """(time of the ASR run, [(time, loud?) of audio chunks / audio-stop])."""
+        await self.next_run()
+        await self.respond("Quelle lumière ?")
+        run = await self.next_run()
+        self.assertEqual(run.start_stage, "asr")
+        t_run = time.monotonic()
+        mic = asyncio.create_task(self._mic(seconds))
+        events = []
+        while (left := t_run + seconds - time.monotonic()) > 0:
+            try:
+                event = await asyncio.wait_for(self.ha.read_event(), left)
+            except asyncio.TimeoutError:
+                break
+            if event.type == "audio-chunk":
+                events.append((time.monotonic() - t_run, any(event.payload)))
+            elif event.type == "audio-stop":
+                events.append((time.monotonic() - t_run, "audio-stop"))
+        await mic
+        return t_run, events
+
+    async def test_mic_silent_during_beep_guard_then_preroll(self) -> None:
+        _, events = await self._chunks_after_run(1.5)
+        chunks = [(t, loud) for t, loud in events if loud != "audio-stop"]
+        # Only silence during the guard
+        self.assertTrue(all(not loud for t, loud in chunks if t < self.GUARD - 0.05))
+        # Then the kept audio arrives at once, ahead of real time
+        loud = [t for t, is_loud in chunks if is_loud]
+        self.assertTrue(loud)
+        first = loud[0]
+        self.assertGreaterEqual(first, self.GUARD - 0.05)
+        burst = [t for t in loud if t < first + 0.1]
+        self.assertGreaterEqual(len(burst), 8)
+
+    async def test_no_speech_timeout_starts_after_guard(self) -> None:
+        # The mic is silent here: no voice-started, so the timeout fires
+        await self.next_run()
+        await self.respond("Quelle pièce ?")
+        await self.next_run()
+        t_run = time.monotonic()
+        self.assertIsNotNone(await self.next_event("audio-stop", timeout=3))
+        self.assertGreaterEqual(
+            time.monotonic() - t_run, self.GUARD + self.followup.timeout_s - 0.05,
+        )
 
 
 class FollowupDisabledTest(FollowupTest):

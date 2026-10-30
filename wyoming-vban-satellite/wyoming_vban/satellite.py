@@ -2,6 +2,7 @@
 
 import asyncio
 import audioop
+import collections
 import logging
 import math
 import struct
@@ -142,7 +143,17 @@ class VbanSatelliteHandler(AsyncEventHandler):
     # Run end not seen this long after stopping a follow-up: assume it ended
     FOLLOWUP_END_TIMEOUT_S = 10.0
     # VBAN receiver (e.g. Atom) buffering after the last packet is sent
-    VBAN_PLAYBACK_LATENCY_S = 0.3
+    VBAN_PLAYBACK_LATENCY_S = 0.4
+    # Follow-up beep: mic audio replaced by silence this long after the beep
+    # is started, so it isn't captured. media_player: from play_media's
+    # HTTP 200 (Cast starts in 0.07-0.2 s, beep 0.15 s); VBAN: beep + Atom
+    # prebuffer, from sending.
+    BEEP_GUARD_S = 0.45
+    BEEP_SECONDS = 0.15
+    # Mic audio kept during the guard, sent first if the user is already
+    # speaking when it ends (answer started right after the beep)
+    PREROLL_S = 0.6
+    PREROLL_VOICE_DB = -45.0  # level of the last 128 ms counted as speech
 
     def __init__(
         self,
@@ -204,6 +215,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # before the grace period after RunPipeline.
         self._mic_paused = False
         self._mic_resume_at = 0.0
+        # Follow-up beep guard: mic replaced by silence until this time
+        self._mic_guard_until = 0.0
+        self._preroll: collections.deque[bytes] = collections.deque(
+            maxlen=max(1, int(self.PREROLL_S * WYOMING_RATE / 1024))
+        )
 
     async def run(self) -> None:
         """Run the handler, suppressing connection errors from the base class.
@@ -256,8 +272,12 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return True
 
         if event.type == "voice-started":
-            # Speech in a follow-up run: no more no-speech timeout
-            if self._followup_active and not self._followup_timed_out:
+            # Speech in a follow-up run (once listening): no more timeout
+            if (
+                self._followup_active
+                and not self._followup_timed_out
+                and time.monotonic() >= self._mic_guard_until
+            ):
                 self._cancel_watchdog()
             return True
 
@@ -658,14 +678,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 _LOGGER.info(
                     "Follow-up: response is a question → listening without wake word"
                 )
-                if self._followup.beep:
-                    await self._play_beep()
+                # Start the ASR run right away, together with the beep, so HA
+                # is ready as soon as the user answers. The mic is silenced
+                # during the beep guard, then the no-speech timeout starts.
                 self._followup_active = True
+                self._preroll.clear()
+                # Silenced until the beep has started (play_media may be slow)
+                self._mic_guard_until = time.monotonic() + 3600
                 await self._send_run_pipeline(PipelineStage.ASR)
-                self._set_watchdog(
-                    self.STREAM_GRACE_S + self._followup.timeout_s,
-                    self._on_followup_timeout,
-                )
+                guard = await self._start_beep() if self._followup.beep else 0.0
+                guard = max(guard, self.STREAM_GRACE_S)
+                self._mic_guard_until = time.monotonic() + guard
+                self._set_watchdog(guard, self._on_followup_listening)
                 return
 
             if expect:
@@ -677,20 +701,35 @@ class VbanSatelliteHandler(AsyncEventHandler):
         except (ConnectionError, OSError):
             pass
 
-    async def _play_beep(self) -> None:
-        """Signal "I'm listening" on the satellite's output; returns once played."""
+    async def _start_beep(self) -> float:
+        """Start the "I'm listening" beep on the satellite's output.
+
+        Doesn't wait for it to play (a Cast device may not go back to idle
+        after such a short sound). Returns how long the mic must stay
+        silenced from now (0 if no beep could be played).
+        """
+        guard = 0.0
         if self._media_output:
             rate = 22050
-            url = self._media_output.publish(build_wav(make_beep(rate), rate, 2, 1))
-            requested_at = time.monotonic()
+            beep = make_beep(rate, self.BEEP_SECONDS)
+            url = self._media_output.publish(build_wav(beep, rate, 2, 1))
             if await self._media_output.play(url):
-                await self._wait_playback_end(url, 0.15, requested_at)
-                return
-        if self._vban_sender:
+                guard = self.BEEP_GUARD_S
+        if not guard and self._vban_sender:
             self._vban_sender.reset_resampler()
             self._vban_sender.clear_pending()
-            self._vban_sender.send(make_beep(WYOMING_RATE), sample_rate=WYOMING_RATE)
-            await self._wait_vban_played()
+            self._vban_sender.send(
+                make_beep(WYOMING_RATE, self.BEEP_SECONDS), sample_rate=WYOMING_RATE,
+            )
+            guard = self.BEEP_SECONDS + self.VBAN_PLAYBACK_LATENCY_S
+        if guard:
+            _LOGGER.info("Follow-up: beep sent, mic opens in %.2fs", guard)
+        return guard
+
+    def _on_followup_listening(self) -> None:
+        """Beep guard over: the user's answer now reaches HA."""
+        _LOGGER.info("Follow-up: listening")
+        self._set_watchdog(self._followup.timeout_s, self._on_followup_timeout)
 
     async def _wait_vban_played(self) -> None:
         """Return once the VBAN output has been sent and played."""
@@ -709,6 +748,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._next_run_task = None
         self._followup_active = False
         self._followup_timed_out = False
+        self._mic_guard_until = 0.0
+        self._preroll.clear()
         self._expect_followup = False
         self._followup_count = 0
         self._awaiting_response = False
@@ -810,9 +851,25 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     send_pcm = bytes(audio_buffer[:target_bytes])
                     del audio_buffer[:target_bytes]
 
-                    # Between runs, or right after RunPipeline: don't send
-                    if self._mic_paused or time.monotonic() < self._mic_resume_at:
+                    # Between runs: don't send
+                    if self._mic_paused:
                         continue
+
+                    # Follow-up beep guard: keep the real audio (pre-roll)
+                    now = time.monotonic()
+                    in_guard = now < self._mic_guard_until
+                    if in_guard:
+                        self._preroll.append(send_pcm)
+
+                    # Right after RunPipeline: let HA process it first
+                    if now < self._mic_resume_at:
+                        continue
+
+                    # During the guard, HA gets silence instead of the mic
+                    if in_guard:
+                        send_pcm = bytes(len(send_pcm))
+                    elif self._preroll:
+                        await self._flush_preroll()
 
                     chunks_sent += 1
 
@@ -872,6 +929,29 @@ class VbanSatelliteHandler(AsyncEventHandler):
             except (ConnectionError, OSError, asyncio.CancelledError):
                 pass
             _LOGGER.info("Audio streaming stopped (total chunks sent: %d)", chunks_sent)
+
+    async def _flush_preroll(self) -> None:
+        """After the beep guard: send the kept audio if speech has started."""
+        chunks = list(self._preroll)
+        self._preroll.clear()
+        tail = b"".join(chunks[-2:])
+        rms = audioop.rms(tail, WYOMING_WIDTH)
+        db = 20 * math.log10(max(rms, 1) / 32768)
+        if db < self.PREROLL_VOICE_DB:
+            return
+        _LOGGER.debug(
+            "Follow-up: speech during the beep guard (%.1f dB), sending %d ms",
+            db, len(chunks) * 64,
+        )
+        for audio in chunks:
+            await self.write_event(
+                AudioChunk(
+                    rate=WYOMING_RATE,
+                    width=WYOMING_WIDTH,
+                    channels=WYOMING_CHANNELS,
+                    audio=audio,
+                ).event()
+            )
 
     def _on_vban_audio(self, packet: VbanPacket) -> None:
         """Callback from VBAN receiver — enqueue resampled audio."""

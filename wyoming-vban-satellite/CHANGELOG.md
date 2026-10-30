@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.12.1
+
+- **Fix**: follow-up — the answer given right after the beep was lost
+- 2.11.0 waited for the media_player to go back to idle after the beep before starting the ASR run. A Cast device stays `playing` after such a short sound, so the satellite waited ~5 s (end-of-playback timeout) with the mic paused: an immediate answer never reached HA, then the no-speech timeout expired.
+- The ASR run now starts together with the beep, without waiting for it to play. The mic is replaced by silence for a fixed guard so the beep isn't captured: 0.45 s from `play_media`'s HTTP 200 (media_player), or beep + 0.4 s Atom prebuffer = 0.55 s from sending (VBAN).
+- The mic audio of the guard (up to 0.6 s) is kept and sent first if speech has already started when the guard ends (last 128 ms above -45 dBFS); otherwise it is dropped.
+- `followup_timeout_s` now starts when the mic opens.
+- VBAN end-of-playback margin (receiver prebuffer) raised from 0.3 to 0.4 s.
+- New logs: `Follow-up: beep sent, mic opens in X.XXs`, `Follow-up: listening`.
+
 ## 2.12.0
 
 - **Dependencies**: `wyoming` 1.8.0 → 1.10.2, `zeroconf` ≥ 0.151.5, `aiohttp` ≥ 3.14
