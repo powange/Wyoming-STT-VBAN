@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.12.0
+
+- **Dependencies**: `wyoming` 1.8.0 → 1.10.2, `zeroconf` ≥ 0.151.5, `aiohttp` ≥ 3.14
+- **Base image**: Python 3.11 / Alpine 3.18 → Python 3.12 / Alpine 3.24 (aarch64, amd64). armhf, armv7 and i386 use Python 3.12 / Alpine 3.22, the last base images published for 32-bit architectures. Python 3.12 is the latest version that still ships `audioop` (removed in 3.13).
+- The Dockerfile no longer installs Alpine's own Python next to the base image's one (the app always ran on the base image's Python).
+
 ## 2.11.0
 
 - **New**: follow-up without wake word — when a response is a question (text ending with `?`), the satellite listens for the answer right away, with a short beep (150 ms, 880 Hz) on its output
