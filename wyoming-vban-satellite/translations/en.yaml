@@ -42,6 +42,18 @@ configuration:
       search_sound:
         name: Internet search sound file
         description: WAV file replacing the built-in search sound (empty = built-in)
+      vision_phrase_enabled:
+        name: Camera look phrase
+        description: Say a phrase on the jarvis_vision event, while a camera snapshot is analyzed (default on)
+      vision_phrase:
+        name: Camera look phrase text
+        description: Default "Attends, je regarde."
+      vision_tts_engine:
+        name: Phrase TTS engine
+        description: TTS entity used to synthesize the phrase (default tts.piper)
+      vision_tts_voice:
+        name: Phrase TTS voice
+        description: Voice used for the phrase (default fr_FR-siwis-medium)
   publish_exchanges:
     name: Publish exchanges
     description: Fire a jarvis_echange Home Assistant event with each request and response (satellite, transcript, response, follow-up)

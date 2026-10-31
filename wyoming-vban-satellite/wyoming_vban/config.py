@@ -10,6 +10,7 @@ from .const import DEFAULT_VBAN_PORT
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TTS_HTTP_PORT = 10800  # + satellite index
+DEFAULT_VISION_PHRASE = "Attends, je regarde."
 
 
 class ConfigError(Exception):
@@ -46,6 +47,10 @@ class SatelliteConfig:
     thinking_delay_ms: int = 1000
     thinking_sound: str = ""  # WAV file replacing the built-in sound
     search_sound: str = ""
+    vision_phrase_enabled: bool = True
+    vision_phrase: str = DEFAULT_VISION_PHRASE
+    vision_tts_engine: str = "tts.piper"  # HA TTS entity used for the phrase
+    vision_tts_voice: str = "fr_FR-siwis-medium"
 
     @classmethod
     def from_options(cls, options: dict[str, Any], index: int) -> "SatelliteConfig":
@@ -109,6 +114,9 @@ class SatelliteConfig:
             self.thinking_delay_ms = delay
         self.thinking_sound = self.thinking_sound.strip()
         self.search_sound = self.search_sound.strip()
+        self.vision_phrase = self.vision_phrase.strip() or DEFAULT_VISION_PHRASE
+        self.vision_tts_engine = self.vision_tts_engine.strip() or "tts.piper"
+        self.vision_tts_voice = self.vision_tts_voice.strip()
 
 
 def load_options(path: str) -> tuple[list[SatelliteConfig], bool, bool]:

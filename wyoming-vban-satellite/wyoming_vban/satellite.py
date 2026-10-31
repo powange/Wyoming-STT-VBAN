@@ -9,7 +9,7 @@ import struct
 import time
 import wave
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from wyoming.asr import Transcript
 from wyoming.audio import AudioChunk, AudioFormat, AudioStart, AudioStop
@@ -30,6 +30,9 @@ from .const import WYOMING_CHANNELS, WYOMING_RATE, WYOMING_WIDTH
 from .ha_ws import HaStateWatcher
 from .media_player import MediaPlayerOutput, build_wav
 from .vban import VbanPacket, VbanReceiver, VbanSender, resample_to_wyoming
+
+if TYPE_CHECKING:
+    from .tts_phrase import TtsPhrase
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -122,6 +125,9 @@ class WaitingCues:
     thinking: Optional[Cue] = None  # None = disabled
     search: Optional[Cue] = None
     thinking_delay_s: float = 1.0
+    # Spoken phrase on a camera look (jarvis_vision); its cue is None until
+    # synthesized
+    vision: Optional["TtsPhrase"] = None
 
 
 # Handlers between transcript and response: told about internet searches
@@ -133,6 +139,13 @@ def notify_search(data: dict) -> None:
     being prepared (the event doesn't say which satellite asked)."""
     for handler in list(_THINKING_HANDLERS):
         handler.on_search(data)
+
+
+def notify_vision(data: dict) -> None:
+    """jarvis_vision HA event: say the vision phrase where a response is
+    being prepared (the event doesn't say which satellite asked)."""
+    for handler in list(_THINKING_HANDLERS):
+        handler.on_vision(data)
 
 
 class MicMute:
@@ -276,6 +289,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._thinking = False
         self._thinking_timer: Optional[asyncio.Task] = None
         self._search_cue_played = False  # at most one search sound per run
+        self._vision_played = False  # at most one vision phrase per run
         self._cue_task: Optional[asyncio.Task] = None  # sound being played
         self._mic_silence_until = 0.0  # mic replaced by silence (sound playing)
 
@@ -520,10 +534,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
     def _start_thinking(self) -> None:
         """Transcript received: the response is being prepared."""
         self._stop_thinking()
-        if not self._has_output() or not (self._cues.thinking or self._cues.search):
+        if not self._has_output() or not (
+            self._cues.thinking or self._cues.search or self._cues.vision
+        ):
             return
         self._thinking = True
         self._search_cue_played = False
+        self._vision_played = False
         _THINKING_HANDLERS.add(self)
         if self._cues.thinking:
             self._thinking_timer = asyncio.create_task(self._thinking_after_delay())
@@ -546,6 +563,21 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if self._thinking and self._cues.search and not self._search_cue_played:
             self._search_cue_played = True
             self._play_cue(self._cues.search, "search")
+
+    def on_vision(self, data: dict) -> None:
+        """jarvis_vision: the response needs a camera look. Say the phrase,
+        in place of the waiting sounds (none after it in this run)."""
+        phrase = self._cues.vision
+        if not self._thinking or phrase is None or self._vision_played:
+            return
+        if phrase.cue is None:
+            _LOGGER.debug("Vision phrase not synthesized yet: skipped")
+            return
+        self._vision_played = True
+        self._search_cue_played = True
+        if self._thinking_timer and not self._thinking_timer.done():
+            self._thinking_timer.cancel()
+        self._play_cue(phrase.cue, "vision phrase")
 
     def _cue_playing(self) -> bool:
         return self._cue_task is not None and not self._cue_task.done()

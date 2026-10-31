@@ -32,6 +32,7 @@ from wyoming_vban.satellite import (
     WaitingCues,
     make_satellite_info,
     notify_search,
+    notify_vision,
 )
 from wyoming_vban.vban import VbanPacket
 
@@ -308,18 +309,27 @@ THINKING = Cue.tones(THINKING_NOTES, 0.15)
 SEARCH = Cue.tones(SEARCH_NOTES, 0.2)
 
 
+class FakePhrase:
+    """A synthesized phrase (TtsPhrase stand-in)."""
+
+    cue = Cue(bytes(2 * 22050), 22050)  # 1 s
+
+
 class WaitingSoundTest(unittest.IsolatedAsyncioTestCase):
     """Waiting sounds between transcript and response (VBAN output)."""
 
     async def asyncSetUp(self) -> None:
         self.sender = FakeVbanSender()
+        self.phrase = FakePhrase()
         port = _free_tcp_port()
         self.server = AsyncServer.from_uri(f"tcp://127.0.0.1:{port}")
         await self.server.start(
             lambda reader, writer: VbanSatelliteHandler(
                 reader, writer, make_satellite_info("Bureau"), FakeReceiver(),
                 self.sender, followup=FollowupSettings(enabled=True, beep=False),
-                waiting_cues=WaitingCues(THINKING, SEARCH, thinking_delay_s=0.3),
+                waiting_cues=WaitingCues(
+                    THINKING, SEARCH, thinking_delay_s=0.3, vision=self.phrase,
+                ),
             )
         )
         self.ha = AsyncTcpClient("127.0.0.1", port)
@@ -378,6 +388,47 @@ class WaitingSoundTest(unittest.IsolatedAsyncioTestCase):
         # The playing sound isn't cut, the queued search sound is dropped
         self.assertEqual(self.sender.cleared, cleared)
         self.assertEqual(self.sender.sent, [len(THINKING.pcm)])
+
+
+class VisionPhraseTest(WaitingSoundTest):
+    """'Attends, je regarde.' on the jarvis_vision event."""
+
+    PHRASE = len(FakePhrase.cue.pcm)
+
+    async def test_phrase_replaces_waiting_sounds(self) -> None:
+        await self.transcript()
+        await asyncio.sleep(0.1)  # before the thinking sound
+        notify_vision({"question": "Combien de doigts ?", "piece": "bureau"})
+        notify_search({"question": "x"})  # no sound after the phrase
+        await asyncio.sleep(0.6)
+        self.assertEqual(self.sender.sent, [self.PHRASE])
+
+    async def test_phrase_after_playing_thinking_sound(self) -> None:
+        await self.transcript()
+        await asyncio.sleep(0.32)  # thinking sound playing
+        notify_vision({"question": "x", "piece": "bureau"})
+        await asyncio.sleep(0.5)
+        self.assertEqual(self.sender.sent, [len(THINKING.pcm), self.PHRASE])
+
+    async def test_response_waits_for_the_phrase(self) -> None:
+        await self.transcript()
+        await asyncio.sleep(0.1)
+        notify_vision({"question": "x", "piece": "bureau"})
+        await asyncio.sleep(0.1)
+        cleared = self.sender.cleared
+        await self.response()  # during the phrase: it isn't cut
+        self.assertEqual(self.sender.cleared, cleared)
+        self.assertEqual(self.sender.sent, [self.PHRASE])
+
+    async def test_not_synthesized_yet_or_not_thinking(self) -> None:
+        notify_vision({"question": "x", "piece": "bureau"})  # not thinking
+        self.phrase.cue = None  # synthesis not done
+        await self.transcript()
+        notify_vision({"question": "x", "piece": "bureau"})
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.sender.sent, [])
+
+    # Inherited waiting sound tests also run with a vision phrase configured
 
 
 class FollowupDisabledTest(FollowupTest):

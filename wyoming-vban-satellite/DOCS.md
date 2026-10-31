@@ -166,6 +166,23 @@ Options (per satellite):
 - **thinking_delay_ms**: 300–5000 (default: 1000)
 - **thinking_sound** / **search_sound**: WAV file replacing the built-in sound, e.g. `/share/jarvis/thinking.wav` (the app has read access to `/share`). Keep it short: the response waits for it to finish.
 
+#### "Attends, je regarde." on a camera look
+
+When a `jarvis_vision` Home Assistant event is fired (e.g. by a script just
+before taking a camera snapshot), the satellite(s) waiting for a response
+**say** a short phrase instead of the waiting sounds. The phrase is
+synthesized once by Home Assistant's TTS (at startup, and again when the
+options change), then cached in `/data`, so it plays immediately. A response
+arriving during the phrase waits for it to finish.
+
+- **vision_phrase_enabled**: default `true`
+- **vision_phrase**: default `Attends, je regarde.`
+- **vision_tts_engine**: TTS entity, default `tts.piper`
+- **vision_tts_voice**: voice, default `fr_FR-siwis-medium`
+
+If Home Assistant is not ready at startup, synthesis is retried every 30 s;
+until then, the event is ignored.
+
 ### Voice exchanges as Home Assistant events
 
 - **publish_exchanges** (app option, default: `true`): after each voice request, fire a `jarvis_echange` event on the Home Assistant event bus, e.g. to show the last commands on a dashboard:

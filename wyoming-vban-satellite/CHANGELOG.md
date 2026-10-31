@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.15.0
+
+- **New**: "Attends, je regarde." — on the `jarvis_vision` HA event (fired before a camera snapshot), the satellite(s) waiting for a response say a phrase instead of the waiting sounds (no thinking/search sound after it in that run)
+- The phrase is synthesized once by HA (`POST /api/tts_get_url` via the Supervisor, 16-bit mono WAV) and cached in `/data`, so it plays immediately; a changed text, engine or voice gives a new cache file (old ones are removed at startup). Synthesis is retried every 30 s while HA is not ready.
+- A response arriving during the phrase waits for it to finish; the mic is silenced while it plays.
+- New per-satellite options `vision_phrase_enabled` (default on), `vision_phrase` (default "Attends, je regarde."), `vision_tts_engine` (default `tts.piper`), `vision_tts_voice` (default `fr_FR-siwis-medium`).
+
 ## 2.14.0
 
 - **New**: waiting sounds while the response is being prepared, on the satellite's output (media_player or VBAN)

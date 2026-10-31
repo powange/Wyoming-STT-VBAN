@@ -42,6 +42,18 @@ configuration:
       search_sound:
         name: Fichier du son de recherche
         description: Fichier WAV remplacant le son de recherche integre (vide = son integre)
+      vision_phrase_enabled:
+        name: Phrase de regard camera
+        description: Dire une phrase sur l'evenement jarvis_vision, pendant l'analyse de la photo de la camera (active par defaut)
+      vision_phrase:
+        name: Texte de la phrase camera
+        description: Par defaut "Attends, je regarde."
+      vision_tts_engine:
+        name: Moteur TTS de la phrase
+        description: Entite TTS utilisee pour synthetiser la phrase (defaut tts.piper)
+      vision_tts_voice:
+        name: Voix de la phrase
+        description: Voix utilisee pour la phrase (defaut fr_FR-siwis-medium)
   publish_exchanges:
     name: Publier les echanges
     description: Envoyer un evenement Home Assistant jarvis_echange pour chaque demande et reponse (satellite, transcript, reponse, relance)

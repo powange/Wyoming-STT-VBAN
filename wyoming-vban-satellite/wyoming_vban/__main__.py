@@ -27,7 +27,9 @@ from .satellite import (
     WaitingCues,
     make_satellite_info,
     notify_search,
+    notify_vision,
 )
+from .tts_phrase import TtsPhrase, remove_stale_phrases
 from .vban import VbanReceiver, VbanSender
 
 _LOGGER = logging.getLogger(__name__)
@@ -162,6 +164,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thinking-sound", default="", help="WAV file (default: built-in)")
     parser.add_argument("--search-sound", default="", help="WAV file (default: built-in)")
 
+    # Spoken phrase when Jarvis looks at a camera (jarvis_vision HA event)
+    parser.add_argument(
+        "--vision-phrase-enabled", action=argparse.BooleanOptionalAction, default=True,
+    )
+    parser.add_argument("--vision-phrase", default="Attends, je regarde.")
+    parser.add_argument("--vision-tts-engine", default="tts.piper")
+    parser.add_argument("--vision-tts-voice", default="fr_FR-siwis-medium")
+    parser.add_argument(
+        "--cache-dir", default="/data", help="Where synthesized phrases are cached",
+    )
+
     # Publish each voice exchange as a HA event (needs the Supervisor API)
     parser.add_argument(
         "--publish-exchanges",
@@ -207,6 +220,22 @@ def _waiting_cues(cfg: SatelliteConfig) -> WaitingCues:
     )
 
 
+def _vision_phrases(
+    satellites: list[SatelliteConfig], cache_dir: str
+) -> dict[str, TtsPhrase]:
+    """One TtsPhrase per distinct (text, engine, voice), by satellite name."""
+    phrases: dict[tuple[str, str, str], TtsPhrase] = {}
+    by_satellite: dict[str, TtsPhrase] = {}
+    for sat in satellites:
+        if not sat.vision_phrase_enabled:
+            continue
+        key = (sat.vision_phrase, sat.vision_tts_engine, sat.vision_tts_voice)
+        if key not in phrases:
+            phrases[key] = TtsPhrase(*key, cache_dir=cache_dir)
+        by_satellite[sat.name] = phrases[key]
+    return by_satellite
+
+
 def _config_from_args(args: argparse.Namespace) -> SatelliteConfig:
     """Single-satellite configuration from command-line options."""
     values = {
@@ -221,6 +250,7 @@ async def run_satellite(
     vban_receiver: VbanReceiver,
     state_watcher: Optional[HaStateWatcher] = None,
     publish_exchanges: bool = False,
+    vision_phrase: Optional[TtsPhrase] = None,
 ) -> None:
     """Run one satellite (Wyoming server, TTS outputs, Zeroconf) until cancelled."""
     _SATELLITE_NAME.set(cfg.name)
@@ -279,10 +309,12 @@ async def run_satellite(
         timeout_s=cfg.followup_timeout_s,
     )
     waiting_cues = _waiting_cues(cfg)
+    waiting_cues.vision = vision_phrase
     _LOGGER.info(
-        "  Waiting sounds: thinking %s, search %s",
+        "  Waiting sounds: thinking %s, search %s, vision phrase %s",
         f"after {cfg.thinking_delay_ms} ms" if waiting_cues.thinking else "off",
         "on" if waiting_cues.search else "off",
+        f"'{cfg.vision_phrase}'" if vision_phrase else "off",
     )
     _LOGGER.info(
         "  Follow-up without wake word: %s",
@@ -425,13 +457,22 @@ async def main() -> int:
     # publishes voice exchanges as HA events
     media_players = [s.tts_media_player for s in satellites if s.tts_output == "media_player"]
     search_sounds = any(s.search_sound_enabled for s in satellites)
+    # Vision phrase: synthesized by HA once, cached on disk
+    vision_phrases = _vision_phrases(satellites, args.cache_dir)
+    unique_phrases = list({id(p): p for p in vision_phrases.values()}.values())
+    remove_stale_phrases(unique_phrases)
+    phrase_tasks = [asyncio.create_task(p.run()) for p in unique_phrases]
     state_watcher = (
         HaStateWatcher(media_players)
-        if media_players or publish_exchanges or search_sounds else None
+        if media_players or publish_exchanges or search_sounds or vision_phrases
+        else None
     )
     if state_watcher and search_sounds:
         # Internet search started (fired by script.demander_ia_externe)
         state_watcher.add_event_listener("jarvis_recherche", notify_search)
+    if state_watcher and vision_phrases:
+        # Camera look started (fired by script.regarder_la_camera)
+        state_watcher.add_event_listener("jarvis_vision", notify_vision)
     _LOGGER.info(
         "Voice exchanges %s",
         "published as jarvis_echange events" if publish_exchanges else "not published",
@@ -448,6 +489,7 @@ async def main() -> int:
         asyncio.create_task(
             run_satellite(
                 sat, receivers[sat.vban_receive_port], state_watcher, publish_exchanges,
+                vision_phrases.get(sat.name),
             )
         ): sat.name
         for sat in satellites
@@ -485,6 +527,10 @@ async def main() -> int:
         if watcher_task:
             watcher_task.cancel()
             await asyncio.gather(watcher_task, return_exceptions=True)
+
+        for task in phrase_tasks:
+            task.cancel()
+        await asyncio.gather(*phrase_tasks, return_exceptions=True)
 
         # Stop VBAN receivers
         for receiver in receivers.values():
