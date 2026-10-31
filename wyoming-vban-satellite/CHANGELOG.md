@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.15.1
+
+- **Config form**: satellite fields reordered by group (microphone, output choice, VBAN output, media player, follow-up, waiting sounds, camera phrase) and labelled with their group, e.g. "[Media player] Entity"; descriptions say which option a field depends on ("Only if output = media_player"…). All fields are now translated (English, French).
+- No config change: same option names and types (Home Assistant's form can't hide fields depending on other options).
+
 ## 2.15.0
 
 - **New**: "Attends, je regarde." — on the `jarvis_vision` HA event (fired before a camera snapshot), the satellite(s) waiting for a response say a phrase instead of the waiting sounds (no thinking/search sound after it in that run)

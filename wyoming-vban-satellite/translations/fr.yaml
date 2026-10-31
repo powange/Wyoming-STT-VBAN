@@ -3,57 +3,96 @@ configuration:
     name: Satellites
     description: Liste des sources satellites VBAN
     fields:
+      name:
+        name: Nom
+        description: Nom du satellite affiche dans Home Assistant
+      wyoming_port:
+        name: Port Wyoming
+        description: Port TCP de ce satellite, unique par satellite (ex. 10700, 10701...)
+      vban_receive_port:
+        name: '[Micro] Port VBAN'
+        description: Port UDP qui recoit le flux du micro (partageable entre satellites)
+      vban_receive_mode:
+        name: '[Micro] Mode VBAN'
+        description: unicast ou multicast
+      vban_receive_multicast_group:
+        name: '[Micro] Groupe multicast'
+        description: Seulement en mode multicast, ex. 239.0.0.1
+      vban_receive_stream_name:
+        name: '[Micro] Nom du flux VBAN'
+        description: Flux dirige vers ce satellite (vide = tout flux non reclame par un autre satellite du port)
       tts_output:
-        name: Sortie TTS
-        description: "Ou jouer les reponses : vban ou media_player"
+        name: '[Sortie] Sortie des reponses'
+        description: 'vban (defaut) ou media_player : determine si les champs [Sortie VBAN] ou [Media player] sont utilises'
+      tts_vban_enabled:
+        name: '[Sortie VBAN] Activee'
+        description: 'Envoyer les reponses en flux VBAN (avec la sortie media_player : secours si play_media echoue)'
+      tts_vban_mode:
+        name: '[Sortie VBAN] Mode'
+        description: Seulement si la sortie VBAN est activee
+      tts_vban_address:
+        name: '[Sortie VBAN] Adresse'
+        description: IP de l'enceinte (ex. l'Atom). Seulement si la sortie VBAN est activee
+      tts_vban_port:
+        name: '[Sortie VBAN] Port'
+        description: Seulement si la sortie VBAN est activee (defaut 6980)
+      tts_vban_stream_name:
+        name: '[Sortie VBAN] Nom du flux'
+        description: Seulement si la sortie VBAN est activee
+      tts_vban_volume:
+        name: '[Sortie VBAN] Volume'
+        description: 0.0-2.0 (defaut 1.0)
+      tts_vban_batch_packets:
+        name: '[Sortie VBAN] Paquets par envoi'
+        description: 1-8 (defaut 1, le plus regulier pour les recepteurs ESP32)
       tts_media_player:
-        name: Lecteur multimedia TTS
-        description: Entite media_player utilisee quand la sortie TTS est media_player (ex. media_player.nestmini7039)
+        name: '[Media player] Entite'
+        description: Seulement si sortie = media_player, ex. media_player.nestmini7039
       tts_http_port:
-        name: Port HTTP TTS
-        description: Port servant l'audio TTS au lecteur (defaut 10800 + position du satellite)
+        name: '[Media player] Port HTTP'
+        description: Seulement si sortie = media_player (defaut 10800 + position du satellite)
       tts_http_host:
-        name: Hote HTTP TTS
-        description: IP LAN de cet hote utilisee dans l'URL TTS (vide = detection automatique)
+        name: '[Media player] Hote HTTP'
+        description: 'Seulement si sortie = media_player : IP LAN de cet hote dans l''URL (vide = detection automatique)'
       mic_mute_tail_ms:
-        name: Marge de coupure micro (ms)
-        description: Sortie media_player - garder le micro coupe ce temps apres la lecture de la reponse (defaut 250, 0 = aucune)
+        name: '[Media player] Marge de coupure micro (ms)'
+        description: 'Seulement si sortie = media_player : micro coupe ce temps apres la reponse (defaut 250)'
       followup_enabled:
-        name: Relance sans mot-cle
+        name: '[Relance] Activee'
         description: Quand la reponse est une question, ecouter la reponse sans mot-cle (active par defaut)
       followup_beep:
-        name: Bip de relance
-        description: Bip sur la sortie du satellite quand il ecoute la reponse (active par defaut)
+        name: '[Relance] Bip'
+        description: 'Seulement si la relance est activee : bip quand le satellite ecoute (active par defaut)'
       followup_timeout_s:
-        name: Delai de relance (s)
-        description: Retour a l'ecoute du mot-cle si personne ne parle dans ce delai (3-30, defaut 8)
+        name: '[Relance] Delai (s)'
+        description: 'Seulement si la relance est activee : retour au mot-cle sans parole (3-30, defaut 8)'
       thinking_sound_enabled:
-        name: Son de reflexion
-        description: Jouer un son doux quand la reponse tarde (active par defaut)
-      search_sound_enabled:
-        name: Son de recherche internet
-        description: Jouer un son sur l'evenement jarvis_recherche, quand une recherche internet commence (active par defaut)
+        name: '[Sons d''attente] Son de reflexion'
+        description: Son doux quand la reponse tarde (active par defaut)
       thinking_delay_ms:
-        name: Delai du son de reflexion (ms)
-        description: Jouer le son de reflexion si pas de reponse apres ce delai (300-5000, defaut 1000)
+        name: '[Sons d''attente] Delai de reflexion (ms)'
+        description: Seulement si le son de reflexion est active (300-5000, defaut 1000)
       thinking_sound:
-        name: Fichier du son de reflexion
-        description: Fichier WAV remplacant le son integre, ex. /share/jarvis/reflexion.wav (vide = son integre)
+        name: '[Sons d''attente] Fichier du son de reflexion'
+        description: 'Seulement si le son de reflexion est active : WAV remplacant le son integre, ex. /share/jarvis/reflexion.wav'
+      search_sound_enabled:
+        name: '[Sons d''attente] Son de recherche internet'
+        description: Son sur l'evenement jarvis_recherche (active par defaut)
       search_sound:
-        name: Fichier du son de recherche
-        description: Fichier WAV remplacant le son de recherche integre (vide = son integre)
+        name: '[Sons d''attente] Fichier du son de recherche'
+        description: 'Seulement si le son de recherche est active : WAV remplacant le son integre'
       vision_phrase_enabled:
-        name: Phrase de regard camera
-        description: Dire une phrase sur l'evenement jarvis_vision, pendant l'analyse de la photo de la camera (active par defaut)
+        name: '[Camera] Phrase activee'
+        description: Dire une phrase sur l'evenement jarvis_vision (active par defaut)
       vision_phrase:
-        name: Texte de la phrase camera
-        description: Par defaut "Attends, je regarde."
+        name: '[Camera] Phrase'
+        description: Seulement si la phrase est activee (defaut "Attends, je regarde.")
       vision_tts_engine:
-        name: Moteur TTS de la phrase
-        description: Entite TTS utilisee pour synthetiser la phrase (defaut tts.piper)
+        name: '[Camera] Moteur TTS'
+        description: Seulement si la phrase est activee (defaut tts.piper)
       vision_tts_voice:
-        name: Voix de la phrase
-        description: Voix utilisee pour la phrase (defaut fr_FR-siwis-medium)
+        name: '[Camera] Voix TTS'
+        description: Seulement si la phrase est activee (defaut fr_FR-siwis-medium)
   publish_exchanges:
     name: Publier les echanges
     description: Envoyer un evenement Home Assistant jarvis_echange pour chaque demande et reponse (satellite, transcript, reponse, relance)

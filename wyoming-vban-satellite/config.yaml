@@ -1,6 +1,6 @@
 name: "Wyoming VBAN Satellite"
 description: "Use VBAN audio sources as Wyoming voice assistant satellites for Home Assistant"
-version: "2.15.0"
+version: "2.15.1"
 slug: wyoming-vban-satellite
 url: "https://github.com/powange/Wyoming-STT-VBAN"
 arch:
@@ -22,6 +22,7 @@ options:
       vban_receive_port: 6980
       vban_receive_mode: "unicast"
       vban_receive_stream_name: ""
+      tts_output: "vban"
       tts_vban_enabled: false
       tts_vban_mode: "unicast"
       tts_vban_address: ""
@@ -29,7 +30,6 @@ options:
       tts_vban_stream_name: "TTS1"
       tts_vban_volume: 1.0
       tts_vban_batch_packets: 1
-      tts_output: "vban"
   publish_exchanges: true
   debug_logging: false
 
@@ -41,6 +41,7 @@ schema:
       vban_receive_mode: "list(unicast|multicast)"
       vban_receive_multicast_group: "str?"
       vban_receive_stream_name: str
+      tts_output: "list(vban|media_player)?"
       tts_vban_enabled: bool
       tts_vban_mode: "list(unicast|multicast)"
       tts_vban_address: str
@@ -48,7 +49,6 @@ schema:
       tts_vban_stream_name: str
       tts_vban_volume: "float(0.0,2.0)?"
       tts_vban_batch_packets: "int(1,8)?"
-      tts_output: "list(vban|media_player)?"
       tts_media_player: "str?"
       tts_http_port: "port?"
       tts_http_host: "str?"
@@ -57,9 +57,9 @@ schema:
       followup_beep: "bool?"
       followup_timeout_s: "int(3,30)?"
       thinking_sound_enabled: "bool?"
-      search_sound_enabled: "bool?"
       thinking_delay_ms: "int(300,5000)?"
       thinking_sound: "str?"
+      search_sound_enabled: "bool?"
       search_sound: "str?"
       vision_phrase_enabled: "bool?"
       vision_phrase: "str?"

@@ -3,57 +3,96 @@ configuration:
     name: Satellites
     description: List of VBAN satellite sources
     fields:
+      name:
+        name: Name
+        description: Satellite name shown in Home Assistant
+      wyoming_port:
+        name: Wyoming port
+        description: TCP port of this satellite, unique per satellite (e.g. 10700, 10701...)
+      vban_receive_port:
+        name: '[Mic] VBAN port'
+        description: UDP port receiving the microphone stream (several satellites can share it)
+      vban_receive_mode:
+        name: '[Mic] VBAN mode'
+        description: unicast or multicast
+      vban_receive_multicast_group:
+        name: '[Mic] Multicast group'
+        description: Only in multicast mode, e.g. 239.0.0.1
+      vban_receive_stream_name:
+        name: '[Mic] VBAN stream name'
+        description: Stream routed to this satellite (empty = any stream not claimed by another satellite on the port)
       tts_output:
-        name: TTS output
-        description: "Where responses are played: vban or media_player"
+        name: '[Output] Response output'
+        description: 'vban (default) or media_player: chooses which [VBAN output] or [Media player] fields are used'
+      tts_vban_enabled:
+        name: '[VBAN output] Enabled'
+        description: 'Send responses as a VBAN stream (with media_player output: fallback if play_media fails)'
+      tts_vban_mode:
+        name: '[VBAN output] Mode'
+        description: Only if VBAN output is enabled
+      tts_vban_address:
+        name: '[VBAN output] Address'
+        description: IP of the speaker (e.g. the Atom). Only if VBAN output is enabled
+      tts_vban_port:
+        name: '[VBAN output] Port'
+        description: Only if VBAN output is enabled (default 6980)
+      tts_vban_stream_name:
+        name: '[VBAN output] Stream name'
+        description: Only if VBAN output is enabled
+      tts_vban_volume:
+        name: '[VBAN output] Volume'
+        description: 0.0-2.0 (default 1.0)
+      tts_vban_batch_packets:
+        name: '[VBAN output] Packets per send'
+        description: 1-8 (default 1, smoothest for ESP32 receivers)
       tts_media_player:
-        name: TTS media player
-        description: media_player entity used when TTS output is media_player (e.g. media_player.nestmini7039)
+        name: '[Media player] Entity'
+        description: Only if output = media_player, e.g. media_player.nestmini7039
       tts_http_port:
-        name: TTS HTTP port
-        description: Port serving TTS audio to the media player (default 10800 + satellite position)
+        name: '[Media player] HTTP port'
+        description: Only if output = media_player (default 10800 + satellite position)
       tts_http_host:
-        name: TTS HTTP host
-        description: LAN IP of this host used in the TTS URL (empty = auto-detect)
+        name: '[Media player] HTTP host'
+        description: 'Only if output = media_player: LAN IP of this host in the URL (empty = auto-detect)'
       mic_mute_tail_ms:
-        name: Mic mute tail (ms)
-        description: media_player output - keep the mic muted this long after the response has played (default 250, 0 = none)
+        name: '[Media player] Mic mute tail (ms)'
+        description: 'Only if output = media_player: mic kept muted this long after the response (default 250)'
       followup_enabled:
-        name: Follow-up without wake word
+        name: '[Follow-up] Enabled'
         description: When a response is a question, listen for the answer without the wake word (default on)
       followup_beep:
-        name: Follow-up beep
-        description: Beep on the satellite output when listening for the answer (default on)
+        name: '[Follow-up] Beep'
+        description: 'Only if follow-up is enabled: beep when listening (default on)'
       followup_timeout_s:
-        name: Follow-up timeout (s)
-        description: Back to wake word listening if no speech within this time (3-30, default 8)
+        name: '[Follow-up] Timeout (s)'
+        description: 'Only if follow-up is enabled: back to the wake word without speech (3-30, default 8)'
       thinking_sound_enabled:
-        name: Thinking sound
-        description: Play a soft sound when the response takes a while (default on)
-      search_sound_enabled:
-        name: Internet search sound
-        description: Play a sound on the jarvis_recherche event, when an internet search starts (default on)
+        name: '[Waiting sounds] Thinking sound'
+        description: Soft sound when the response takes a while (default on)
       thinking_delay_ms:
-        name: Thinking sound delay (ms)
-        description: Play the thinking sound if no response after this time (300-5000, default 1000)
+        name: '[Waiting sounds] Thinking delay (ms)'
+        description: Only if the thinking sound is on (300-5000, default 1000)
       thinking_sound:
-        name: Thinking sound file
-        description: WAV file replacing the built-in thinking sound, e.g. /share/jarvis/thinking.wav (empty = built-in)
+        name: '[Waiting sounds] Thinking sound file'
+        description: 'Only if the thinking sound is on: WAV replacing the built-in sound, e.g. /share/jarvis/reflexion.wav'
+      search_sound_enabled:
+        name: '[Waiting sounds] Internet search sound'
+        description: Sound on the jarvis_recherche event (default on)
       search_sound:
-        name: Internet search sound file
-        description: WAV file replacing the built-in search sound (empty = built-in)
+        name: '[Waiting sounds] Search sound file'
+        description: 'Only if the search sound is on: WAV replacing the built-in sound'
       vision_phrase_enabled:
-        name: Camera look phrase
-        description: Say a phrase on the jarvis_vision event, while a camera snapshot is analyzed (default on)
+        name: '[Camera] Phrase enabled'
+        description: Say a phrase on the jarvis_vision event (default on)
       vision_phrase:
-        name: Camera look phrase text
-        description: Default "Attends, je regarde."
+        name: '[Camera] Phrase'
+        description: Only if the phrase is enabled (default "Attends, je regarde.")
       vision_tts_engine:
-        name: Phrase TTS engine
-        description: TTS entity used to synthesize the phrase (default tts.piper)
+        name: '[Camera] TTS engine'
+        description: Only if the phrase is enabled (default tts.piper)
       vision_tts_voice:
-        name: Phrase TTS voice
-        description: Voice used for the phrase (default fr_FR-siwis-medium)
+        name: '[Camera] TTS voice'
+        description: Only if the phrase is enabled (default fr_FR-siwis-medium)
   publish_exchanges:
     name: Publish exchanges
     description: Fire a jarvis_echange Home Assistant event with each request and response (satellite, transcript, response, follow-up)
