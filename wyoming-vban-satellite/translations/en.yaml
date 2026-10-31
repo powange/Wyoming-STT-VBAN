@@ -120,6 +120,25 @@ configuration:
   publish_exchanges:
     name: Publish exchanges
     description: Fire a jarvis_echange Home Assistant event with each request and response (satellite, transcript, response, follow-up)
+  debug_mirror:
+    name: Debug audio copies
+    description: Send a copy of a satellite's audio as a VBAN stream, e.g. to listen with VBAN Receptor or VoiceMeeter (empty = none)
+    fields:
+      satellite:
+        name: Satellite
+        description: Satellite name, exactly as configured (e.g. VBAN Satellite Bureau)
+      stream:
+        name: Stream
+        description: "mic_received: microphone as received; mic_sent: audio sent to Home Assistant (16 kHz, with mutes); tts: responses"
+      address:
+        name: Address
+        description: IP of the computer receiving the copy
+      port:
+        name: Port
+        description: UDP port (default 6980)
+      stream_name:
+        name: VBAN stream name
+        description: Default <last word of the satellite name>-rx / -tx / -tts, e.g. Bureau-tx (16 characters max)
   debug_logging:
     name: Debug Logging
     description: Enable verbose debug logging

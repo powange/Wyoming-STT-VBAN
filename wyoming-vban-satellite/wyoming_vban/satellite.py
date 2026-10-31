@@ -32,6 +32,7 @@ from .media_player import MediaPlayerOutput, build_wav
 from .vban import VbanPacket, VbanReceiver, VbanSender, resample_to_wyoming
 
 if TYPE_CHECKING:
+    from .mirror import SatelliteMirrors
     from .tts_phrase import TtsPhrase
 
 _LOGGER = logging.getLogger(__name__)
@@ -251,6 +252,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         exchange_publisher: Optional[HaStateWatcher] = None,
         satellite_name: str = "",
         waiting_cues: Optional[WaitingCues] = None,
+        debug_mirrors: Optional["SatelliteMirrors"] = None,
     ):
         super().__init__(reader, writer)
         self._info = satellite_info
@@ -283,6 +285,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._satellite_name = satellite_name
         self._last_transcript = ""
         self._last_transcript_at = 0.0
+
+        # Debug copies of the audio sent to HA and of the responses
+        self._mirrors = debug_mirrors
 
         # Waiting sounds between transcript and response
         self._cues = waiting_cues or WaitingCues()
@@ -411,6 +416,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 "Receiving TTS audio from server: %dHz, %d-bit, %dch",
                 start.rate, start.width * 8, start.channels,
             )
+            if self._mirrors:
+                self._mirrors.tts_start()
             # After a transcript, this is the run's response; otherwise an
             # announcement (it doesn't end a run).
             self._response_audio = self._awaiting_response
@@ -441,6 +448,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return True
 
         if AudioChunk.is_type(event.type):
+            if self._mirrors:
+                chunk = AudioChunk.from_event(event)
+                self._mirrors.tts(chunk.audio, chunk.rate, chunk.width, chunk.channels)
             if self._media_output:
                 self._buffer_tts_chunk(AudioChunk.from_event(event).audio)
                 return True
@@ -1169,6 +1179,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                         audio=send_pcm,
                     )
                     await self.write_event(chunk.event())
+                    if self._mirrors:
+                        self._mirrors.mic_sent(send_pcm)
         except (ConnectionError, asyncio.CancelledError, OSError):
             pass
         finally:
@@ -1202,6 +1214,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     audio=audio,
                 ).event()
             )
+            if self._mirrors:
+                self._mirrors.mic_sent(audio)
 
     def _on_vban_audio(self, packet: VbanPacket) -> None:
         """Callback from VBAN receiver — enqueue resampled audio."""

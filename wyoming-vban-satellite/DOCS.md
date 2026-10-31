@@ -223,6 +223,32 @@ while the Home Assistant WebSocket connection is down. Set to `false` to
 publish nothing. To check: Developer tools → Events → listen to
 `jarvis_echange`.
 
+### Debug audio copies (`debug_mirror` app option)
+
+To check what a satellite hears or says, send a copy of one of its audio
+streams as VBAN to a computer, and listen with VBAN Receptor or VoiceMeeter.
+These are copies: the satellite keeps working normally.
+
+```yaml
+debug_mirror:
+  - satellite: VBAN Satellite Bureau
+    stream: mic_sent
+    address: 192.168.0.42
+    port: 6990
+```
+
+- **satellite**: satellite name, exactly as configured
+- **stream**:
+  - `mic_received`: the microphone as received from the device (sent even when Home Assistant is not connected)
+  - `mic_sent`: the audio actually sent to Home Assistant (16 kHz, with the silences of mutes, follow-up beep and waiting sounds) — the most useful to understand why something wasn't heard
+  - `tts`: the responses sent by Home Assistant (22.05 kHz, sent in real time)
+- **address**, **port** (default 6980): where to send the copy
+- **stream_name**: VBAN stream name, default last word of the satellite name + `-rx`, `-tx` or `-tts` (e.g. `Bureau-tx`)
+
+Several entries can target the same address and port: the stream names tell
+them apart. A wrong entry (unknown satellite or stream) is ignored with a
+warning. Leave the list empty (`debug_mirror: []`) when not debugging.
+
 ### Other
 
 - **debug_logging** (app option): Enable verbose logging

@@ -91,7 +91,7 @@ class ConfigTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
             json.dump({"satellites": satellites, "debug_logging": False}, f)
         try:
-            return load_options(f.name)[0]
+            return load_options(f.name).satellites
         finally:
             os.unlink(f.name)
 

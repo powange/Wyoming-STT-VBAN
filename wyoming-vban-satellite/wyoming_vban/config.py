@@ -2,7 +2,7 @@
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .const import DEFAULT_VBAN_PORT
@@ -183,11 +183,40 @@ class SatelliteConfig:
         self.vision_tts_voice = self.vision_tts_voice.strip()
 
 
-def load_options(path: str) -> tuple[list[SatelliteConfig], bool, bool]:
-    """Read the app options file.
+MIRROR_STREAMS = ("mic_received", "mic_sent", "tts")
 
-    Returns (satellites, debug_logging, publish_exchanges).
-    """
+
+@dataclass
+class DebugMirror:
+    """Copy of one satellite audio stream sent as VBAN for debugging."""
+
+    satellite: str
+    stream: str  # one of MIRROR_STREAMS
+    address: str
+    port: int = DEFAULT_VBAN_PORT
+    stream_name: str = ""  # VBAN stream name (default: <satellite>-<stream>)
+
+    def vban_stream_name(self) -> str:
+        """VBAN stream names are 16 ASCII chars max: last word of the
+        satellite name + short stream suffix, e.g. "Bureau-tx"."""
+        if self.stream_name:
+            return self.stream_name[:16]
+        suffix = {"mic_received": "rx", "mic_sent": "tx", "tts": "tts"}[self.stream]
+        word = (self.satellite.split() or ["sat"])[-1]
+        word = "".join(c for c in word if c.isascii() and c.isalnum()) or "sat"
+        return f"{word[:16 - len(suffix) - 1]}-{suffix}"
+
+
+@dataclass
+class AppOptions:
+    satellites: list[SatelliteConfig]
+    debug_logging: bool = False
+    publish_exchanges: bool = True
+    debug_mirrors: list[DebugMirror] = field(default_factory=list)
+
+
+def load_options(path: str) -> AppOptions:
+    """Read the app options file."""
     with open(path, encoding="utf-8") as options_file:
         options = json.load(options_file)
 
@@ -196,11 +225,44 @@ def load_options(path: str) -> tuple[list[SatelliteConfig], bool, bool]:
         for index, entry in enumerate(options.get("satellites") or [])
     ]
     publish = options.get("publish_exchanges")
-    return (
-        satellites,
-        bool(options.get("debug_logging")),
-        True if publish is None else bool(publish),
+    mirrors = [
+        DebugMirror(**{
+            key: value for key, value in entry.items()
+            if key in DebugMirror.__dataclass_fields__ and value is not None
+        })
+        for entry in options.get("debug_mirror") or []
+    ]
+    return AppOptions(
+        satellites=satellites,
+        debug_logging=bool(options.get("debug_logging")),
+        publish_exchanges=True if publish is None else bool(publish),
+        debug_mirrors=mirrors,
     )
+
+
+def validate_mirrors(
+    mirrors: list[DebugMirror], satellites: list[SatelliteConfig]
+) -> list[DebugMirror]:
+    """Keep the valid debug mirrors (a wrong one only logs a warning)."""
+    names = {sat.name for sat in satellites}
+    valid = []
+    for mirror in mirrors:
+        if mirror.satellite not in names:
+            _LOGGER.warning(
+                "debug_mirror: unknown satellite '%s' (satellites: %s), ignored",
+                mirror.satellite, ", ".join(sorted(names)),
+            )
+        elif mirror.stream not in MIRROR_STREAMS:
+            _LOGGER.warning(
+                "debug_mirror: unknown stream '%s' (%s), ignored",
+                mirror.stream, ", ".join(MIRROR_STREAMS),
+            )
+        elif not mirror.address.strip():
+            _LOGGER.warning("debug_mirror: no address for %s, ignored", mirror.satellite)
+        else:
+            mirror.address = mirror.address.strip()
+            valid.append(mirror)
+    return valid
 
 
 def validate(satellites: list[SatelliteConfig]) -> None:

@@ -13,9 +13,17 @@ from typing import Optional
 from wyoming.server import AsyncServer
 from wyoming.zeroconf import HomeAssistantZeroconf
 
-from .config import ConfigError, SatelliteConfig, load_options, validate
+from .config import (
+    ConfigError,
+    DebugMirror,
+    SatelliteConfig,
+    load_options,
+    validate,
+    validate_mirrors,
+)
 from .const import DEFAULT_VBAN_PORT
 from .ha_ws import HaStateWatcher
+from .mirror import SatelliteMirrors
 from .media_player import MediaPlayerOutput, detect_local_ip
 from .satellite import (
     SEARCH_NOTES,
@@ -251,6 +259,7 @@ async def run_satellite(
     state_watcher: Optional[HaStateWatcher] = None,
     publish_exchanges: bool = False,
     vision_phrase: Optional[TtsPhrase] = None,
+    debug_mirrors: Optional[SatelliteMirrors] = None,
 ) -> None:
     """Run one satellite (Wyoming server, TTS outputs, Zeroconf) until cancelled."""
     _SATELLITE_NAME.set(cfg.name)
@@ -337,6 +346,7 @@ async def run_satellite(
             exchange_publisher=state_watcher if publish_exchanges else None,
             satellite_name=cfg.name,
             waiting_cues=waiting_cues,
+            debug_mirrors=debug_mirrors,
         )
 
     server: Optional[AsyncServer] = None
@@ -395,10 +405,14 @@ async def main() -> int:
 
     debug = args.debug
     publish_exchanges = args.publish_exchanges
+    mirror_options: list[DebugMirror] = []
     try:
         if args.options:
-            satellites, debug_option, publish_exchanges = load_options(args.options)
-            debug = debug or debug_option
+            app_options = load_options(args.options)
+            satellites = app_options.satellites
+            debug = debug or app_options.debug_logging
+            publish_exchanges = app_options.publish_exchanges
+            mirror_options = app_options.debug_mirrors
         else:
             if not args.name:
                 raise ConfigError("--name is required without --options")
@@ -435,6 +449,21 @@ async def main() -> int:
                 mode=sat.vban_receive_mode,
                 multicast_group=sat.vban_receive_multicast_group,
             )
+
+    # Debug copies of audio streams (debug_mirror option), per satellite.
+    # mic_received copies are fed by the receiver, whether or not HA is
+    # connected; the others by the satellite's Wyoming handler.
+    mirrors: dict[str, SatelliteMirrors] = {}
+    valid_mirrors = validate_mirrors(mirror_options, satellites)
+    for sat in satellites:
+        sat_mirrors = [m for m in valid_mirrors if m.satellite == sat.name]
+        if sat_mirrors:
+            mirrors[sat.name] = SatelliteMirrors(sat_mirrors)
+            mirrors[sat.name].open()
+            for raw in mirrors[sat.name].mic_received:
+                receivers[sat.vban_receive_port].subscribe(
+                    raw.on_packet, sat.vban_receive_stream_name,
+                )
 
     # Install signal handlers so SIGTERM / SIGINT trigger a clean shutdown
     # (HAOS sends SIGTERM to stop the container).
@@ -489,7 +518,7 @@ async def main() -> int:
         asyncio.create_task(
             run_satellite(
                 sat, receivers[sat.vban_receive_port], state_watcher, publish_exchanges,
-                vision_phrases.get(sat.name),
+                vision_phrases.get(sat.name), mirrors.get(sat.name),
             )
         ): sat.name
         for sat in satellites
@@ -531,6 +560,9 @@ async def main() -> int:
         for task in phrase_tasks:
             task.cancel()
         await asyncio.gather(*phrase_tasks, return_exceptions=True)
+
+        for sat_mirrors in mirrors.values():
+            await sat_mirrors.close()
 
         # Stop VBAN receivers
         for receiver in receivers.values():

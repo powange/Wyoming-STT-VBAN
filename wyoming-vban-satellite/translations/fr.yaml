@@ -120,6 +120,25 @@ configuration:
   publish_exchanges:
     name: Publier les echanges
     description: Envoyer un evenement Home Assistant jarvis_echange pour chaque demande et reponse (satellite, transcript, reponse, relance)
+  debug_mirror:
+    name: Copies audio de debug
+    description: Envoyer une copie de l'audio d'un satellite en flux VBAN, ex. pour l'ecouter avec VBAN Receptor ou VoiceMeeter (vide = aucune)
+    fields:
+      satellite:
+        name: Satellite
+        description: Nom du satellite, exactement comme configure (ex. VBAN Satellite Bureau)
+      stream:
+        name: Flux
+        description: "mic_received : micro tel que recu ; mic_sent : audio envoye a Home Assistant (16 kHz, avec les coupures) ; tts : reponses"
+      address:
+        name: Adresse
+        description: IP de l'ordinateur qui recoit la copie
+      port:
+        name: Port
+        description: Port UDP (defaut 6980)
+      stream_name:
+        name: Nom du flux VBAN
+        description: Par defaut <dernier mot du nom du satellite>-rx / -tx / -tts, ex. Bureau-tx (16 caracteres max)
   debug_logging:
     name: Journalisation de debogage
     description: Activer la journalisation detaillee

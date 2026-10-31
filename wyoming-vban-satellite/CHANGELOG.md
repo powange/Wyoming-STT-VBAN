@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.1.0
+
+- **New**: debug audio copies — the `debug_mirror` app option sends a copy of a satellite's audio as a VBAN stream to any address/port, e.g. to listen with VBAN Receptor or VoiceMeeter: `mic_received` (microphone as received), `mic_sent` (audio sent to HA, with mutes and guards), `tts` (responses, paced in real time). The satellite keeps working normally.
+- Default VBAN stream names `<last word of the satellite name>-rx / -tx / -tts` (e.g. `Bureau-tx`), overridable. Invalid entries are ignored with a warning.
+- App-level option with an empty default: existing 3.0 configurations stay valid.
+
 ## 3.0.0
 
 - **Breaking — configuration format**: satellite options are grouped in blocks, shown in the configuration form as lines that open on click: `microphone`, `vban_output`, `media_player`, `followup`, `waiting_sounds`, `camera_phrase`. `tts_output` becomes `output`.
