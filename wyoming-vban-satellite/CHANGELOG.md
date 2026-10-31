@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.0.0
+
+- **Breaking — configuration format**: satellite options are grouped in blocks, shown in the configuration form as lines that open on click: `microphone`, `vban_output`, `media_player`, `followup`, `waiting_sounds`, `camera_phrase`. `tts_output` becomes `output`.
+- **After updating, rewrite each satellite in the new format** (configuration tab → ⋮ → Edit in YAML); a 2.x configuration is rejected until then (Home Assistant's Supervisor drops the old option names and requires every block). See DOCS.md, "Upgrading from 2.x", for the name mapping and a full example. Every block must be present but can be empty (`{}` = defaults, `vban_output: {}` = no VBAN output).
+- Home Assistant's form can't hide a field depending on another option; blocks are the closest: each feature's settings stay folded in its own line.
+- Behavior unchanged. Error messages use the new option names (e.g. `vban_output.address`).
+
 ## 2.15.1
 
 - **Config form**: satellite fields reordered by group (microphone, output choice, VBAN output, media player, follow-up, waiting sounds, camera phrase) and labelled with their group, e.g. "[Media player] Entity"; descriptions say which option a field depends on ("Only if output = media_player"…). All fields are now translated (English, French).

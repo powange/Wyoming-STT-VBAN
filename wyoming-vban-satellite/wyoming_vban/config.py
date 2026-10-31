@@ -13,6 +13,70 @@ DEFAULT_TTS_HTTP_PORT = 10800  # + satellite index
 DEFAULT_VISION_PHRASE = "Attends, je regarde."
 
 
+# App options (3.0 format): satellite fields grouped in blocks, mapped to
+# the flat SatelliteConfig fields. "output" stays at the satellite level.
+OPTION_BLOCKS: dict[str, dict[str, str]] = {
+    "microphone": {
+        "vban_port": "vban_receive_port",
+        "vban_mode": "vban_receive_mode",
+        "multicast_group": "vban_receive_multicast_group",
+        "stream_name": "vban_receive_stream_name",
+    },
+    "vban_output": {
+        "enabled": "tts_vban_enabled",
+        "mode": "tts_vban_mode",
+        "address": "tts_vban_address",
+        "port": "tts_vban_port",
+        "stream_name": "tts_vban_stream_name",
+        "volume": "tts_vban_volume",
+        "batch_packets": "tts_vban_batch_packets",
+    },
+    "media_player": {
+        "entity": "tts_media_player",
+        "http_port": "tts_http_port",
+        "http_host": "tts_http_host",
+        "mic_mute_tail_ms": "mic_mute_tail_ms",
+    },
+    "followup": {
+        "enabled": "followup_enabled",
+        "beep": "followup_beep",
+        "timeout_s": "followup_timeout_s",
+    },
+    "waiting_sounds": {
+        "thinking": "thinking_sound_enabled",
+        "thinking_delay_ms": "thinking_delay_ms",
+        "thinking_file": "thinking_sound",
+        "search": "search_sound_enabled",
+        "search_file": "search_sound",
+    },
+    "camera_phrase": {
+        "enabled": "vision_phrase_enabled",
+        "text": "vision_phrase",
+        "tts_engine": "vision_tts_engine",
+        "tts_voice": "vision_tts_voice",
+    },
+}
+OPTION_RENAMES = {"output": "tts_output"}
+
+
+def flatten_satellite_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Satellite options in the block format → flat field names.
+
+    Flat (pre-3.0) names are accepted too, e.g. on the command line.
+    """
+    flat: dict[str, Any] = {}
+    for key, value in options.items():
+        if key in OPTION_BLOCKS and isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if sub_key in OPTION_BLOCKS[key]:
+                    flat[OPTION_BLOCKS[key][sub_key]] = sub_value
+                else:
+                    _LOGGER.warning("Unknown option %s.%s ignored", key, sub_key)
+        else:
+            flat[OPTION_RENAMES.get(key, key)] = value
+    return flat
+
+
 class ConfigError(Exception):
     """Invalid satellite configuration."""
 
@@ -57,7 +121,7 @@ class SatelliteConfig:
         """Build from one `satellites` entry; missing/null values use defaults."""
         values = {
             key: value
-            for key, value in options.items()
+            for key, value in flatten_satellite_options(options).items()
             if key in cls.__dataclass_fields__ and value is not None
         }
         values.setdefault("name", f"VBAN Satellite {index + 1}")
@@ -166,26 +230,27 @@ def validate(satellites: list[SatelliteConfig]) -> None:
 
         if sat.vban_receive_mode == "multicast" and not sat.vban_receive_multicast_group:
             raise ConfigError(
-                f"Satellite '{sat.name}': vban_receive_mode is multicast but "
-                "vban_receive_multicast_group is empty. Set the multicast group "
+                f"Satellite '{sat.name}': microphone.vban_mode is multicast but "
+                "microphone.multicast_group is empty. Set the multicast group "
                 "address (e.g. 239.0.0.1), or use unicast mode."
             )
 
         if sat.tts_vban_enabled and not sat.tts_vban_address:
             raise ConfigError(
-                f"Satellite '{sat.name}': TTS VBAN enabled but no tts_vban_address"
+                f"Satellite '{sat.name}': vban_output is enabled but vban_output.address "
+                "is empty"
             )
 
         if sat.tts_output == "media_player":
             if not sat.tts_media_player.startswith("media_player."):
                 raise ConfigError(
-                    f"Satellite '{sat.name}': tts_output is media_player but "
-                    f"tts_media_player is not a media_player entity_id: "
+                    f"Satellite '{sat.name}': output is media_player but "
+                    f"media_player.entity is not a media_player entity_id: "
                     f"'{sat.tts_media_player}'"
                 )
             if sat.tts_http_port in http_ports:
                 raise ConfigError(
-                    f"Satellite '{sat.name}' uses TTS HTTP port {sat.tts_http_port} "
+                    f"Satellite '{sat.name}' uses media_player.http_port {sat.tts_http_port} "
                     f"which is already taken by '{http_ports[sat.tts_http_port]}'"
                 )
             http_ports[sat.tts_http_port] = sat.name
@@ -201,7 +266,7 @@ def validate(satellites: list[SatelliteConfig]) -> None:
         if len(modes) > 1:
             raise ConfigError(
                 f"Satellites {', '.join(s.name for s in sats)} share VBAN port "
-                f"{port} but use different vban_receive_mode / multicast group. "
+                f"{port} but use different microphone.vban_mode / multicast_group. "
                 "Satellites on the same port must use the same mode and group."
             )
 
@@ -220,14 +285,14 @@ def validate(satellites: list[SatelliteConfig]) -> None:
             else:
                 _LOGGER.warning(
                     "Satellites %s share VBAN port %d without "
-                    "vban_receive_stream_name: they will all receive every "
-                    "unclaimed stream on this port. Set vban_receive_stream_name "
+                    "microphone.stream_name: they will all receive every "
+                    "unclaimed stream on this port. Set microphone.stream_name "
                     "to route each stream to one satellite.",
                     ", ".join(owners), port,
                 )
         if len(names.get("", [])) == 1:
             _LOGGER.info(
-                "VBAN port %d: %s has no vban_receive_stream_name and receives "
+                "VBAN port %d: %s has no microphone.stream_name and receives "
                 "every stream not claimed by another satellite on this port",
                 port, names[""][0],
             )

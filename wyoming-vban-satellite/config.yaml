@@ -1,6 +1,6 @@
 name: "Wyoming VBAN Satellite"
 description: "Use VBAN audio sources as Wyoming voice assistant satellites for Home Assistant"
-version: "2.15.1"
+version: "3.0.0"
 slug: wyoming-vban-satellite
 url: "https://github.com/powange/Wyoming-STT-VBAN"
 arch:
@@ -19,17 +19,16 @@ options:
   satellites:
     - name: "VBAN Satellite 1"
       wyoming_port: 10700
-      vban_receive_port: 6980
-      vban_receive_mode: "unicast"
-      vban_receive_stream_name: ""
-      tts_output: "vban"
-      tts_vban_enabled: false
-      tts_vban_mode: "unicast"
-      tts_vban_address: ""
-      tts_vban_port: 6980
-      tts_vban_stream_name: "TTS1"
-      tts_vban_volume: 1.0
-      tts_vban_batch_packets: 1
+      output: "vban"
+      microphone:
+        vban_port: 6980
+        vban_mode: "unicast"
+      vban_output:
+        enabled: false
+      media_player: {}
+      followup: {}
+      waiting_sounds: {}
+      camera_phrase: {}
   publish_exchanges: true
   debug_logging: false
 
@@ -37,33 +36,39 @@ schema:
   satellites:
     - name: str
       wyoming_port: port
-      vban_receive_port: port
-      vban_receive_mode: "list(unicast|multicast)"
-      vban_receive_multicast_group: "str?"
-      vban_receive_stream_name: str
-      tts_output: "list(vban|media_player)?"
-      tts_vban_enabled: bool
-      tts_vban_mode: "list(unicast|multicast)"
-      tts_vban_address: str
-      tts_vban_port: port
-      tts_vban_stream_name: str
-      tts_vban_volume: "float(0.0,2.0)?"
-      tts_vban_batch_packets: "int(1,8)?"
-      tts_media_player: "str?"
-      tts_http_port: "port?"
-      tts_http_host: "str?"
-      mic_mute_tail_ms: "int(0,5000)?"
-      followup_enabled: "bool?"
-      followup_beep: "bool?"
-      followup_timeout_s: "int(3,30)?"
-      thinking_sound_enabled: "bool?"
-      thinking_delay_ms: "int(300,5000)?"
-      thinking_sound: "str?"
-      search_sound_enabled: "bool?"
-      search_sound: "str?"
-      vision_phrase_enabled: "bool?"
-      vision_phrase: "str?"
-      vision_tts_engine: "str?"
-      vision_tts_voice: "str?"
+      output: "list(vban|media_player)?"
+      microphone:
+        vban_port: port
+        vban_mode: "list(unicast|multicast)?"
+        multicast_group: "str?"
+        stream_name: "str?"
+      vban_output:
+        enabled: "bool?"
+        mode: "list(unicast|multicast)?"
+        address: "str?"
+        port: "port?"
+        stream_name: "str?"
+        volume: "float(0.0,2.0)?"
+        batch_packets: "int(1,8)?"
+      media_player:
+        entity: "str?"
+        http_port: "port?"
+        http_host: "str?"
+        mic_mute_tail_ms: "int(0,5000)?"
+      followup:
+        enabled: "bool?"
+        beep: "bool?"
+        timeout_s: "int(3,30)?"
+      waiting_sounds:
+        thinking: "bool?"
+        thinking_delay_ms: "int(300,5000)?"
+        thinking_file: "str?"
+        search: "bool?"
+        search_file: "str?"
+      camera_phrase:
+        enabled: "bool?"
+        text: "str?"
+        tts_engine: "str?"
+        tts_voice: "str?"
   publish_exchanges: "bool?"
   debug_logging: bool

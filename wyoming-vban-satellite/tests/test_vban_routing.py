@@ -137,6 +137,47 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "multicast group"):
                 validate(self._load([entry]))
 
+    def test_block_format(self) -> None:
+        sats = self._load([{
+            "name": "Bureau", "wyoming_port": 10700, "output": "media_player",
+            "microphone": {"vban_port": 6980, "stream_name": "AtomBureau"},
+            "vban_output": {"enabled": True, "address": "192.168.1.50", "volume": 0.8},
+            "media_player": {"entity": "media_player.nestmini7039"},
+            "followup": {"timeout_s": 10},
+            "waiting_sounds": {"search": False, "thinking_file": "/share/a.wav"},
+            "camera_phrase": {"text": "Je regarde."},
+        }])
+        validate(sats)
+        sat = sats[0]
+        self.assertEqual(sat.tts_output, "media_player")
+        self.assertEqual(sat.vban_receive_stream_name, "AtomBureau")
+        self.assertEqual(sat.vban_receive_mode, "unicast")  # default
+        self.assertTrue(sat.tts_vban_enabled)
+        self.assertEqual(sat.tts_vban_address, "192.168.1.50")
+        self.assertEqual(sat.tts_vban_volume, 0.8)
+        self.assertEqual(sat.tts_media_player, "media_player.nestmini7039")
+        self.assertEqual(sat.tts_http_port, 10800)  # default: 10800 + index
+        self.assertEqual(sat.followup_timeout_s, 10)
+        self.assertTrue(sat.followup_enabled)
+        self.assertFalse(sat.search_sound_enabled)
+        self.assertEqual(sat.thinking_sound, "/share/a.wav")
+        self.assertEqual(sat.vision_phrase, "Je regarde.")
+
+    def test_empty_blocks_use_defaults(self) -> None:
+        sats = self._load([{
+            "name": "Salon", "wyoming_port": 10701,
+            "microphone": {"vban_port": 6980}, "vban_output": {},
+            "media_player": {}, "followup": {}, "waiting_sounds": {},
+            "camera_phrase": {},
+        }])
+        validate(sats)
+        sat = sats[0]
+        self.assertEqual(sat.tts_output, "vban")
+        self.assertFalse(sat.tts_vban_enabled)
+        self.assertTrue(sat.followup_enabled and sat.followup_beep)
+        self.assertEqual(sat.thinking_delay_ms, 1000)
+        self.assertEqual(sat.vision_phrase, "Attends, je regarde.")
+
     def test_duplicate_wyoming_port(self) -> None:
         sats = self._load([
             {"name": "Bureau", "wyoming_port": 10700},

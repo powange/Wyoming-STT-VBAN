@@ -9,90 +9,114 @@ configuration:
       wyoming_port:
         name: Wyoming port
         description: TCP port of this satellite, unique per satellite (e.g. 10700, 10701...)
-      vban_receive_port:
-        name: '[Mic] VBAN port'
-        description: UDP port receiving the microphone stream (several satellites can share it)
-      vban_receive_mode:
-        name: '[Mic] VBAN mode'
-        description: unicast or multicast
-      vban_receive_multicast_group:
-        name: '[Mic] Multicast group'
-        description: Only in multicast mode, e.g. 239.0.0.1
-      vban_receive_stream_name:
-        name: '[Mic] VBAN stream name'
-        description: Stream routed to this satellite (empty = any stream not claimed by another satellite on the port)
-      tts_output:
-        name: '[Output] Response output'
-        description: 'vban (default) or media_player: chooses which [VBAN output] or [Media player] fields are used'
-      tts_vban_enabled:
-        name: '[VBAN output] Enabled'
-        description: 'Send responses as a VBAN stream (with media_player output: fallback if play_media fails)'
-      tts_vban_mode:
-        name: '[VBAN output] Mode'
-        description: Only if VBAN output is enabled
-      tts_vban_address:
-        name: '[VBAN output] Address'
-        description: IP of the speaker (e.g. the Atom). Only if VBAN output is enabled
-      tts_vban_port:
-        name: '[VBAN output] Port'
-        description: Only if VBAN output is enabled (default 6980)
-      tts_vban_stream_name:
-        name: '[VBAN output] Stream name'
-        description: Only if VBAN output is enabled
-      tts_vban_volume:
-        name: '[VBAN output] Volume'
-        description: 0.0-2.0 (default 1.0)
-      tts_vban_batch_packets:
-        name: '[VBAN output] Packets per send'
-        description: 1-8 (default 1, smoothest for ESP32 receivers)
-      tts_media_player:
-        name: '[Media player] Entity'
-        description: Only if output = media_player, e.g. media_player.nestmini7039
-      tts_http_port:
-        name: '[Media player] HTTP port'
-        description: Only if output = media_player (default 10800 + satellite position)
-      tts_http_host:
-        name: '[Media player] HTTP host'
-        description: 'Only if output = media_player: LAN IP of this host in the URL (empty = auto-detect)'
-      mic_mute_tail_ms:
-        name: '[Media player] Mic mute tail (ms)'
-        description: 'Only if output = media_player: mic kept muted this long after the response (default 250)'
-      followup_enabled:
-        name: '[Follow-up] Enabled'
-        description: When a response is a question, listen for the answer without the wake word (default on)
-      followup_beep:
-        name: '[Follow-up] Beep'
-        description: 'Only if follow-up is enabled: beep when listening (default on)'
-      followup_timeout_s:
-        name: '[Follow-up] Timeout (s)'
-        description: 'Only if follow-up is enabled: back to the wake word without speech (3-30, default 8)'
-      thinking_sound_enabled:
-        name: '[Waiting sounds] Thinking sound'
-        description: Soft sound when the response takes a while (default on)
-      thinking_delay_ms:
-        name: '[Waiting sounds] Thinking delay (ms)'
-        description: Only if the thinking sound is on (300-5000, default 1000)
-      thinking_sound:
-        name: '[Waiting sounds] Thinking sound file'
-        description: 'Only if the thinking sound is on: WAV replacing the built-in sound, e.g. /share/jarvis/reflexion.wav'
-      search_sound_enabled:
-        name: '[Waiting sounds] Internet search sound'
-        description: Sound on the jarvis_recherche event (default on)
-      search_sound:
-        name: '[Waiting sounds] Search sound file'
-        description: 'Only if the search sound is on: WAV replacing the built-in sound'
-      vision_phrase_enabled:
-        name: '[Camera] Phrase enabled'
-        description: Say a phrase on the jarvis_vision event (default on)
-      vision_phrase:
-        name: '[Camera] Phrase'
-        description: Only if the phrase is enabled (default "Attends, je regarde.")
-      vision_tts_engine:
-        name: '[Camera] TTS engine'
-        description: Only if the phrase is enabled (default tts.piper)
-      vision_tts_voice:
-        name: '[Camera] TTS voice'
-        description: Only if the phrase is enabled (default fr_FR-siwis-medium)
+      output:
+        name: Response output
+        description: 'vban (default): the VBAN output block; media_player: the Media player block (VBAN output as fallback if enabled)'
+      microphone:
+        name: Microphone
+        description: VBAN stream of the microphone
+        fields:
+          vban_port:
+            name: VBAN port
+            description: UDP port receiving the microphone stream (several satellites can share it)
+          vban_mode:
+            name: VBAN mode
+            description: unicast (default) or multicast
+          multicast_group:
+            name: Multicast group
+            description: Only in multicast mode, e.g. 239.0.0.1
+          stream_name:
+            name: VBAN stream name
+            description: Stream routed to this satellite (empty = any stream not claimed by another satellite on the port)
+      vban_output:
+        name: VBAN output
+        description: Responses sent as a VBAN stream (leave empty if unused)
+        fields:
+          enabled:
+            name: Enabled
+            description: 'Send responses as a VBAN stream (default off; with media_player output: fallback if play_media fails)'
+          mode:
+            name: Mode
+            description: unicast (default) or multicast
+          address:
+            name: Address
+            description: IP of the speaker (e.g. the Atom), required if enabled
+          port:
+            name: Port
+            description: Default 6980
+          stream_name:
+            name: Stream name
+            description: Default TTS1
+          volume:
+            name: Volume
+            description: 0.0-2.0 (default 1.0)
+          batch_packets:
+            name: Packets per send
+            description: 1-8 (default 1, smoothest for ESP32 receivers)
+      media_player:
+        name: Media player
+        description: Only used if output = media_player (leave empty otherwise)
+        fields:
+          entity:
+            name: Entity
+            description: media_player entity, e.g. media_player.nestmini7039 (required if output = media_player)
+          http_port:
+            name: HTTP port
+            description: Default 10800 + satellite position
+          http_host:
+            name: HTTP host
+            description: LAN IP of this host in the URL (empty = auto-detect)
+          mic_mute_tail_ms:
+            name: Mic mute tail (ms)
+            description: Mic kept muted this long after the response (default 250)
+      followup:
+        name: Follow-up
+        description: Answer a question without the wake word (empty = defaults)
+        fields:
+          enabled:
+            name: Enabled
+            description: When a response is a question, listen for the answer without the wake word (default on)
+          beep:
+            name: Beep
+            description: Beep when listening (default on)
+          timeout_s:
+            name: Timeout (s)
+            description: Back to the wake word without speech (3-30, default 8)
+      waiting_sounds:
+        name: Waiting sounds
+        description: Sounds while the response is prepared (empty = defaults)
+        fields:
+          thinking:
+            name: Thinking sound
+            description: Soft sound when the response takes a while (default on)
+          thinking_delay_ms:
+            name: Thinking delay (ms)
+            description: 300-5000 (default 1000)
+          thinking_file:
+            name: Thinking sound file
+            description: WAV replacing the built-in sound, e.g. /share/jarvis/reflexion.wav
+          search:
+            name: Internet search sound
+            description: Sound on the jarvis_recherche event (default on)
+          search_file:
+            name: Search sound file
+            description: WAV replacing the built-in sound
+      camera_phrase:
+        name: Camera phrase
+        description: '"Attends, je regarde." on a camera look (empty = defaults)'
+        fields:
+          enabled:
+            name: Enabled
+            description: Say a phrase on the jarvis_vision event (default on)
+          text:
+            name: Phrase
+            description: Default "Attends, je regarde."
+          tts_engine:
+            name: TTS engine
+            description: Default tts.piper
+          tts_voice:
+            name: TTS voice
+            description: Default fr_FR-siwis-medium
   publish_exchanges:
     name: Publish exchanges
     description: Fire a jarvis_echange Home Assistant event with each request and response (satellite, transcript, response, follow-up)
