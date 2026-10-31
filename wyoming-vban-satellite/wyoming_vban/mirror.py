@@ -84,6 +84,16 @@ class SatelliteMirrors:
         self.mic_received: list[RawMirror] = []
         self._mic_sent: list[VbanSender] = []
         self._tts: list[VbanSender] = []
+        self._build(mirrors)
+
+    async def reconfigure(self, mirrors: list[DebugMirror]) -> None:
+        """Replace the mirrors (the satellite keeps running)."""
+        await self.close()
+        self.mic_received, self._mic_sent, self._tts = [], [], []
+        self._build(mirrors)
+        self.open()
+
+    def _build(self, mirrors: list[DebugMirror]) -> None:
         for mirror in mirrors:
             name = mirror.vban_stream_name()
             if mirror.stream == "mic_received":

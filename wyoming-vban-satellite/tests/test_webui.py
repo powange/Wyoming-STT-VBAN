@@ -125,7 +125,7 @@ class WebUITest(unittest.IsolatedAsyncioTestCase):
         new = copy.deepcopy(self.initial)
         new["satellites"][0]["wyoming_port"] = self.port_b
         status, body = await self.save(new)
-        self.assertEqual((status, body), (200, {"ok": True}))
+        self.assertEqual((status, body), (200, {"ok": True, "done": ["satellite 'Bureau' restarted"]}))
         self.assertEqual(self.supervisor.options, new)
         self.assertTrue(await self.can_connect(self.port_b))
         self.assertFalse(await self.can_connect(self.port_a))
@@ -162,6 +162,31 @@ class WebUITest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.supervisor.options, self.initial)  # saved back
         self.assertTrue(await self.can_connect(self.port_a))
         self.assertFalse(self.runtime.fatal.is_set())
+
+    async def test_status_test_export_import(self) -> None:
+        async with self.http.get(self.url("/api/status")) as resp:
+            status = await resp.json()
+        self.assertEqual([s["name"] for s in status["satellites"]], ["Bureau"])
+        self.assertTrue(status["satellites"][0]["running"])
+        self.assertFalse(status["satellites"][0]["ha_connected"])
+
+        # Mode none: nothing to play; unknown signal refused
+        async with self.http.post(self.url("/api/test"),
+                                  json={"satellite": "Bureau", "signal": "thinking"}) as resp:
+            self.assertEqual(await resp.json(), {"played": []})
+        async with self.http.post(self.url("/api/test"),
+                                  json={"satellite": "Bureau", "signal": "x"}) as resp:
+            self.assertEqual(resp.status, 400)
+
+        async with self.http.post(self.url("/api/export"), json={"options": self.initial}) as resp:
+            text = await resp.text()
+        self.assertIn("satellites:", text)
+        async with self.http.post(self.url("/api/import"), json={"yaml": text}) as resp:
+            self.assertEqual((await resp.json())["options"], self.initial)
+        async with self.http.post(self.url("/api/import"), json={"yaml": "a: [1"}) as resp:
+            self.assertEqual(resp.status, 400)
+        async with self.http.post(self.url("/api/import"), json={"yaml": "satellites: 3"}) as resp:
+            self.assertIn("satellites", (await resp.json())["error"])
 
     async def test_only_ingress(self) -> None:
         self.ui.allowed_ips = frozenset({"172.30.32.2"})

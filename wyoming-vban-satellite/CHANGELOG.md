@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.4.0
+
+- **Configuration interface — fine-grained apply**: saving applies only what changed. Most settings (announcements, follow-up beep/timeout, VBAN output address/port/stream/volume, media player entity, mic mute tail, debug copies, exchange publishing, TTS engine/voice, debug logging) apply while the satellite keeps running; settings tied to sockets or servers restart that satellite only; an added/removed satellite starts/stops alone; the Home Assistant connection is started, stopped or re-subscribed as needed. The message after saving lists what was done. A failure still restores the previous configuration.
+- **Status panel**: per satellite, Home Assistant connection, microphone level and last audio received; Home Assistant connection; spoken phrases (ready or being synthesized); last exchanges (also when not published as HA events). Refreshed every 2 s.
+- **Test buttons**: play each announcement (end of listening, thinking, internet search, camera) or the follow-up beep on the satellite's output.
+- **Export / Import** the configuration as YAML (import is checked, loaded in the editor, then saved as usual). New dependency: PyYAML.
+
 ## 3.3.0
 
 - **New**: configuration interface, opened from Home Assistant (Ingress: *Open web UI*, or the sidebar). Each satellite shows only the settings that apply to it (media player settings only for a media player output, VBAN output settings only when enabled, phrase/sound fields depending on each announcement mode…), with add/remove satellite and debug copies.

@@ -366,6 +366,16 @@ class VbanSatelliteHandler(AsyncEventHandler):
         except (ConnectionError, OSError) as err:
             _LOGGER.debug("Connection closed by client: %s", err)
 
+    @property
+    def ha_ready(self) -> bool:
+        """HA has started the satellite on this connection."""
+        return self._server_ready
+
+    @property
+    def is_streaming(self) -> bool:
+        """Microphone audio is being sent to HA."""
+        return self._streaming
+
     async def handle_event(self, event: Event) -> bool:
         """Handle an incoming Wyoming event from the HA server."""
 

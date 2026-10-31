@@ -54,6 +54,22 @@ class HaStateWatcher:
         # HA event type -> callbacks(event data), subscribed on each connection
         self._event_listeners: dict[str, list[Callable[[dict[str, Any]], None]]] = {}
         self._event_sub_ids: dict[int, str] = {}  # subscription id -> event type
+        self._resubscribe = False  # reconnect at once (entities changed)
+
+    async def set_entity_ids(self, entity_ids: list[str]) -> None:
+        """Watch other media_players: reconnects to subscribe to them."""
+        entity_ids = sorted(set(entity_ids))
+        if entity_ids == self.entity_ids:
+            return
+        self.entity_ids = entity_ids
+        self._history = {
+            entity_id: self._history.get(entity_id)
+            or collections.deque(maxlen=self.HISTORY_LEN)
+            for entity_id in entity_ids
+        }
+        if self._ws is not None:
+            self._resubscribe = True
+            await self._ws.close()
 
     def add_event_listener(
         self, event_type: str, callback: Callable[[dict[str, Any]], None]
@@ -88,7 +104,8 @@ class HaStateWatcher:
                             if self.entity_ids else "",
                         )
                         await self._receive(ws)
-                    _LOGGER.warning("HA WebSocket closed")
+                    if not self._resubscribe:
+                        _LOGGER.warning("HA WebSocket closed")
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as err:
                     _LOGGER.warning("HA WebSocket error: %s", err or type(err).__name__)
                 finally:
@@ -96,6 +113,9 @@ class HaStateWatcher:
                     if self._connected:
                         self._connected = False
                         await self._notify()
+                if self._resubscribe:  # entities changed: reconnect at once
+                    self._resubscribe = False
+                    continue
 
                 _LOGGER.info("Reconnecting to HA WebSocket in %.0fs", backoff)
                 await asyncio.sleep(backoff)

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import aiohttp
+import yaml
 from aiohttp import web
 
 from .config import ConfigError, parse_options, validate
@@ -24,6 +25,7 @@ SUPERVISOR_URL = "http://supervisor"
 # so the UI port is also reachable from the LAN: refuse anything else.
 INGRESS_PROXY_IPS = frozenset({"172.30.32.2"})
 WEB_DIR = Path(__file__).parent / "web"
+TEST_SIGNALS = ("listen_end", "thinking", "search", "vision", "followup_beep")
 
 
 class SupervisorError(Exception):
@@ -77,6 +79,10 @@ class WebUI:
         app.router.add_get("/", self._index)
         app.router.add_get("/api/options", self._get_options)
         app.router.add_post("/api/options", self._save_options)
+        app.router.add_get("/api/status", self._status)
+        app.router.add_post("/api/test", self._test)
+        app.router.add_post("/api/export", self._export)
+        app.router.add_post("/api/import", self._import)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         await web.TCPSite(self._runner, "0.0.0.0", self.port).start()
@@ -122,9 +128,9 @@ class WebUI:
             return web.json_response({"error": f"Supervisor: {err}"}, status=400)
 
         _LOGGER.info("Configuration saved from the UI")
-        error = await self.runtime.reload(parsed)
+        error, done = await self.runtime.apply(parsed)
         if error is None:
-            return web.json_response({"ok": True})
+            return web.json_response({"ok": True, "done": done})
 
         # The new configuration didn't start: keep the saved options in line
         # with what runs (the previous configuration, restored)
@@ -136,3 +142,47 @@ class WebUI:
             {"error": f"{error}. The previous configuration was restored."},
             status=409,
         )
+
+    async def _status(self, request: web.Request) -> web.Response:
+        return web.json_response(self.runtime.status())
+
+    async def _test(self, request: web.Request) -> web.Response:
+        """Play an announcement of a running satellite."""
+        try:
+            body = await request.json()
+            runner = self.runtime.runners[body["satellite"]]
+            signal = body["signal"]
+        except (ValueError, KeyError, TypeError):
+            return web.json_response({"error": "Unknown satellite"}, status=400)
+        if signal not in TEST_SIGNALS:
+            return web.json_response({"error": "Unknown signal"}, status=400)
+        played = await runner.test(signal)
+        return web.json_response({"played": played})
+
+    async def _export(self, request: web.Request) -> web.Response:
+        """Options (from the editor) as a YAML file."""
+        try:
+            options = (await request.json())["options"]
+        except (ValueError, KeyError, TypeError) as err:
+            return web.json_response({"error": f"Invalid request: {err}"}, status=400)
+        text = yaml.safe_dump(options, allow_unicode=True, sort_keys=False)
+        return web.Response(
+            text=text, content_type="application/yaml",
+            headers={"Content-Disposition": 'attachment; filename="vban-satellite.yaml"'},
+        )
+
+    async def _import(self, request: web.Request) -> web.Response:
+        """YAML → options for the editor (checked, not saved)."""
+        try:
+            options = yaml.safe_load((await request.json())["yaml"])
+            if not isinstance(options, dict) or not isinstance(
+                options.get("satellites"), list
+            ):
+                raise ValueError("a 'satellites' list is expected")
+            parsed = parse_options(copy.deepcopy(options))
+            validate(parsed.satellites)
+        except (yaml.YAMLError, ValueError, KeyError, TypeError) as err:
+            return web.json_response({"error": f"Invalid YAML: {err}"}, status=400)
+        except ConfigError as err:
+            return web.json_response({"error": str(err)}, status=400)
+        return web.json_response({"options": options})

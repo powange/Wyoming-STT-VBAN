@@ -71,16 +71,40 @@
     grid-template-columns: 2fr 1.4fr 1.4fr 0.8fr 1.2fr auto;
   }
   @media (max-width: 700px) { .row { grid-template-columns: 1fr 1fr; } }
+  .group-title { display: flex; align-items: center; gap: 8px; }
+  button.test { padding: 1px 8px; font-size: 12px; }
+  .status-sat {
+    display: grid; gap: 4px 12px; align-items: center; padding: 4px 0;
+    grid-template-columns: minmax(140px, 1.4fr) 1fr 2fr;
+  }
+  .meter {
+    height: 8px; border-radius: 4px; background: var(--border); overflow: hidden;
+  }
+  .meter > div { height: 100%; background: var(--accent); transition: width .3s; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         margin-right: 6px; background: var(--muted); }
+  .dot.on { background: var(--ok); }
+  .dot.off { background: var(--danger); }
+  .exchanges { margin: 4px 0 0; padding: 0; list-style: none; }
+  .exchanges li { padding: 3px 0; border-top: 1px solid var(--border); }
+  .exchanges .meta { color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
 <main>
   <header>
     <h1>VBAN Satellite</h1>
+    <button id="export">Exporter</button>
+    <button id="import">Importer</button>
+    <input id="import-file" type="file" accept=".yaml,.yml,text/yaml" hidden>
     <button id="revert" disabled>Annuler les modifications</button>
     <button id="save" class="primary" disabled>Enregistrer et appliquer</button>
     <p id="message" role="status"></p>
   </header>
+  <details id="status" class="card" open>
+    <summary>État</summary>
+    <div id="status-body" class="help">Chargement…</div>
+  </details>
   <div id="form"></div>
 </main>
 <script>
@@ -180,10 +204,43 @@ function section(title, ...fields) {
             el("div", { class: "grid" }, fields));
 }
 
-/* A titled row of fields inside a section (one per announcement). */
-function group(title, ...fields) {
-  return el("div", { class: "group" }, el("div", { class: "group-title" }, title),
+/* A titled row of fields inside a section (one per announcement), with an
+   optional button playing it on the satellite. */
+function group(title, test, ...fields) {
+  return el("div", { class: "group" },
+            el("div", { class: "group-title" }, title, test),
             el("div", { class: "grid" }, fields));
+}
+
+/* Plays a signal with the saved (running) configuration. */
+function testButton(sat, signal) {
+  return el("button", { class: "test", title: "Jouer sur la sortie du satellite",
+    onclick: async (event) => {
+      const button = event.currentTarget;
+      if (JSON.stringify(options) !== JSON.stringify(saved)) {
+        say("Le test utilise la configuration enregistrée : enregistrez d'abord vos modifications.");
+      }
+      const name = sat.name;
+      button.disabled = true;
+      try {
+        const resp = await fetch("api/test", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ satellite: name, signal }),
+        });
+        const body = await resp.json();
+        if (!resp.ok) {
+          say(body.error === "Unknown satellite"
+              ? `« ${name} » ne tourne pas encore : enregistrez d'abord.`
+              : body.error || `Erreur ${resp.status}`, "error");
+        }
+        else if (!body.played.length) say("Rien à jouer (désactivé, ou pas de sortie).");
+        else say(`Joué : ${body.played.join(", ")}.`, "ok");
+      } catch (err) {
+        say(`Erreur : ${err}`, "error");
+      } finally {
+        button.disabled = false;
+      }
+    } }, "▶ Tester");
 }
 
 /* Effective announcement mode, considering the pre-3.2 booleans. */
@@ -262,16 +319,17 @@ function satelliteCard(sat, index) {
       field(fu, "enabled", { label: "Activée", type: "checkbox", def: true, rerender: true,
             help: "écouter la réponse quand Jarvis pose une question" }),
       fu.enabled !== false && field(fu, "beep", { label: "Bip", type: "checkbox", def: true }),
+      fu.enabled !== false && el("div", {}, testButton(sat, "followup_beep")),
       fu.enabled !== false && field(fu, "timeout_s", { label: "Délai sans parole (s)",
             type: "number", min: 3, max: 30, placeholder: "8" })),
     el("fieldset", {}, el("legend", {}, "Annonces d'attente"),
-      group("Fin d'écoute",
+      group("Fin d'écoute", testButton(sat, "listen_end"),
         field(ws, "listen_end_mode", { label: "Mode", type: "select", def: "none",
               rerender: true, choices: [["none", "Aucun"], ["sound", "Bip"]],
               help: "dès que la demande est enregistrée" }),
         ws.listen_end_mode === "sound" && field(ws, "listen_end_file", {
               label: "Son", placeholder: "Bip intégré", help: "Fichier WAV dans /share" })),
-      group("Réflexion",
+      group("Réflexion", testButton(sat, "thinking"),
         modeField(ws, "thinking_mode", "thinking", "sound", "phrase", "Mode",
                   "si pas de réponse après le délai"),
         thinking !== "none" && field(ws, "thinking_delay_ms", { label: "Délai (ms)",
@@ -280,14 +338,14 @@ function satelliteCard(sat, index) {
               placeholder: "Je réfléchis." }),
         hasSound(thinking) && field(ws, "thinking_file", { label: "Son",
               placeholder: "Son intégré", help: "Fichier WAV dans /share" })),
-      group("Recherche internet",
+      group("Recherche internet", testButton(sat, "search"),
         modeField(ws, "search_mode", "search", "sound", "sound_then_phrase", "Mode",
                   "événement jarvis_recherche"),
         hasPhrase(search) && field(ws, "search_text", { label: "Phrase",
               placeholder: "Je cherche sur internet." }),
         hasSound(search) && field(ws, "search_file", { label: "Son",
               placeholder: "Son intégré", help: "Fichier WAV dans /share" })),
-      group("Regard caméra",
+      group("Regard caméra", testButton(sat, "vision"),
         modeField(cam, "mode", "enabled", "phrase", "phrase", "Mode",
                   "événement jarvis_vision"),
         hasPhrase(vision) && field(cam, "text", { label: "Phrase",
@@ -295,7 +353,7 @@ function satelliteCard(sat, index) {
         hasSound(vision) && field(cam, "file", { label: "Son",
               help: "Fichier WAV dans /share (pas de son intégré)" })),
       (hasPhrase(thinking) || hasPhrase(search) || hasPhrase(vision)) && group(
-        "Voix des phrases de ce satellite",
+        "Voix des phrases de ce satellite", null,
         field(cam, "tts_engine", { label: "Moteur TTS", help: "Vide = réglage général" }),
         field(cam, "tts_voice", { label: "Voix", help: "Vide = réglage général" }))),
     legacy ? el("p", { class: "notice" },
@@ -391,6 +449,95 @@ function forSave(opts) {
   return copy;
 }
 
+function translateDone(text) {
+  return text
+    .replace(/^satellite '(.*)' updated without restart$/, "« $1 » mis à jour sans redémarrage")
+    .replace(/^satellite '(.*)' restarted$/, "« $1 » redémarré")
+    .replace(/^satellite '(.*)' added$/, "« $1 » ajouté")
+    .replace(/^satellite '(.*)' removed$/, "« $1 » supprimé");
+}
+
+const statusBody = document.getElementById("status-body");
+
+function dot(state) {
+  return el("span", { class: `dot ${state === true ? "on" : state === false ? "off" : ""}` });
+}
+
+function renderStatus(status) {
+  const rows = status.satellites.map((sat) => {
+    const level = sat.mic_level_db;
+    const width = level === null ? 0 : Math.max(0, Math.min(100, (level + 70) / 70 * 100));
+    const audio = sat.last_packet_s === null ? "aucun audio reçu"
+      : sat.last_packet_s > 2 ? `plus d'audio depuis ${Math.round(sat.last_packet_s)} s`
+      : `micro ${level === null ? "?" : level.toFixed(0)} dB`;
+    return el("div", { class: "status-sat" },
+      el("strong", {}, sat.name),
+      el("span", {}, dot(sat.ha_connected),
+         sat.ha_connected ? (sat.streaming ? "HA : écoute" : "HA : connecté")
+                          : sat.running ? "HA : non connecté" : "arrêté"),
+      el("span", {}, el("div", { class: "meter" }, el("div", { style: `width: ${width}%` })),
+         el("span", { class: "help" }, audio)));
+  });
+  const phrases = status.phrases.map((p) =>
+    el("span", { class: "help" }, dot(p.ready), `« ${p.text} » ${p.ready ? "prête" : "en synthèse…"}  `));
+  const exchanges = status.exchanges.slice(0, 8).map((x) =>
+    el("li", {},
+      el("div", { class: "meta" },
+         new Date(x.time * 1000).toLocaleTimeString("fr-FR"), " · ", x.satellite,
+         x.followup ? " · relance" : ""),
+      `« ${x.transcript} » → « ${x.response} »`));
+  statusBody.className = "";
+  statusBody.replaceChildren(
+    ...rows,
+    el("p", { class: "help" }, dot(status.ha_websocket),
+       status.ha_websocket === null ? "Connexion Home Assistant : non utilisée"
+       : status.ha_websocket ? "Connexion Home Assistant : connectée"
+       : "Connexion Home Assistant : déconnectée"),
+    phrases.length ? el("p", {}, ...phrases) : null,
+    el("div", {}, el("strong", {}, "Derniers échanges"),
+       exchanges.length ? el("ul", { class: "exchanges" }, exchanges)
+                        : el("p", { class: "help" }, "Aucun pour l'instant.")));
+}
+
+async function refreshStatus() {
+  try {
+    const resp = await fetch("api/status");
+    if (resp.ok) renderStatus(await resp.json());
+  } catch (err) {
+    statusBody.textContent = `État indisponible : ${err}`;
+  }
+}
+
+document.getElementById("export").addEventListener("click", async () => {
+  const resp = await fetch("api/export", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ options: forSave(options) }),
+  });
+  if (!resp.ok) { say("Export impossible", "error"); return; }
+  const link = el("a", { href: URL.createObjectURL(await resp.blob()),
+                         download: "vban-satellite.yaml" });
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
+
+const importFile = document.getElementById("import-file");
+document.getElementById("import").addEventListener("click", () => importFile.click());
+importFile.addEventListener("change", async () => {
+  const file = importFile.files[0];
+  importFile.value = "";
+  if (!file) return;
+  const resp = await fetch("api/import", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ yaml: await file.text() }),
+  });
+  const body = await resp.json();
+  if (!resp.ok) { say(body.error || "Import impossible", "error"); return; }
+  options = body.options;
+  render();
+  setDirty();
+  say(`« ${file.name} » importé : vérifiez, puis enregistrez pour l'appliquer.`);
+});
+
 async function load() {
   say("Chargement…");
   const resp = await fetch("api/options");
@@ -422,7 +569,9 @@ saveButton.addEventListener("click", async () => {
       return;
     }
     await load();
-    say("Configuration enregistrée et appliquée.", "ok");
+    const done = body.done && body.done.length ? ` ${body.done.map(translateDone).join(" ; ")}.`
+                                                : " Aucun changement à appliquer.";
+    say(`Configuration enregistrée et appliquée.${done}`, "ok");
   } catch (err) {
     say(`Erreur : ${err}`, "error");
     setDirty();
@@ -437,6 +586,8 @@ revertButton.addEventListener("click", () => {
 });
 
 load().catch((err) => say(`Erreur : ${err}`, "error"));
+refreshStatus();
+setInterval(refreshStatus, 2000);
 </script>
 </body>
 </html>

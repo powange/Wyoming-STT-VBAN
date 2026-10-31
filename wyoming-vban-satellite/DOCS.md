@@ -25,11 +25,23 @@ satellite with only the settings that apply (e.g. the media player settings
 only when responses go to a media player, a phrase field only in a phrase
 mode). **Save and apply** stores the options (the Configuration tab shows
 the same ones, validated by Home Assistant) and applies them **without
-restarting the app**: the satellites restart inside the app in a second or
-two, and Home Assistant reconnects to them. If the new configuration can't
+restarting the app**, touching only what changed:
+
+- applied at once, the satellite keeps running: announcements (modes, texts, sounds, delay), follow-up beep and timeout, VBAN output address/port/stream/volume, media player entity, mic mute tail, debug copies, exchange publishing, TTS engine/voice, debug logging;
+- restart of that satellite only (a second or two, Home Assistant reconnects): name, Wyoming port, microphone settings, response output, VBAN output on/off/mode/packets, HTTP port/host, follow-up on/off; a satellite added or removed starts or stops alone.
+
+The message after saving says what was done. If the new configuration can't
 start (e.g. a port already in use), the previous one is restored and the
 error is shown. Pre-3.2 announcement switches are converted to modes when
 saving.
+
+The interface also shows the **status** of each satellite (connected to Home
+Assistant, microphone level, last audio received), the spoken phrases being
+synthesized and the **last exchanges**; a **Test** button plays each
+announcement or the follow-up beep on the satellite's output (with the saved
+configuration); **Export** / **Import** save or load the configuration as
+YAML (an import is checked and loaded in the editor, then saved like any
+change).
 
 The interface is only reachable through Home Assistant (Ingress).
 
