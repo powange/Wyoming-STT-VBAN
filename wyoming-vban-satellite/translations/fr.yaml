@@ -27,6 +27,21 @@ configuration:
       followup_timeout_s:
         name: Delai de relance (s)
         description: Retour a l'ecoute du mot-cle si personne ne parle dans ce delai (3-30, defaut 8)
+      thinking_sound_enabled:
+        name: Son de reflexion
+        description: Jouer un son doux quand la reponse tarde (active par defaut)
+      search_sound_enabled:
+        name: Son de recherche internet
+        description: Jouer un son sur l'evenement jarvis_recherche, quand une recherche internet commence (active par defaut)
+      thinking_delay_ms:
+        name: Delai du son de reflexion (ms)
+        description: Jouer le son de reflexion si pas de reponse apres ce delai (300-5000, defaut 1000)
+      thinking_sound:
+        name: Fichier du son de reflexion
+        description: Fichier WAV remplacant le son integre, ex. /share/jarvis/reflexion.wav (vide = son integre)
+      search_sound:
+        name: Fichier du son de recherche
+        description: Fichier WAV remplacant le son de recherche integre (vide = son integre)
   publish_exchanges:
     name: Publier les echanges
     description: Envoyer un evenement Home Assistant jarvis_echange pour chaque demande et reponse (satellite, transcript, reponse, relance)

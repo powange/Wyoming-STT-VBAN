@@ -27,6 +27,21 @@ configuration:
       followup_timeout_s:
         name: Follow-up timeout (s)
         description: Back to wake word listening if no speech within this time (3-30, default 8)
+      thinking_sound_enabled:
+        name: Thinking sound
+        description: Play a soft sound when the response takes a while (default on)
+      search_sound_enabled:
+        name: Internet search sound
+        description: Play a sound on the jarvis_recherche event, when an internet search starts (default on)
+      thinking_delay_ms:
+        name: Thinking sound delay (ms)
+        description: Play the thinking sound if no response after this time (300-5000, default 1000)
+      thinking_sound:
+        name: Thinking sound file
+        description: WAV file replacing the built-in thinking sound, e.g. /share/jarvis/thinking.wav (empty = built-in)
+      search_sound:
+        name: Internet search sound file
+        description: WAV file replacing the built-in search sound (empty = built-in)
   publish_exchanges:
     name: Publish exchanges
     description: Fire a jarvis_echange Home Assistant event with each request and response (satellite, transcript, response, follow-up)

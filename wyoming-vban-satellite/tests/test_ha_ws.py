@@ -59,22 +59,39 @@ class FakeHomeAssistant:
             await ws.close()
             return ws
         await ws.send_json({"type": "auth_ok"})
-        sub = await ws.receive_json()
-        self.subscriptions.append(sub)
-        await ws.send_json({"id": sub["id"], "type": "result", "success": True})
         self.sockets.append(ws)
-        self.subscribed.set()
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
                 break
-            self.received.append(msg.json())
+            data = msg.json()
+            if data.get("type", "").startswith("subscribe_"):
+                self.subscriptions.append(data)
+                await ws.send_json({"id": data["id"], "type": "result", "success": True})
+                self.subscribed.set()
+            else:
+                self.received.append(data)
         return ws
+
+    def _subscription_id(self, msg_type: str, event_type: str = "") -> int:
+        return next(
+            s["id"] for s in reversed(self.subscriptions)
+            if s["type"] == msg_type and s.get("event_type", "") == event_type
+        )
+
+    async def fire_ha_event(self, event_type: str, data: dict) -> None:
+        """Send a HA bus event to the subscribers of its type."""
+        sub_id = self._subscription_id("subscribe_events", event_type)
+        for ws in self.sockets:
+            await ws.send_json({
+                "id": sub_id, "type": "event",
+                "event": {"event_type": event_type, "data": data},
+            })
 
     async def set_state(self, state: str, media_content_id: str = "") -> None:
         attributes = {"media_content_id": media_content_id} if media_content_id else {}
         for ws in self.sockets:
             await ws.send_json({
-                "id": 1,
+                "id": self._subscription_id("subscribe_trigger"),
                 "type": "event",
                 "event": {"variables": {"trigger": {
                     "platform": "state",
@@ -164,6 +181,22 @@ class HaStateWatcherTest(unittest.IsolatedAsyncioTestCase):
         await self.ha.drop_connections()
         await asyncio.sleep(0.05)
         self.assertFalse(await self.watcher.fire_event("jarvis_echange", {}))
+
+    async def test_custom_event_listener(self) -> None:
+        # Listeners are registered before run(): use a second watcher
+        received = []
+        watcher = HaStateWatcher([], url=self.ha.url)
+        watcher.add_event_listener("jarvis_recherche", received.append)
+        task = asyncio.create_task(watcher.run())
+        await asyncio.sleep(0.2)
+        try:
+            self.assertTrue(watcher.connected)
+            await self.ha.fire_ha_event("jarvis_recherche", {"question": "actualités"})
+            await asyncio.sleep(0.1)
+            self.assertEqual(received, [{"question": "actualités"}])
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def test_disconnect_returns_none_and_reconnects(self) -> None:
         waiter = asyncio.create_task(self.watcher.wait_for(

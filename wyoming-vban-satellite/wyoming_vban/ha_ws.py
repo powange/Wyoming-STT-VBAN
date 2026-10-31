@@ -3,6 +3,7 @@
 One connection (via the Supervisor proxy), reconnecting with a backoff:
 - subscribed to state changes of the media_players used for TTS output,
   so satellites can wait for the real start and end of playback;
+- subscribed to custom HA events (e.g. jarvis_recherche);
 - used to fire events on the HA event bus (voice exchanges).
 """
 
@@ -20,6 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 
 SUPERVISOR_WS_URL = "ws://supervisor/core/websocket"
 
+
 @dataclass
 class StateChange:
     """One state change of an entity, as seen by this app."""
@@ -30,7 +32,7 @@ class StateChange:
 
 
 class HaStateWatcher:
-    """Shared WebSocket connection: media_player states and fire_event."""
+    """Shared WebSocket connection: media_player states, HA events, fire_event."""
 
     BACKOFF_MIN_S = 1.0
     BACKOFF_MAX_S = 30.0
@@ -49,6 +51,15 @@ class HaStateWatcher:
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._next_id = 1  # message id, per connection
         self._send_lock = asyncio.Lock()
+        # HA event type -> callbacks(event data), subscribed on each connection
+        self._event_listeners: dict[str, list[Callable[[dict[str, Any]], None]]] = {}
+        self._event_sub_ids: dict[int, str] = {}  # subscription id -> event type
+
+    def add_event_listener(
+        self, event_type: str, callback: Callable[[dict[str, Any]], None]
+    ) -> None:
+        """Call callback(data) for each HA event of this type (before run())."""
+        self._event_listeners.setdefault(event_type, []).append(callback)
 
     @property
     def connected(self) -> bool:
@@ -63,8 +74,11 @@ class HaStateWatcher:
                     async with session.ws_connect(self.url, heartbeat=30) as ws:
                         await self._authenticate(ws)
                         self._next_id = 1
+                        self._event_sub_ids = {}
                         if self.entity_ids:
                             await self._subscribe(ws)
+                        for event_type in self._event_listeners:
+                            await self._subscribe_event(ws, event_type)
                         self._ws = ws
                         self._connected = True
                         backoff = self.BACKOFF_MIN_S
@@ -108,6 +122,20 @@ class HaStateWatcher:
         if not msg.get("success"):
             raise ValueError(f"subscribe_trigger failed: {msg.get('error', msg)}")
 
+    async def _subscribe_event(
+        self, ws: aiohttp.ClientWebSocketResponse, event_type: str
+    ) -> None:
+        msg_id = self._take_id()
+        await ws.send_json(
+            {"id": msg_id, "type": "subscribe_events", "event_type": event_type}
+        )
+        msg = await ws.receive_json(timeout=10)
+        if not msg.get("success"):
+            raise ValueError(
+                f"subscribe_events {event_type} failed: {msg.get('error', msg)}"
+            )
+        self._event_sub_ids[msg_id] = event_type
+
     def _take_id(self) -> int:
         msg_id = self._next_id
         self._next_id += 1
@@ -142,6 +170,15 @@ class HaStateWatcher:
             if msg.get("type") == "result" and not msg.get("success"):
                 _LOGGER.warning("HA WebSocket command failed: %s", msg.get("error", msg))
             if msg.get("type") != "event":
+                continue
+            if (event_type := self._event_sub_ids.get(msg.get("id"))) is not None:
+                data = msg.get("event", {}).get("data") or {}
+                _LOGGER.debug("HA event %s: %s", event_type, data)
+                for callback in self._event_listeners.get(event_type, []):
+                    try:
+                        callback(data)
+                    except Exception:  # a listener bug must not drop the connection
+                        _LOGGER.exception("Error in %s listener", event_type)
                 continue
             trigger = msg.get("event", {}).get("variables", {}).get("trigger", {})
             to_state = trigger.get("to_state") or {}

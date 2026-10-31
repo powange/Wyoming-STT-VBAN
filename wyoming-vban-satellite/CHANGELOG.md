@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.14.0
+
+- **New**: waiting sounds while the response is being prepared, on the satellite's output (media_player or VBAN)
+  - **thinking** (660 → 520 Hz, 2 × 120 ms, soft) when no response `thinking_delay_ms` after the transcript (default 1 s): fast commands play nothing
+  - **internet search** (520 → 660 → 880 Hz, 3 × 80 ms) on the `jarvis_recherche` HA event (subscribed through the shared HA WebSocket), on the satellite(s) between transcript and response; at most once per run, right after the thinking sound if it is playing
+- The response never cuts a playing sound (it follows it, ≤ 0.4 s), and no further sound is queued once the response arrives. The mic is replaced by silence while a sound plays.
+- New per-satellite options `thinking_sound_enabled`, `search_sound_enabled` (default on), `thinking_delay_ms` (300–5000, default 1000), `thinking_sound` / `search_sound` (optional WAV files replacing the built-in sounds; the app now has read access to `/share`).
+
 ## 2.13.0
 
 - **New**: each voice exchange is published as a `jarvis_echange` event on the Home Assistant event bus, e.g. for a "last commands" dashboard: `{"satellite", "transcript", "response", "followup"}`

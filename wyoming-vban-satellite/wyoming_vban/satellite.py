@@ -7,6 +7,7 @@ import logging
 import math
 import struct
 import time
+import wave
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -62,15 +63,76 @@ class FollowupSettings:
     timeout_s: float = 8.0
 
 
-def make_beep(rate: int, seconds: float = 0.15, freq: float = 880.0) -> bytes:
-    """Short 16-bit mono sine beep with 10 ms fades (no clicks)."""
-    count = int(rate * seconds)
-    fade = max(1, int(rate * 0.01))
+def make_tones(rate: int, notes: list[tuple[float, float]], volume: float) -> bytes:
+    """16-bit mono sine notes [(Hz, seconds)], each with 10 ms fades (no clicks)."""
     samples = []
-    for i in range(count):
-        gain = min(1.0, i / fade, (count - 1 - i) / fade)
-        samples.append(int(0.3 * 32767 * gain * math.sin(2 * math.pi * freq * i / rate)))
-    return struct.pack(f"<{count}h", *samples)
+    fade = max(1, int(rate * 0.01))
+    for freq, seconds in notes:
+        count = int(rate * seconds)
+        for i in range(count):
+            gain = min(1.0, i / fade, (count - 1 - i) / fade)
+            samples.append(
+                int(volume * 32767 * gain * math.sin(2 * math.pi * freq * i / rate))
+            )
+    return struct.pack(f"<{len(samples)}h", *samples)
+
+
+def make_beep(rate: int, seconds: float = 0.15, freq: float = 880.0) -> bytes:
+    """Follow-up beep: one 880 Hz note."""
+    return make_tones(rate, [(freq, seconds)], 0.3)
+
+
+@dataclass
+class Cue:
+    """A short sound played on the satellite's output."""
+
+    pcm: bytes
+    rate: int
+    width: int = 2
+    channels: int = 1
+
+    @property
+    def duration(self) -> float:
+        return len(self.pcm) / (self.rate * self.width * self.channels)
+
+    @classmethod
+    def tones(cls, notes: list[tuple[float, float]], volume: float) -> "Cue":
+        return cls(make_tones(22050, notes, volume), 22050)
+
+    @classmethod
+    def from_wav(cls, path: str) -> "Cue":
+        with wave.open(path, "rb") as wav_file:
+            return cls(
+                wav_file.readframes(wav_file.getnframes()),
+                wav_file.getframerate(),
+                wav_file.getsampwidth(),
+                wav_file.getnchannels(),
+            )
+
+
+# Waiting sounds, distinct from the follow-up beep (880 Hz)
+THINKING_NOTES = [(660.0, 0.12), (520.0, 0.12)]  # two soft falling notes
+SEARCH_NOTES = [(520.0, 0.08), (660.0, 0.08), (880.0, 0.08)]  # three rising
+
+
+@dataclass
+class WaitingCues:
+    """Sounds played while the response is being prepared (per satellite)."""
+
+    thinking: Optional[Cue] = None  # None = disabled
+    search: Optional[Cue] = None
+    thinking_delay_s: float = 1.0
+
+
+# Handlers between transcript and response: told about internet searches
+_THINKING_HANDLERS: "set[VbanSatelliteHandler]" = set()
+
+
+def notify_search(data: dict) -> None:
+    """jarvis_recherche HA event: play the search sound where a response is
+    being prepared (the event doesn't say which satellite asked)."""
+    for handler in list(_THINKING_HANDLERS):
+        handler.on_search(data)
 
 
 class MicMute:
@@ -158,6 +220,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
     # speaking when it ends (answer started right after the beep)
     PREROLL_S = 0.6
     PREROLL_VOICE_DB = -45.0  # level of the last 128 ms counted as speech
+    # Waiting sound on a media_player: Cast start delay (0.07-0.2 s) margin,
+    # for the mic silence and before the response can follow
+    CUE_CAST_START_S = 0.3
 
     def __init__(
         self,
@@ -172,6 +237,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         followup: Optional[FollowupSettings] = None,
         exchange_publisher: Optional[HaStateWatcher] = None,
         satellite_name: str = "",
+        waiting_cues: Optional[WaitingCues] = None,
     ):
         super().__init__(reader, writer)
         self._info = satellite_info
@@ -204,6 +270,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._satellite_name = satellite_name
         self._last_transcript = ""
         self._last_transcript_at = 0.0
+
+        # Waiting sounds between transcript and response
+        self._cues = waiting_cues or WaitingCues()
+        self._thinking = False
+        self._thinking_timer: Optional[asyncio.Task] = None
+        self._search_cue_played = False  # at most one search sound per run
+        self._cue_task: Optional[asyncio.Task] = None  # sound being played
+        self._mic_silence_until = 0.0  # mic replaced by silence (sound playing)
 
         # Follow-up: when enabled, the satellite drives the pipeline runs
         # itself (restart_on_end=False) so it can start a run at the ASR
@@ -272,6 +346,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             _LOGGER.info("Server paused — stopping audio streaming")
             self._server_ready = False
             self._cancel_followup_tasks()
+            self._stop_thinking()
             await self._stop_streaming()
             return True
 
@@ -281,6 +356,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._awaiting_response = True
             self._last_transcript = Transcript.from_event(event).text or ""
             self._last_transcript_at = time.monotonic()
+            self._start_thinking()
             if self._driven:
                 self._set_watchdog(self.RESPONSE_TIMEOUT_S, self._on_response_timeout)
             return True
@@ -297,6 +373,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if Synthesize.is_type(event.type):
             text = Synthesize.from_event(event).text or ""
+            self._stop_thinking()
             self._publish_exchange(text)
             if self._driven:
                 self._expect_followup = text.strip().endswith("?")
@@ -324,6 +401,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
             # announcement (it doesn't end a run).
             self._response_audio = self._awaiting_response
             self._awaiting_response = False
+            if self._response_audio:
+                self._stop_thinking()
             if self._response_audio and self._driven:
                 self._cancel_watchdog()
                 self._mic_paused = True  # the run is over: HA rejects mic audio
@@ -339,10 +418,12 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     self._tts_generation = self._mic_mute.start_response()
                 return True
             # Reset resampler state AND drop any leftover audio from a
-            # previous stream so the new TTS starts cleanly.
+            # previous stream so the new TTS starts cleanly — unless a
+            # waiting sound is playing: the response then follows it.
             if self._vban_sender:
                 self._vban_sender.reset_resampler()
-                self._vban_sender.clear_pending()
+                if not self._cue_playing():
+                    self._vban_sender.clear_pending()
             return True
 
         if AudioChunk.is_type(event.type):
@@ -411,6 +492,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             code = (event.data or {}).get("code", "<no code>")
             _LOGGER.error("Error from server: [%s] %s", code, text)
             self._last_transcript = ""
+            self._stop_thinking()
             if self._driven:
                 # The run is over (no response). Start the next one once HA
                 # has finished ending it; an error never leads to a follow-up.
@@ -428,6 +510,92 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         _LOGGER.debug("Unhandled event type: %s", event.type)
         return True
+
+    # ------------------------------------------------------------------
+    # Waiting sounds
+
+    def _has_output(self) -> bool:
+        return self._media_output is not None or self._vban_sender is not None
+
+    def _start_thinking(self) -> None:
+        """Transcript received: the response is being prepared."""
+        self._stop_thinking()
+        if not self._has_output() or not (self._cues.thinking or self._cues.search):
+            return
+        self._thinking = True
+        self._search_cue_played = False
+        _THINKING_HANDLERS.add(self)
+        if self._cues.thinking:
+            self._thinking_timer = asyncio.create_task(self._thinking_after_delay())
+
+    def _stop_thinking(self) -> None:
+        """Response arriving, error or run over: no (more) waiting sounds."""
+        self._thinking = False
+        _THINKING_HANDLERS.discard(self)
+        if self._thinking_timer and not self._thinking_timer.done():
+            self._thinking_timer.cancel()
+        self._thinking_timer = None
+
+    async def _thinking_after_delay(self) -> None:
+        await asyncio.sleep(self._cues.thinking_delay_s)
+        if self._thinking and self._cues.thinking:
+            self._play_cue(self._cues.thinking, "thinking")
+
+    def on_search(self, data: dict) -> None:
+        """jarvis_recherche: the response needs an internet search."""
+        if self._thinking and self._cues.search and not self._search_cue_played:
+            self._search_cue_played = True
+            self._play_cue(self._cues.search, "search")
+
+    def _cue_playing(self) -> bool:
+        return self._cue_task is not None and not self._cue_task.done()
+
+    def _play_cue(self, cue: Cue, name: str) -> None:
+        """Play a waiting sound after the one already playing, if any."""
+        previous = self._cue_task if self._cue_playing() else None
+        self._cue_task = asyncio.create_task(self._play_cue_after(previous, cue, name))
+        _PLAYBACK_TASKS.add(self._cue_task)
+        self._cue_task.add_done_callback(_PLAYBACK_TASKS.discard)
+
+    async def _play_cue_after(
+        self, previous: Optional[asyncio.Task], cue: Cue, name: str
+    ) -> None:
+        """Play cue; returns once it has played (the response may follow)."""
+        if previous is not None:
+            await asyncio.gather(previous, return_exceptions=True)
+        if not self._thinking:
+            return  # the response is coming: don't add another sound
+        _LOGGER.info("Waiting sound: %s (%.2fs)", name, cue.duration)
+        if self._media_output:
+            url = self._media_output.publish(
+                build_wav(cue.pcm, cue.rate, cue.width, cue.channels)
+            )
+            if await self._media_output.play(url):
+                playing = cue.duration + self.CUE_CAST_START_S
+                self._mic_silence_until = time.monotonic() + playing
+                await asyncio.sleep(playing)
+                return
+        if self._vban_sender:
+            try:
+                self._vban_sender.send(
+                    cue.pcm, sample_rate=cue.rate, width=cue.width,
+                    channels=cue.channels,
+                )
+            except (audioop.error, ValueError) as err:
+                _LOGGER.warning("Failed to send waiting sound to VBAN: %s", err)
+                return
+            self._mic_silence_until = (
+                time.monotonic() + cue.duration + self.VBAN_PLAYBACK_LATENCY_S
+            )
+            # Until it has left the send buffer (a response then queues after)
+            await asyncio.sleep(cue.duration + 0.1)
+
+    async def _wait_cue(self) -> None:
+        if self._cue_playing():
+            assert self._cue_task is not None
+            await asyncio.gather(self._cue_task, return_exceptions=True)
+
+    # ------------------------------------------------------------------
 
     def _publish_exchange(self, response: str) -> None:
         """Fire a HA event with the user's request and the response.
@@ -497,6 +665,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         If play_media fails, the response goes to VBAN when configured.
         """
         assert self._media_output is not None
+        await self._wait_cue()  # let a waiting sound finish (≤ 0.4 s)
         duration = len(pcm) / (rate * width * channels)
         url = self._media_output.publish(build_wav(pcm, rate, width, channels))
         _LOGGER.info(
@@ -639,6 +808,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._run_seq += 1
         self._awaiting_response = False
         self._last_transcript = ""
+        self._stop_thinking()
         self._mic_paused = False
         self._mic_resume_at = time.monotonic() + self.STREAM_GRACE_S
         _LOGGER.info(
@@ -915,6 +1085,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     elif self._preroll:
                         await self._flush_preroll()
 
+                    # A waiting sound is playing: don't capture it
+                    if now < self._mic_silence_until:
+                        send_pcm = bytes(len(send_pcm))
+
                     chunks_sent += 1
 
                     # Track peak audio level over reporting window
@@ -1037,6 +1211,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._mic_mute.end_response(self._tts_generation)
         self._tts_receiving = False
         self._cancel_followup_tasks()
+        self._stop_thinking()
         if self._restart_task and not self._restart_task.done():
             self._restart_task.cancel()
             try:

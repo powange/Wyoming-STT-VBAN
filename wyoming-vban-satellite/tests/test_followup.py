@@ -24,9 +24,14 @@ from wyoming.tts import Synthesize
 from wyoming.vad import VoiceStarted
 
 from wyoming_vban.satellite import (
+    SEARCH_NOTES,
+    THINKING_NOTES,
+    Cue,
     FollowupSettings,
     VbanSatelliteHandler,
+    WaitingCues,
     make_satellite_info,
+    notify_search,
 )
 from wyoming_vban.vban import VbanPacket
 
@@ -52,12 +57,13 @@ class FakeVbanSender:
 
     def __init__(self) -> None:
         self.sent: list[int] = []
+        self.cleared = 0
 
     def reset_resampler(self) -> None:
         pass
 
     def clear_pending(self) -> None:
-        pass
+        self.cleared += 1
 
     def send(self, pcm, sample_rate=None, width=None, channels=None) -> None:
         self.sent.append(len(pcm))
@@ -82,6 +88,7 @@ class FakePublisher:
 
 class FollowupTest(unittest.IsolatedAsyncioTestCase):
     followup = FollowupSettings(enabled=True, beep=False, timeout_s=0.5)
+    waiting_cues = WaitingCues()  # no waiting sounds
 
     async def asyncSetUp(self) -> None:
         self.sender = FakeVbanSender()
@@ -94,6 +101,7 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
                 reader, writer, make_satellite_info("Bureau"), self.receiver,
                 self.sender, followup=self.followup,
                 exchange_publisher=self.publisher, satellite_name="Bureau",
+                waiting_cues=self.waiting_cues,
             )
         )
         self.ha = AsyncTcpClient("127.0.0.1", port)
@@ -294,6 +302,82 @@ class FollowupBeepTest(FollowupTest):
         self.assertGreaterEqual(
             time.monotonic() - t_run, self.GUARD + self.followup.timeout_s - 0.05,
         )
+
+
+THINKING = Cue.tones(THINKING_NOTES, 0.15)
+SEARCH = Cue.tones(SEARCH_NOTES, 0.2)
+
+
+class WaitingSoundTest(unittest.IsolatedAsyncioTestCase):
+    """Waiting sounds between transcript and response (VBAN output)."""
+
+    async def asyncSetUp(self) -> None:
+        self.sender = FakeVbanSender()
+        port = _free_tcp_port()
+        self.server = AsyncServer.from_uri(f"tcp://127.0.0.1:{port}")
+        await self.server.start(
+            lambda reader, writer: VbanSatelliteHandler(
+                reader, writer, make_satellite_info("Bureau"), FakeReceiver(),
+                self.sender, followup=FollowupSettings(enabled=True, beep=False),
+                waiting_cues=WaitingCues(THINKING, SEARCH, thinking_delay_s=0.3),
+            )
+        )
+        self.ha = AsyncTcpClient("127.0.0.1", port)
+        await self.ha.connect()
+        for event in (Describe(), RunSatellite(), Describe()):
+            await self.ha.write_event(event.event())
+        await asyncio.sleep(0.2)
+
+    async def asyncTearDown(self) -> None:
+        await self.ha.disconnect()
+        await self.server.stop()
+
+    async def transcript(self) -> None:
+        await self.ha.write_event(Transcript(text="Raconte une blague").event())
+        await asyncio.sleep(0.05)
+
+    async def response(self) -> None:
+        await self.ha.write_event(Synthesize(text="Voici une blague.").event())
+        await self.ha.write_event(AudioStart(rate=22050, width=2, channels=1).event())
+        await asyncio.sleep(0.05)
+
+    async def test_fast_response_plays_nothing(self) -> None:
+        await self.transcript()
+        await asyncio.sleep(0.1)
+        await self.response()
+        await asyncio.sleep(0.4)
+        self.assertEqual(self.sender.sent, [])
+
+    async def test_slow_response_plays_thinking_sound(self) -> None:
+        await self.transcript()
+        await asyncio.sleep(0.45)
+        self.assertEqual(self.sender.sent, [len(THINKING.pcm)])
+        await self.response()
+        self.assertEqual(self.sender.sent, [len(THINKING.pcm)])
+
+    async def test_search_sound_once_after_thinking(self) -> None:
+        await self.transcript()
+        await asyncio.sleep(0.35)  # thinking sound starts
+        notify_search({"question": "actualités"})
+        notify_search({"question": "actualités"})  # at most one per run
+        await asyncio.sleep(0.5)
+        self.assertEqual(self.sender.sent, [len(THINKING.pcm), len(SEARCH.pcm)])
+
+    async def test_search_ignored_when_not_thinking(self) -> None:
+        notify_search({"question": "actualités"})
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.sender.sent, [])
+
+    async def test_response_does_not_cut_or_stack_sounds(self) -> None:
+        await self.transcript()
+        await asyncio.sleep(0.32)  # thinking sound playing
+        notify_search({"question": "actualités"})  # queued after it
+        cleared = self.sender.cleared
+        await self.response()  # arrives while the thinking sound plays
+        await asyncio.sleep(0.5)
+        # The playing sound isn't cut, the queued search sound is dropped
+        self.assertEqual(self.sender.cleared, cleared)
+        self.assertEqual(self.sender.sent, [len(THINKING.pcm)])
 
 
 class FollowupDisabledTest(FollowupTest):

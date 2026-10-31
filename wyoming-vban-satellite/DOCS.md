@@ -145,6 +145,27 @@ Wake word detection now resumes only once the response has played. If a
 run ends without a spoken response nor an error (empty response), the
 satellite goes back to wake word listening after 60 s.
 
+### Waiting sounds
+
+While the response is being prepared (after your request is understood),
+the satellite can play short, soft sounds on its output (VBAN or media
+player), so you know the request was heard:
+
+- a **thinking** sound (two falling notes) if the response takes longer than `thinking_delay_ms`;
+- an **internet** sound (three rising notes) when a `jarvis_recherche` Home Assistant event is fired (e.g. by a script just before calling an internet search). The event doesn't say which satellite asked: the sound plays on the satellite(s) waiting for a response. At most once per request.
+
+Fast commands (e.g. lights) play nothing. A sound that is playing when the
+response arrives is not cut: the response follows it (sounds last
+≤ 0.4 s), and no further sound is played. The microphone is replaced by
+silence while a sound plays.
+
+Options (per satellite):
+
+- **thinking_sound_enabled**: default `true`
+- **search_sound_enabled**: default `true`
+- **thinking_delay_ms**: 300–5000 (default: 1000)
+- **thinking_sound** / **search_sound**: WAV file replacing the built-in sound, e.g. `/share/jarvis/thinking.wav` (the app has read access to `/share`). Keep it short: the response waits for it to finish.
+
 ### Voice exchanges as Home Assistant events
 
 - **publish_exchanges** (app option, default: `true`): after each voice request, fire a `jarvis_echange` event on the Home Assistant event bus, e.g. to show the last commands on a dashboard:

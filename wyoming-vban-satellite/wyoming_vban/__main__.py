@@ -7,6 +7,7 @@ import dataclasses
 import logging
 import signal
 import sys
+import wave
 from typing import Optional
 
 from wyoming.server import AsyncServer
@@ -17,10 +18,15 @@ from .const import DEFAULT_VBAN_PORT
 from .ha_ws import HaStateWatcher
 from .media_player import MediaPlayerOutput, detect_local_ip
 from .satellite import (
+    SEARCH_NOTES,
+    THINKING_NOTES,
+    Cue,
     FollowupSettings,
     MicMute,
     VbanSatelliteHandler,
+    WaitingCues,
     make_satellite_info,
+    notify_search,
 )
 from .vban import VbanReceiver, VbanSender
 
@@ -143,6 +149,19 @@ def parse_args() -> argparse.Namespace:
         help="Back to the wake word if no speech within this time (3-30)",
     )
 
+    # Waiting sounds while the response is prepared
+    parser.add_argument(
+        "--thinking-sound-enabled", action=argparse.BooleanOptionalAction, default=True,
+        help="Play a sound when the response takes longer than --thinking-delay-ms",
+    )
+    parser.add_argument(
+        "--search-sound-enabled", action=argparse.BooleanOptionalAction, default=True,
+        help="Play a sound on the jarvis_recherche HA event (internet search)",
+    )
+    parser.add_argument("--thinking-delay-ms", type=int, default=1000)
+    parser.add_argument("--thinking-sound", default="", help="WAV file (default: built-in)")
+    parser.add_argument("--search-sound", default="", help="WAV file (default: built-in)")
+
     # Publish each voice exchange as a HA event (needs the Supervisor API)
     parser.add_argument(
         "--publish-exchanges",
@@ -155,6 +174,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true", default=False)
 
     return parser.parse_args()
+
+
+def _load_cue(path: str, notes: list[tuple[float, float]], volume: float) -> Cue:
+    """WAV file if configured and readable, otherwise the built-in sound."""
+    if path:
+        try:
+            cue = Cue.from_wav(path)
+            _LOGGER.info("  Sound %s: %.2fs", path, cue.duration)
+            if cue.duration > 1.0:
+                _LOGGER.warning(
+                    "  %s lasts %.1fs: the response waits for it to finish",
+                    path, cue.duration,
+                )
+            return cue
+        except (OSError, EOFError, wave.Error) as err:
+            _LOGGER.warning("  Cannot read %s (%s), using the built-in sound", path, err)
+    return Cue.tones(notes, volume)
+
+
+def _waiting_cues(cfg: SatelliteConfig) -> WaitingCues:
+    return WaitingCues(
+        thinking=(
+            _load_cue(cfg.thinking_sound, THINKING_NOTES, 0.15)
+            if cfg.thinking_sound_enabled else None
+        ),
+        search=(
+            _load_cue(cfg.search_sound, SEARCH_NOTES, 0.2)
+            if cfg.search_sound_enabled else None
+        ),
+        thinking_delay_s=cfg.thinking_delay_ms / 1000,
+    )
 
 
 def _config_from_args(args: argparse.Namespace) -> SatelliteConfig:
@@ -228,6 +278,12 @@ async def run_satellite(
         beep=cfg.followup_beep,
         timeout_s=cfg.followup_timeout_s,
     )
+    waiting_cues = _waiting_cues(cfg)
+    _LOGGER.info(
+        "  Waiting sounds: thinking %s, search %s",
+        f"after {cfg.thinking_delay_ms} ms" if waiting_cues.thinking else "off",
+        "on" if waiting_cues.search else "off",
+    )
     _LOGGER.info(
         "  Follow-up without wake word: %s",
         f"on (beep={'on' if cfg.followup_beep else 'off'}, "
@@ -248,6 +304,7 @@ async def run_satellite(
             followup=followup,
             exchange_publisher=state_watcher if publish_exchanges else None,
             satellite_name=cfg.name,
+            waiting_cues=waiting_cues,
         )
 
     server: Optional[AsyncServer] = None
@@ -367,9 +424,14 @@ async def main() -> int:
     # output (real start/end of playback, to unmute the mic on time) and
     # publishes voice exchanges as HA events
     media_players = [s.tts_media_player for s in satellites if s.tts_output == "media_player"]
+    search_sounds = any(s.search_sound_enabled for s in satellites)
     state_watcher = (
-        HaStateWatcher(media_players) if media_players or publish_exchanges else None
+        HaStateWatcher(media_players)
+        if media_players or publish_exchanges or search_sounds else None
     )
+    if state_watcher and search_sounds:
+        # Internet search started (fired by script.demander_ia_externe)
+        state_watcher.add_event_listener("jarvis_recherche", notify_search)
     _LOGGER.info(
         "Voice exchanges %s",
         "published as jarvis_echange events" if publish_exchanges else "not published",

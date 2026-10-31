@@ -41,6 +41,11 @@ class SatelliteConfig:
     followup_enabled: bool = True
     followup_beep: bool = True
     followup_timeout_s: int = 8
+    thinking_sound_enabled: bool = True
+    search_sound_enabled: bool = True
+    thinking_delay_ms: int = 1000
+    thinking_sound: str = ""  # WAV file replacing the built-in sound
+    search_sound: str = ""
 
     @classmethod
     def from_options(cls, options: dict[str, Any], index: int) -> "SatelliteConfig":
@@ -94,6 +99,16 @@ class SatelliteConfig:
                 self.name, self.followup_timeout_s, timeout,
             )
             self.followup_timeout_s = timeout
+
+        delay = max(300, min(5000, self.thinking_delay_ms))
+        if delay != self.thinking_delay_ms:
+            _LOGGER.warning(
+                "[%s] thinking_delay_ms %d clamped to %d (valid range 300-5000)",
+                self.name, self.thinking_delay_ms, delay,
+            )
+            self.thinking_delay_ms = delay
+        self.thinking_sound = self.thinking_sound.strip()
+        self.search_sound = self.search_sound.strip()
 
 
 def load_options(path: str) -> tuple[list[SatelliteConfig], bool, bool]:
