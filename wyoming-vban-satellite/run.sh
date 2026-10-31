@@ -10,4 +10,6 @@
 SATELLITE_COUNT=$(bashio::config 'satellites | length')
 bashio::log.info "Configured ${SATELLITE_COUNT} VBAN satellite(s)"
 
-exec python3 -m wyoming_vban --options /data/options.json
+# --ui-port: configuration UI, opened through Home Assistant Ingress
+# (same port as ingress_port in config.yaml)
+exec python3 -m wyoming_vban --options /data/options.json --ui-port 8743

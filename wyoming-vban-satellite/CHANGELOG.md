@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.3.0
+
+- **New**: configuration interface, opened from Home Assistant (Ingress: *Open web UI*, or the sidebar). Each satellite shows only the settings that apply to it (media player settings only for a media player output, VBAN output settings only when enabled, phrase/sound fields depending on each announcement mode…), with add/remove satellite and debug copies.
+- **Save and apply without restarting the app**: options are saved through the Supervisor API (same options as the Configuration tab, validated by Home Assistant) and applied by restarting the satellites inside the app. If the new configuration fails to start (e.g. port in use), the previous one is restored, in the app and in the saved options, and the error is shown.
+- Pre-3.2 announcement switches (`thinking`, `search`, `enabled`) are converted to explicit modes when saving from the interface.
+- The interface only answers requests from Home Assistant's Ingress proxy (the app uses the host network, so its port is also reachable from the LAN).
+- Internals: the satellites, receivers, HA WebSocket and announcements are now run by a reloadable runtime (`runtime.py`).
+
 ## 3.2.0
 
 - **New**: configurable announcements while the response is prepared, per satellite. Each signal has a mode: `none`, `sound`, `phrase` (spoken text) or `sound_then_phrase`; every text and sound can be changed.

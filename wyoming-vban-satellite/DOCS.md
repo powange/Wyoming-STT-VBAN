@@ -17,6 +17,22 @@ satellite.
 
 Optionally, TTS responses can be sent back to a VBAN output stream.
 
+## Configuration interface
+
+Open the app's web interface (**Open web UI** on the app page, or **VBAN
+Satellite** in the sidebar if you enabled *Show in sidebar*). It shows each
+satellite with only the settings that apply (e.g. the media player settings
+only when responses go to a media player, a phrase field only in a phrase
+mode). **Save and apply** stores the options (the Configuration tab shows
+the same ones, validated by Home Assistant) and applies them **without
+restarting the app**: the satellites restart inside the app in a second or
+two, and Home Assistant reconnects to them. If the new configuration can't
+start (e.g. a port already in use), the previous one is restored and the
+error is shown. Pre-3.2 announcement switches are converted to modes when
+saving.
+
+The interface is only reachable through Home Assistant (Ingress).
+
 ## Configuration
 
 Each satellite has a few top-level fields and one block per feature. In the

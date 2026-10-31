@@ -304,8 +304,11 @@ class AppOptions:
 def load_options(path: str) -> AppOptions:
     """Read the app options file."""
     with open(path, encoding="utf-8") as options_file:
-        options = json.load(options_file)
+        return parse_options(json.load(options_file))
 
+
+def parse_options(options: dict[str, Any]) -> AppOptions:
+    """App options (as stored by the Supervisor) → AppOptions."""
     satellites = [
         SatelliteConfig.from_options(entry, index)
         for index, entry in enumerate(options.get("satellites") or [])

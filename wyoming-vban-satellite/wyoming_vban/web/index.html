@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VBAN Satellite</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1f2328; --muted: #656d76;
+    --border: #d8dee4; --accent: #03a9f4; --danger: #d1242f; --ok: #1a7f37;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111418; --card: #1c2128; --text: #e6edf3; --muted: #8d96a0;
+      --border: #30363d; --accent: #4fc3f7; --danger: #f85149; --ok: #3fb950;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 900px; margin: 0 auto; }
+  header {
+    position: sticky; top: 0; z-index: 2; background: var(--bg);
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 8px 0 12px;
+  }
+  header h1 { font-size: 20px; margin: 0 auto 0 0; }
+  button {
+    font: inherit; border: 1px solid var(--border); background: var(--card);
+    color: var(--text); border-radius: 6px; padding: 6px 12px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: default; }
+  #message { width: 100%; margin: 0; min-height: 1.4em; }
+  #message.error { color: var(--danger); }
+  #message.ok { color: var(--ok); }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 16px;
+  }
+  .card > summary {
+    font-size: 16px; font-weight: 600; cursor: pointer; padding: 4px 0;
+  }
+  .card-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+  fieldset {
+    border: 0; border-top: 1px solid var(--border); margin: 12px 0 0;
+    padding: 8px 0 0;
+  }
+  legend { font-weight: 600; padding-right: 8px; }
+  .grid {
+    display: grid; gap: 10px 16px;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  }
+  .group { margin-top: 10px; }
+  .group-title { font-weight: 500; color: var(--muted); margin-bottom: 4px; }
+  label { display: flex; flex-direction: column; gap: 4px; }
+  label.check { flex-direction: row; align-items: center; gap: 8px; }
+  label span.name { font-weight: 500; }
+  .help { color: var(--muted); font-size: 12px; }
+  .notice { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+  input, select {
+    font: inherit; padding: 6px 8px; border-radius: 6px; width: 100%;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  input[type=checkbox] { width: auto; }
+  .row {
+    display: grid; gap: 8px; align-items: end; margin-bottom: 8px;
+    grid-template-columns: 2fr 1.4fr 1.4fr 0.8fr 1.2fr auto;
+  }
+  @media (max-width: 700px) { .row { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>VBAN Satellite</h1>
+    <button id="revert" disabled>Annuler les modifications</button>
+    <button id="save" class="primary" disabled>Enregistrer et appliquer</button>
+    <p id="message" role="status"></p>
+  </header>
+  <div id="form"></div>
+</main>
+<script>
+"use strict";
+
+const MODES = [["none", "Aucun"], ["sound", "Son"], ["phrase", "Phrase"],
+               ["sound_then_phrase", "Son puis phrase"]];
+const BLOCKS = ["microphone", "vban_output", "media_player", "followup",
+                "waiting_sounds", "camera_phrase"];
+// Before 3.2, booleans switched announcements on/off; they set the mode when
+// it isn't set (on = sound, off = none)
+const LEGACY = [
+  ["waiting_sounds", "thinking_mode", "thinking", "sound", "phrase"],
+  ["waiting_sounds", "search_mode", "search", "sound", "sound_then_phrase"],
+  ["camera_phrase", "mode", "enabled", "phrase", "phrase"],
+];
+
+let saved = null;   // options as stored by the Supervisor
+let options = null; // options being edited
+const form = document.getElementById("form");
+const saveButton = document.getElementById("save");
+const revertButton = document.getElementById("revert");
+const message = document.getElementById("message");
+
+function say(text, kind = "") {
+  message.textContent = text;
+  message.className = kind;
+}
+
+function setDirty() {
+  const dirty = JSON.stringify(options) !== JSON.stringify(saved);
+  saveButton.disabled = !dirty;
+  revertButton.disabled = !dirty;
+  if (dirty) say("Modifications non enregistrées.");
+}
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (value !== undefined && value !== null) node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child !== null && child !== undefined && child !== false) {
+      node.append(child);
+    }
+  }
+  return node;
+}
+
+/* A form field bound to obj[key]. An empty optional field is removed from
+   the options, so the default applies. Fields changing what is shown
+   re-render the form. */
+function field(obj, key, spec) {
+  const { label, type = "text", choices, help, placeholder, def, rerender,
+          required, min, max, step } = spec;
+  let input;
+  const changed = (value) => {
+    if (value === undefined) delete obj[key];
+    else obj[key] = value;
+    setDirty();
+    if (rerender) render();
+  };
+  if (type === "checkbox") {
+    input = el("input", { type: "checkbox" });
+    input.checked = key in obj ? !!obj[key] : !!def;
+    input.addEventListener("change", () => changed(input.checked));
+    return el("label", { class: "check" }, input,
+              el("span", { class: "name" }, label),
+              help ? el("span", { class: "help" }, `— ${help}`) : null);
+  }
+  if (type === "select") {
+    input = el("select", {},
+      choices.map(([value, text]) => el("option", { value }, text)));
+    input.value = key in obj ? obj[key] : def;
+    input.addEventListener("change", () => changed(input.value));
+  } else {
+    input = el("input", { type, placeholder, min, max, step,
+                          required: required ? "" : null });
+    input.value = key in obj ? obj[key] : "";
+    input.addEventListener("input", () => {
+      const raw = input.value.trim();
+      if (raw === "") changed(required ? obj[key] : undefined);
+      else if (type === "number") {
+        const number = Number(raw);
+        if (!Number.isNaN(number)) changed(number);
+      } else changed(input.value);
+    });
+  }
+  return el("label", {}, el("span", { class: "name" }, label), input,
+            help ? el("span", { class: "help" }, help) : null);
+}
+
+function section(title, ...fields) {
+  return el("fieldset", {}, el("legend", {}, title),
+            el("div", { class: "grid" }, fields));
+}
+
+/* A titled row of fields inside a section (one per announcement). */
+function group(title, ...fields) {
+  return el("div", { class: "group" }, el("div", { class: "group-title" }, title),
+            el("div", { class: "grid" }, fields));
+}
+
+/* Effective announcement mode, considering the pre-3.2 booleans. */
+function effectiveMode(block, modeKey, legacyKey, on, def) {
+  if (block[modeKey]) return block[modeKey];
+  if (legacyKey in block) return block[legacyKey] ? on : "none";
+  return def;
+}
+
+function modeField(block, modeKey, legacyKey, on, def, label, help) {
+  const current = { [modeKey]: effectiveMode(block, modeKey, legacyKey, on, def) };
+  const input = field(current, modeKey, { label, type: "select", choices: MODES, help });
+  input.querySelector("select").addEventListener("change", () => {
+    block[modeKey] = current[modeKey];
+    delete block[legacyKey];
+    setDirty();
+    render();
+  });
+  return input;
+}
+
+const hasSound = (mode) => mode === "sound" || mode === "sound_then_phrase";
+const hasPhrase = (mode) => mode === "phrase" || mode === "sound_then_phrase";
+
+function satelliteCard(sat, index) {
+  for (const block of BLOCKS) sat[block] = sat[block] || {};
+  const mic = sat.microphone, vban = sat.vban_output, mp = sat.media_player;
+  const fu = sat.followup, ws = sat.waiting_sounds, cam = sat.camera_phrase;
+  const output = sat.output || "vban";
+
+  const thinking = effectiveMode(ws, "thinking_mode", "thinking", "sound", "phrase");
+  const search = effectiveMode(ws, "search_mode", "search", "sound", "sound_then_phrase");
+  const vision = effectiveMode(cam, "mode", "enabled", "phrase", "phrase");
+  const legacy = LEGACY.some(([b, , key]) => key in sat[b]);
+
+  const card = el("details", { class: "card", open: "" },
+    el("summary", {}, sat.name || `Satellite ${index + 1}`),
+    section("Général",
+      field(sat, "name", { label: "Nom", required: true, rerender: false }),
+      field(sat, "wyoming_port", { label: "Port Wyoming", type: "number",
+            required: true, help: "Unique par satellite (10700, 10701…)" }),
+      field(sat, "output", { label: "Sortie des réponses", type: "select",
+            def: "vban", rerender: true,
+            choices: [["vban", "VBAN (enceinte)"], ["media_player", "Media player HA"]] })),
+    section("Micro",
+      field(mic, "vban_port", { label: "Port VBAN", type: "number", required: true }),
+      field(mic, "stream_name", { label: "Nom du flux",
+            help: "Vide = tout flux non réclamé sur ce port" }),
+      field(mic, "vban_mode", { label: "Mode", type: "select", def: "unicast",
+            rerender: true, choices: [["unicast", "Unicast"], ["multicast", "Multicast"]] }),
+      (mic.vban_mode === "multicast") &&
+        field(mic, "multicast_group", { label: "Groupe multicast",
+              placeholder: "239.0.0.1", required: true })),
+    section(output === "media_player" ? "Sortie VBAN (secours)" : "Sortie VBAN",
+      field(vban, "enabled", { label: "Activée", type: "checkbox", rerender: true,
+            help: output === "media_player" ? "si play_media échoue" : null }),
+      vban.enabled && field(vban, "address", { label: "Adresse de l'enceinte",
+            required: true, placeholder: "192.168.0.179" }),
+      vban.enabled && field(vban, "stream_name", { label: "Nom du flux", placeholder: "TTS1" }),
+      vban.enabled && field(vban, "port", { label: "Port", type: "number", placeholder: "6980" }),
+      vban.enabled && field(vban, "volume", { label: "Volume", type: "number",
+            min: 0, max: 2, step: 0.05, placeholder: "1.0", help: "0 à 2" }),
+      vban.enabled && field(vban, "batch_packets", { label: "Paquets par envoi",
+            type: "number", min: 1, max: 8, placeholder: "1", help: "1 = le plus régulier" }),
+      vban.enabled && field(vban, "mode", { label: "Mode", type: "select", def: "unicast",
+            choices: [["unicast", "Unicast"], ["multicast", "Multicast"]] })),
+    output === "media_player" && section("Media player",
+      field(mp, "entity", { label: "Entité", required: true,
+            placeholder: "media_player.nestmini7039" }),
+      field(mp, "mic_mute_tail_ms", { label: "Marge de coupure micro (ms)",
+            type: "number", min: 0, max: 5000, placeholder: "250" }),
+      field(mp, "http_port", { label: "Port HTTP", type: "number",
+            placeholder: String(10800 + index) }),
+      field(mp, "http_host", { label: "Hôte HTTP", help: "Vide = détection automatique" })),
+    section("Relance sans mot-clé",
+      field(fu, "enabled", { label: "Activée", type: "checkbox", def: true, rerender: true,
+            help: "écouter la réponse quand Jarvis pose une question" }),
+      fu.enabled !== false && field(fu, "beep", { label: "Bip", type: "checkbox", def: true }),
+      fu.enabled !== false && field(fu, "timeout_s", { label: "Délai sans parole (s)",
+            type: "number", min: 3, max: 30, placeholder: "8" })),
+    el("fieldset", {}, el("legend", {}, "Annonces d'attente"),
+      group("Fin d'écoute",
+        field(ws, "listen_end_mode", { label: "Mode", type: "select", def: "none",
+              rerender: true, choices: [["none", "Aucun"], ["sound", "Bip"]],
+              help: "dès que la demande est enregistrée" }),
+        ws.listen_end_mode === "sound" && field(ws, "listen_end_file", {
+              label: "Son", placeholder: "Bip intégré", help: "Fichier WAV dans /share" })),
+      group("Réflexion",
+        modeField(ws, "thinking_mode", "thinking", "sound", "phrase", "Mode",
+                  "si pas de réponse après le délai"),
+        thinking !== "none" && field(ws, "thinking_delay_ms", { label: "Délai (ms)",
+              type: "number", min: 300, max: 5000, placeholder: "1000" }),
+        hasPhrase(thinking) && field(ws, "thinking_text", { label: "Phrase",
+              placeholder: "Je réfléchis." }),
+        hasSound(thinking) && field(ws, "thinking_file", { label: "Son",
+              placeholder: "Son intégré", help: "Fichier WAV dans /share" })),
+      group("Recherche internet",
+        modeField(ws, "search_mode", "search", "sound", "sound_then_phrase", "Mode",
+                  "événement jarvis_recherche"),
+        hasPhrase(search) && field(ws, "search_text", { label: "Phrase",
+              placeholder: "Je cherche sur internet." }),
+        hasSound(search) && field(ws, "search_file", { label: "Son",
+              placeholder: "Son intégré", help: "Fichier WAV dans /share" })),
+      group("Regard caméra",
+        modeField(cam, "mode", "enabled", "phrase", "phrase", "Mode",
+                  "événement jarvis_vision"),
+        hasPhrase(vision) && field(cam, "text", { label: "Phrase",
+              placeholder: "Attends, j'observe." }),
+        hasSound(vision) && field(cam, "file", { label: "Son",
+              help: "Fichier WAV dans /share (pas de son intégré)" })),
+      (hasPhrase(thinking) || hasPhrase(search) || hasPhrase(vision)) && group(
+        "Voix des phrases de ce satellite",
+        field(cam, "tts_engine", { label: "Moteur TTS", help: "Vide = réglage général" }),
+        field(cam, "tts_voice", { label: "Voix", help: "Vide = réglage général" }))),
+    legacy ? el("p", { class: "notice" },
+      "Anciens réglages des annonces (avant 3.2) : ils seront convertis en modes à l'enregistrement.")
+      : null,
+    el("div", { class: "card-actions" },
+      el("button", { class: "danger", onclick: () => {
+        if (confirm(`Supprimer le satellite « ${sat.name} » ?`)) {
+          options.satellites.splice(index, 1);
+          setDirty();
+          render();
+        }
+      } }, "Supprimer ce satellite")));
+  card.querySelector("input")?.addEventListener("change", () => render());
+  return card;
+}
+
+function mirrorRow(mirror, index) {
+  const names = options.satellites.map((sat) => [sat.name, sat.name]);
+  return el("div", { class: "row" },
+    field(mirror, "satellite", { label: "Satellite", type: "select", choices: names,
+          def: names[0]?.[0] }),
+    field(mirror, "stream", { label: "Flux", type: "select", def: "mic_sent", choices: [
+          ["mic_received", "Micro reçu"], ["mic_sent", "Micro envoyé à HA"],
+          ["tts", "Réponses"]] }),
+    field(mirror, "address", { label: "Adresse", required: true, placeholder: "192.168.0.42" }),
+    field(mirror, "port", { label: "Port", type: "number", placeholder: "6980" }),
+    field(mirror, "stream_name", { label: "Nom du flux", placeholder: "Bureau-tx" }),
+    el("button", { class: "danger", onclick: () => {
+      options.debug_mirror.splice(index, 1);
+      setDirty();
+      render();
+    } }, "Retirer"));
+}
+
+function globalCard() {
+  options.debug_mirror = options.debug_mirror || [];
+  return el("details", { class: "card" },
+    el("summary", {}, "Réglages généraux"),
+    section("Annonces parlées",
+      field(options, "announcements_tts_engine", { label: "Moteur TTS",
+            placeholder: "tts.piper" }),
+      field(options, "announcements_tts_voice", { label: "Voix",
+            placeholder: "fr_FR-siwis-medium" })),
+    section("Home Assistant",
+      field(options, "publish_exchanges", { label: "Publier les échanges",
+            type: "checkbox", def: true, help: "événement jarvis_echange" }),
+      field(options, "debug_logging", { label: "Journalisation de débogage",
+            type: "checkbox" })),
+    el("fieldset", {}, el("legend", {}, "Copies audio de debug (VBAN)"),
+      options.debug_mirror.map(mirrorRow),
+      el("button", { onclick: () => {
+        options.debug_mirror.push({ satellite: options.satellites[0]?.name,
+                                    stream: "mic_sent" });
+        setDirty();
+        render();
+      } }, "Ajouter une copie")));
+}
+
+function render() {
+  const open = [...form.querySelectorAll("details")].map((d) => d.open);
+  form.replaceChildren(
+    ...options.satellites.map(satelliteCard),
+    el("div", { class: "card-actions" },
+      el("button", { onclick: () => {
+        const i = options.satellites.length;
+        options.satellites.push({
+          name: `VBAN Satellite ${i + 1}`, wyoming_port: 10700 + i, output: "vban",
+          microphone: { vban_port: 6980 }, vban_output: {}, media_player: {},
+          followup: {}, waiting_sounds: {}, camera_phrase: {},
+        });
+        setDirty();
+        render();
+      } }, "Ajouter un satellite")),
+    globalCard());
+  form.querySelectorAll("details").forEach((d, i) => {
+    if (open[i] !== undefined) d.open = open[i];
+  });
+}
+
+/* Explicit modes instead of the pre-3.2 booleans. */
+function forSave(opts) {
+  const copy = JSON.parse(JSON.stringify(opts));
+  for (const sat of copy.satellites) {
+    for (const [block, modeKey, legacyKey, on, def] of LEGACY) {
+      const b = sat[block];
+      if (legacyKey in b) {
+        b[modeKey] = effectiveMode(b, modeKey, legacyKey, on, def);
+        delete b[legacyKey];
+      }
+    }
+  }
+  return copy;
+}
+
+async function load() {
+  say("Chargement…");
+  const resp = await fetch("api/options");
+  const body = await resp.json();
+  if (!resp.ok) {
+    say(body.error || "Impossible de lire la configuration", "error");
+    return;
+  }
+  saved = body.options;
+  options = JSON.parse(JSON.stringify(saved));
+  render();
+  setDirty();
+  say("");
+}
+
+saveButton.addEventListener("click", async () => {
+  saveButton.disabled = true;
+  say("Enregistrement et application…");
+  try {
+    const resp = await fetch("api/options", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ options: forSave(options) }),
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+      say(body.error || `Erreur ${resp.status}`, "error");
+      setDirty();
+      if (resp.status === 409) await load();
+      return;
+    }
+    await load();
+    say("Configuration enregistrée et appliquée.", "ok");
+  } catch (err) {
+    say(`Erreur : ${err}`, "error");
+    setDirty();
+  }
+});
+
+revertButton.addEventListener("click", () => {
+  options = JSON.parse(JSON.stringify(saved));
+  render();
+  setDirty();
+  say("");
+});
+
+load().catch((err) => say(`Erreur : ${err}`, "error"));
+</script>
+</body>
+</html>
