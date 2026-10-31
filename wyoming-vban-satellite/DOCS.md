@@ -170,43 +170,49 @@ Wake word detection now resumes only once the response has played. If a
 run ends without a spoken response nor an error (empty response), the
 satellite goes back to wake word listening after 60 s.
 
-### Waiting sounds (`waiting_sounds` block)
+### Announcements (`waiting_sounds` and `camera_phrase` blocks)
 
-While the response is being prepared (after your request is understood),
-the satellite can play short, soft sounds on its output (VBAN or media
-player), so you know the request was heard:
+Between the end of your request and Jarvis' response, the satellite tells
+you what is happening, without disturbing fast commands:
 
-- a **thinking** sound (two falling notes) if the response takes longer than `thinking_delay_ms`;
-- an **internet** sound (three rising notes) when a `jarvis_recherche` Home Assistant event is fired (e.g. by a script just before calling an internet search). The event doesn't say which satellite asked: the sound plays on the satellite(s) waiting for a response. At most once per request.
+| Situation | Default | Option (mode) |
+|---|---|---|
+| End of listening (request recorded) | nothing | `waiting_sounds.listen_end_mode`: `none` or `sound` |
+| Home Assistant command (response in < 1 s) | nothing | — |
+| Local AI thinking (no response after the delay) | phrase "Je réfléchis." | `waiting_sounds.thinking_mode` |
+| Internet search (`jarvis_recherche` HA event) | sound, then "Je cherche sur internet." | `waiting_sounds.search_mode` |
+| Camera look (`jarvis_vision` HA event) | phrase "Attends, j'observe." | `camera_phrase.mode` |
 
-Fast commands (e.g. lights) play nothing. A sound that is playing when the
-response arrives is not cut: the response follows it (sounds last
-≤ 0.4 s), and no further sound is played. The microphone is replaced by
-silence while a sound plays.
+Modes: `none`, `sound`, `phrase` (spoken text), `sound_then_phrase`.
+Each signal is set per satellite; every text and sound can be changed:
 
-Fields:
+- `waiting_sounds`:
+  - **listen_end_mode**, **listen_end_file** (WAV replacing the built-in blip: 1200 Hz, 60 ms)
+  - **thinking_mode**, **thinking_delay_ms** (300–5000, default 1000), **thinking_text**, **thinking_file**
+  - **search_mode**, **search_text**, **search_file**
+- `camera_phrase`: **mode**, **text**, **file** (no built-in sound), **tts_engine** / **tts_voice** (this satellite's phrases; empty = app options)
+- App options: **announcements_tts_engine** (default `tts.piper`), **announcements_tts_voice** (default `fr_FR-siwis-medium`)
 
-- **thinking**: thinking sound, default `true`
-- **search**: internet search sound, default `true`
-- **thinking_delay_ms**: 300–5000 (default: 1000)
-- **thinking_file** / **search_file**: WAV file replacing the built-in sound, e.g. `/share/jarvis/thinking.wav` (the app has read access to `/share`). Keep it short: the response waits for it to finish.
+Sound files are WAVs, e.g. `/share/jarvis/observe.wav` (the app has read
+access to `/share`). Keep them short: the response waits for them to finish.
 
-### "Attends, je regarde." on a camera look (`camera_phrase` block)
+How it plays, for each request:
 
-When a `jarvis_vision` Home Assistant event is fired (e.g. by a script just
-before taking a camera snapshot), the satellite(s) waiting for a response
-**say** a short phrase instead of the waiting sounds. The phrase is
-synthesized once by Home Assistant's TTS (at startup, and again when the
-options change), then cached in `/data`, so it plays immediately. A response
-arriving during the phrase waits for it to finish.
+1. Request transcribed: the end-of-listening blip (if enabled), then the thinking delay starts.
+2. No response after the delay: the thinking announcement.
+3. `jarvis_vision` / `jarvis_recherche` while waiting: if the thinking announcement hasn't started, it is replaced; if it is playing, it finishes first. At most one vision and one search announcement per request. The events don't say which satellite asked: they apply to the satellite(s) waiting for a response.
+4. Response arriving during an announcement: the announcement finishes, then the response plays; announcements not started are dropped.
+5. The microphone is replaced by silence while an announcement plays.
 
-- **enabled**: default `true`
-- **text**: default `Attends, je regarde.`
-- **tts_engine**: TTS entity, default `tts.piper`
-- **tts_voice**: voice, default `fr_FR-siwis-medium`
+Phrases are synthesized by Home Assistant's TTS once (at startup, and again
+when they change) and cached in `/data/annonces`, so they play immediately.
+If synthesis fails, an error is logged and the signal's built-in sound is
+played instead (thinking sound for the camera); synthesis is retried.
 
-If Home Assistant is not ready at startup, synthesis is retried every 30 s;
-until then, the event is ignored.
+Before 3.2, `waiting_sounds.thinking` / `search` and `camera_phrase.enabled`
+switched the sounds on or off. They are still read when the matching mode is
+not set (on = sound, as in 3.1; off = none), with a warning in the log:
+remove them to get the new defaults, or set the modes.
 
 ### Voice exchanges as Home Assistant events
 

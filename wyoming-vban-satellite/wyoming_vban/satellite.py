@@ -114,21 +114,46 @@ class Cue:
             )
 
 
-# Waiting sounds, distinct from the follow-up beep (880 Hz)
+# Built-in announcement sounds, distinct from the follow-up beep (880 Hz)
 THINKING_NOTES = [(660.0, 0.12), (520.0, 0.12)]  # two soft falling notes
 SEARCH_NOTES = [(520.0, 0.08), (660.0, 0.08), (880.0, 0.08)]  # three rising
+LISTEN_END_NOTES = [(1200.0, 0.06)]  # short high blip: request recorded
+
+
+@dataclass
+class Announcement:
+    """One waiting signal: a sound, a spoken phrase, or both (in that order)."""
+
+    sound: Optional[Cue] = None
+    phrase: Optional["TtsPhrase"] = None  # its cue is None until synthesized
+    # Played instead of a phrase not (yet) synthesized, unless the sound is
+    # already part of the announcement
+    fallback: Optional[Cue] = None
+
+    def cues(self) -> list[tuple[Cue, str]]:
+        items: list[tuple[Cue, str]] = []
+        if self.sound is not None:
+            items.append((self.sound, "sound"))
+        if self.phrase is not None:
+            if self.phrase.cue is not None:
+                items.append((self.phrase.cue, f"'{self.phrase.text}'"))
+            elif self.sound is None and self.fallback is not None:
+                items.append((self.fallback, "sound (phrase not synthesized)"))
+        return items
 
 
 @dataclass
 class WaitingCues:
-    """Sounds played while the response is being prepared (per satellite)."""
+    """Announcements while the response is being prepared (per satellite).
 
-    thinking: Optional[Cue] = None  # None = disabled
-    search: Optional[Cue] = None
+    None = signal disabled.
+    """
+
+    listen_end: Optional[Announcement] = None  # on the transcript
+    thinking: Optional[Announcement] = None  # no response after the delay
     thinking_delay_s: float = 1.0
-    # Spoken phrase on a camera look (jarvis_vision); its cue is None until
-    # synthesized
-    vision: Optional["TtsPhrase"] = None
+    search: Optional[Announcement] = None  # jarvis_recherche HA event
+    vision: Optional[Announcement] = None  # jarvis_vision HA event
 
 
 # Handlers between transcript and response: told about internet searches
@@ -293,9 +318,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._cues = waiting_cues or WaitingCues()
         self._thinking = False
         self._thinking_timer: Optional[asyncio.Task] = None
-        self._search_cue_played = False  # at most one search sound per run
-        self._vision_played = False  # at most one vision phrase per run
-        self._cue_task: Optional[asyncio.Task] = None  # sound being played
+        self._search_announced = False  # at most one per run
+        self._vision_announced = False  # at most one per run
+        # Announcements to play, in order: (signal, cue, label)
+        self._cue_queue: collections.deque[tuple[str, Cue, str]] = collections.deque()
+        self._cue_task: Optional[asyncio.Task] = None  # plays the queue
         self._mic_silence_until = 0.0  # mic replaced by silence (sound playing)
 
         # Follow-up: when enabled, the satellite drives the pipeline runs
@@ -544,21 +571,32 @@ class VbanSatelliteHandler(AsyncEventHandler):
     def _start_thinking(self) -> None:
         """Transcript received: the response is being prepared."""
         self._stop_thinking()
+        cues = self._cues
         if not self._has_output() or not (
-            self._cues.thinking or self._cues.search or self._cues.vision
+            cues.listen_end or cues.thinking or cues.search or cues.vision
         ):
             return
         self._thinking = True
-        self._search_cue_played = False
-        self._vision_played = False
+        self._search_announced = False
+        self._vision_announced = False
         _THINKING_HANDLERS.add(self)
-        if self._cues.thinking:
+        if cues.listen_end:
+            self._announce("listen_end", cues.listen_end)
+        if cues.thinking:
             self._thinking_timer = asyncio.create_task(self._thinking_after_delay())
 
     def _stop_thinking(self) -> None:
-        """Response arriving, error or run over: no (more) waiting sounds."""
+        """Response arriving, error or run over: no more announcements.
+
+        The one playing finishes (the response follows it); the pending
+        ones are dropped.
+        """
         self._thinking = False
         _THINKING_HANDLERS.discard(self)
+        self._cancel_thinking_timer()
+        self._cue_queue.clear()
+
+    def _cancel_thinking_timer(self) -> None:
         if self._thinking_timer and not self._thinking_timer.done():
             self._thinking_timer.cancel()
         self._thinking_timer = None
@@ -566,48 +604,50 @@ class VbanSatelliteHandler(AsyncEventHandler):
     async def _thinking_after_delay(self) -> None:
         await asyncio.sleep(self._cues.thinking_delay_s)
         if self._thinking and self._cues.thinking:
-            self._play_cue(self._cues.thinking, "thinking")
+            self._announce("thinking", self._cues.thinking)
 
     def on_search(self, data: dict) -> None:
         """jarvis_recherche: the response needs an internet search."""
-        if self._thinking and self._cues.search and not self._search_cue_played:
-            self._search_cue_played = True
-            self._play_cue(self._cues.search, "search")
+        if self._thinking and self._cues.search and not self._search_announced:
+            self._search_announced = True
+            self._replace_thinking()
+            self._announce("search", self._cues.search)
 
     def on_vision(self, data: dict) -> None:
-        """jarvis_vision: the response needs a camera look. Say the phrase,
-        in place of the waiting sounds (none after it in this run)."""
-        phrase = self._cues.vision
-        if not self._thinking or phrase is None or self._vision_played:
-            return
-        if phrase.cue is None:
-            _LOGGER.debug("Vision phrase not synthesized yet: skipped")
-            return
-        self._vision_played = True
-        self._search_cue_played = True
-        if self._thinking_timer and not self._thinking_timer.done():
-            self._thinking_timer.cancel()
-        self._play_cue(phrase.cue, "vision phrase")
+        """jarvis_vision: the response needs a camera look."""
+        if self._thinking and self._cues.vision and not self._vision_announced:
+            self._vision_announced = True
+            self._replace_thinking()
+            self._announce("vision", self._cues.vision)
+
+    def _replace_thinking(self) -> None:
+        """A more precise announcement replaces the thinking one, unless it
+        has started (it then finishes first)."""
+        self._cancel_thinking_timer()
+        self._cue_queue = collections.deque(
+            item for item in self._cue_queue if item[0] != "thinking"
+        )
+
+    def _announce(self, signal: str, announcement: Announcement) -> None:
+        """Queue an announcement after the ones already queued or playing."""
+        for cue, label in announcement.cues():
+            self._cue_queue.append((signal, cue, label))
+        if self._cue_queue and not self._cue_playing():
+            self._cue_task = asyncio.create_task(self._play_cue_queue())
+            _PLAYBACK_TASKS.add(self._cue_task)
+            self._cue_task.add_done_callback(_PLAYBACK_TASKS.discard)
 
     def _cue_playing(self) -> bool:
         return self._cue_task is not None and not self._cue_task.done()
 
-    def _play_cue(self, cue: Cue, name: str) -> None:
-        """Play a waiting sound after the one already playing, if any."""
-        previous = self._cue_task if self._cue_playing() else None
-        self._cue_task = asyncio.create_task(self._play_cue_after(previous, cue, name))
-        _PLAYBACK_TASKS.add(self._cue_task)
-        self._cue_task.add_done_callback(_PLAYBACK_TASKS.discard)
+    async def _play_cue_queue(self) -> None:
+        while self._cue_queue:
+            signal, cue, label = self._cue_queue.popleft()
+            _LOGGER.info("Announcement %s: %s (%.2fs)", signal, label, cue.duration)
+            await self._play_cue(cue)
 
-    async def _play_cue_after(
-        self, previous: Optional[asyncio.Task], cue: Cue, name: str
-    ) -> None:
-        """Play cue; returns once it has played (the response may follow)."""
-        if previous is not None:
-            await asyncio.gather(previous, return_exceptions=True)
-        if not self._thinking:
-            return  # the response is coming: don't add another sound
-        _LOGGER.info("Waiting sound: %s (%.2fs)", name, cue.duration)
+    async def _play_cue(self, cue: Cue) -> None:
+        """Play one cue; returns once it has played (the next may follow)."""
         if self._media_output:
             url = self._media_output.publish(
                 build_wav(cue.pcm, cue.rate, cue.width, cue.channels)
@@ -624,7 +664,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     channels=cue.channels,
                 )
             except (audioop.error, ValueError) as err:
-                _LOGGER.warning("Failed to send waiting sound to VBAN: %s", err)
+                _LOGGER.warning("Failed to send announcement to VBAN: %s", err)
                 return
             self._mic_silence_until = (
                 time.monotonic() + cue.duration + self.VBAN_PLAYBACK_LATENCY_S

@@ -28,6 +28,7 @@ class TtsPhrase:
     """A phrase synthesized in the background; `cue` is None until ready."""
 
     RETRY_S = 30.0  # HA may not be up yet when the app starts
+    RETRY_MAX_S = 600.0  # retries slow down up to this
     REQUEST_TIMEOUT_S = 30.0
     CACHE_PREFIX = "tts_phrase_"
 
@@ -45,6 +46,7 @@ class TtsPhrase:
         self.base_url = base_url
         self.cue: Optional[Cue] = None
         key = hashlib.sha1(f"{engine}|{voice}|{text}".encode()).hexdigest()[:16]
+        # e.g. /data/annonces/tts_phrase_<hash of text + engine + voice>.wav
         self.cache_path = Path(cache_dir) / f"{self.CACHE_PREFIX}{key}.wav"
         self._token = os.environ.get("SUPERVISOR_TOKEN", "")
 
@@ -61,6 +63,8 @@ class TtsPhrase:
         """Synthesize the phrase (retrying) unless it is already cached."""
         if self.load_cached():
             return
+        retry = self.RETRY_S
+        failures = 0
         async with aiohttp.ClientSession() as session:
             while self.cue is None:
                 try:
@@ -74,11 +78,16 @@ class TtsPhrase:
                     return
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError,
                         EOFError, wave.Error, ValueError) as err:
-                    _LOGGER.warning(
-                        "Cannot synthesize phrase '%s' (%s), retrying in %.0fs",
-                        self.text, err or type(err).__name__, self.RETRY_S,
+                    failures += 1
+                    # Clear error once (e.g. wrong engine/voice), then quieter
+                    (_LOGGER.error if failures == 1 else _LOGGER.warning)(
+                        "Cannot synthesize phrase '%s' with %s / %s (%s): the "
+                        "built-in sound is played instead. Retrying in %.0fs",
+                        self.text, self.engine, self.voice,
+                        err or type(err).__name__, retry,
                     )
-                await asyncio.sleep(self.RETRY_S)
+                await asyncio.sleep(retry)
+                retry = min(retry * 2, self.RETRY_MAX_S)
 
     async def _synthesize(self, session: aiohttp.ClientSession) -> bytes:
         headers = {"Authorization": f"Bearer {self._token}"}
@@ -131,6 +140,15 @@ def remove_stale_phrases(phrases: list[TtsPhrase]) -> None:
                     _LOGGER.debug("Removed stale phrase cache %s", path)
         except OSError:
             pass
+
+
+def remove_legacy_cache(data_dir: str = "/data") -> None:
+    """Remove phrases cached directly in /data before 3.2 (now /data/annonces)."""
+    try:
+        for path in Path(data_dir).glob(f"{TtsPhrase.CACHE_PREFIX}*.wav"):
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _cue_from_wav_bytes(wav: bytes) -> Cue:

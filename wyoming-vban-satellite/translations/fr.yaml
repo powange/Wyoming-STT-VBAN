@@ -83,43 +83,73 @@ configuration:
             name: Delai (s)
             description: Retour au mot-cle sans parole (3-30, defaut 8)
       waiting_sounds:
-        name: Sons d'attente
-        description: Sons pendant la preparation de la reponse (vide = valeurs par defaut)
+        name: Annonces d'attente
+        description: Ce que le satellite joue entre votre demande et la reponse (vide = valeurs par defaut)
         fields:
-          thinking:
-            name: Son de reflexion
-            description: Son doux quand la reponse tarde (active par defaut)
+          listen_end_mode:
+            name: Fin d'ecoute
+            description: 'none (defaut) ou sound : petit bip des que la demande est enregistree'
+          listen_end_file:
+            name: Son de fin d'ecoute
+            description: WAV remplacant le bip integre, ex. /share/jarvis/fin.wav
+          thinking_mode:
+            name: Reflexion
+            description: 'Si pas de reponse apres le delai : none (rien), sound (son), phrase (texte parle) ou sound_then_phrase (son puis phrase) (defaut phrase)'
           thinking_delay_ms:
             name: Delai de reflexion (ms)
             description: 300-5000 (defaut 1000)
+          thinking_text:
+            name: Phrase de reflexion
+            description: Defaut "Je réfléchis."
           thinking_file:
-            name: Fichier du son de reflexion
-            description: WAV remplacant le son integre, ex. /share/jarvis/reflexion.wav
-          search:
-            name: Son de recherche internet
-            description: Son sur l'evenement jarvis_recherche (active par defaut)
-          search_file:
-            name: Fichier du son de recherche
+            name: Son de reflexion
             description: WAV remplacant le son integre
+          search_mode:
+            name: Recherche internet
+            description: 'Sur l''evenement jarvis_recherche : none (rien), sound (son), phrase (texte parle) ou sound_then_phrase (son puis phrase) (defaut sound_then_phrase)'
+          search_text:
+            name: Phrase de recherche
+            description: Defaut "Je cherche sur internet."
+          search_file:
+            name: Son de recherche
+            description: WAV remplacant le son integre
+          thinking:
+            name: (ancien) Son de reflexion oui/non
+            description: Avant 3.2 ; utilise seulement si Reflexion est vide (oui = son). Preferer Reflexion
+          search:
+            name: (ancien) Son de recherche oui/non
+            description: Avant 3.2 ; utilise seulement si Recherche internet est vide (oui = son). Preferer Recherche internet
       camera_phrase:
-        name: Phrase camera
-        description: '"Attends, je regarde." pendant un regard camera (vide = valeurs par defaut)'
+        name: Annonce camera
+        description: Sur l'evenement jarvis_vision, quand Jarvis regarde une camera (vide = valeurs par defaut)
         fields:
-          enabled:
-            name: Activee
-            description: Dire une phrase sur l'evenement jarvis_vision (active par defaut)
+          mode:
+            name: Mode
+            description: none (rien), sound (son), phrase (texte parle) ou sound_then_phrase (son puis phrase) (defaut phrase)
           text:
             name: Phrase
-            description: Defaut "Attends, je regarde."
+            description: Defaut "Attends, j'observe."
+          file:
+            name: Fichier son
+            description: WAV joue dans les modes avec son (pas de son integre)
           tts_engine:
             name: Moteur TTS
-            description: Defaut tts.piper
+            description: Pour les phrases de ce satellite (vide = option de l'app)
           tts_voice:
             name: Voix TTS
-            description: Defaut fr_FR-siwis-medium
+            description: Pour les phrases de ce satellite (vide = option de l'app)
+          enabled:
+            name: (ancien) Activee
+            description: Avant 3.2 ; utilise seulement si Mode est vide (non = none). Preferer Mode
   publish_exchanges:
     name: Publier les echanges
     description: Envoyer un evenement Home Assistant jarvis_echange pour chaque demande et reponse (satellite, transcript, reponse, relance)
+  announcements_tts_engine:
+    name: Moteur TTS des annonces
+    description: Entite TTS qui synthetise les annonces parlees (defaut tts.piper)
+  announcements_tts_voice:
+    name: Voix des annonces
+    description: Voix des annonces parlees (defaut fr_FR-siwis-medium)
   debug_mirror:
     name: Copies audio de debug
     description: Envoyer une copie de l'audio d'un satellite en flux VBAN, ex. pour l'ecouter avec VBAN Receptor ou VoiceMeeter (vide = aucune)
@@ -129,7 +159,7 @@ configuration:
         description: Nom du satellite, exactement comme configure (ex. VBAN Satellite Bureau)
       stream:
         name: Flux
-        description: "mic_received : micro tel que recu ; mic_sent : audio envoye a Home Assistant (16 kHz, avec les coupures) ; tts : reponses"
+        description: 'mic_received : micro tel que recu ; mic_sent : audio envoye a Home Assistant (16 kHz, avec les coupures) ; tts : reponses'
       address:
         name: Adresse
         description: IP de l'ordinateur qui recoit la copie

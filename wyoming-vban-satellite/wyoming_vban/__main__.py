@@ -14,6 +14,11 @@ from wyoming.server import AsyncServer
 from wyoming.zeroconf import HomeAssistantZeroconf
 
 from .config import (
+    DEFAULT_SEARCH_TEXT,
+    DEFAULT_THINKING_TEXT,
+    DEFAULT_TTS_ENGINE,
+    DEFAULT_TTS_VOICE,
+    DEFAULT_VISION_PHRASE,
     ConfigError,
     DebugMirror,
     SatelliteConfig,
@@ -26,8 +31,10 @@ from .ha_ws import HaStateWatcher
 from .mirror import SatelliteMirrors
 from .media_player import MediaPlayerOutput, detect_local_ip
 from .satellite import (
+    LISTEN_END_NOTES,
     SEARCH_NOTES,
     THINKING_NOTES,
+    Announcement,
     Cue,
     FollowupSettings,
     MicMute,
@@ -37,7 +44,7 @@ from .satellite import (
     notify_search,
     notify_vision,
 )
-from .tts_phrase import TtsPhrase, remove_stale_phrases
+from .tts_phrase import TtsPhrase, remove_legacy_cache, remove_stale_phrases
 from .vban import VbanReceiver, VbanSender
 
 _LOGGER = logging.getLogger(__name__)
@@ -159,28 +166,30 @@ def parse_args() -> argparse.Namespace:
         help="Back to the wake word if no speech within this time (3-30)",
     )
 
-    # Waiting sounds while the response is prepared
-    parser.add_argument(
-        "--thinking-sound-enabled", action=argparse.BooleanOptionalAction, default=True,
-        help="Play a sound when the response takes longer than --thinking-delay-ms",
-    )
-    parser.add_argument(
-        "--search-sound-enabled", action=argparse.BooleanOptionalAction, default=True,
-        help="Play a sound on the jarvis_recherche HA event (internet search)",
-    )
+    # Announcements while the response is prepared. Modes: none, sound,
+    # phrase, sound_then_phrase ("" = default)
+    parser.add_argument("--listen-end-mode", default="none", help="none or sound")
+    parser.add_argument("--listen-end-sound", default="", help="WAV (default: built-in blip)")
+    parser.add_argument("--thinking-mode", default="", help="Default: phrase")
     parser.add_argument("--thinking-delay-ms", type=int, default=1000)
-    parser.add_argument("--thinking-sound", default="", help="WAV file (default: built-in)")
-    parser.add_argument("--search-sound", default="", help="WAV file (default: built-in)")
-
-    # Spoken phrase when Jarvis looks at a camera (jarvis_vision HA event)
+    parser.add_argument("--thinking-text", default=DEFAULT_THINKING_TEXT)
+    parser.add_argument("--thinking-sound", default="", help="WAV (default: built-in)")
+    parser.add_argument("--search-mode", default="", help="Default: sound_then_phrase")
+    parser.add_argument("--search-text", default=DEFAULT_SEARCH_TEXT)
+    parser.add_argument("--search-sound", default="", help="WAV (default: built-in)")
+    parser.add_argument("--vision-mode", default="", help="Default: phrase")
+    parser.add_argument("--vision-phrase", default=DEFAULT_VISION_PHRASE)
+    parser.add_argument("--vision-sound", default="", help="WAV (no built-in sound)")
+    parser.add_argument("--vision-tts-engine", default="", help="Default: --announcements-tts-engine")
+    parser.add_argument("--vision-tts-voice", default="", help="Default: --announcements-tts-voice")
+    # Pre-3.2 switches (set the mode when it isn't set)
+    parser.add_argument("--thinking-sound-enabled", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--search-sound-enabled", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--vision-phrase-enabled", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--announcements-tts-engine", default=DEFAULT_TTS_ENGINE)
+    parser.add_argument("--announcements-tts-voice", default=DEFAULT_TTS_VOICE)
     parser.add_argument(
-        "--vision-phrase-enabled", action=argparse.BooleanOptionalAction, default=True,
-    )
-    parser.add_argument("--vision-phrase", default="Attends, je regarde.")
-    parser.add_argument("--vision-tts-engine", default="tts.piper")
-    parser.add_argument("--vision-tts-voice", default="fr_FR-siwis-medium")
-    parser.add_argument(
-        "--cache-dir", default="/data", help="Where synthesized phrases are cached",
+        "--cache-dir", default="/data/annonces", help="Where synthesized phrases are cached",
     )
 
     # Publish each voice exchange as a HA event (needs the Supervisor API)
@@ -197,8 +206,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_cue(path: str, notes: list[tuple[float, float]], volume: float) -> Cue:
-    """WAV file if configured and readable, otherwise the built-in sound."""
+def _load_cue(path: str, default: Optional[Cue]) -> Optional[Cue]:
+    """WAV file if configured and readable, otherwise the default sound."""
     if path:
         try:
             cue = Cue.from_wav(path)
@@ -211,37 +220,69 @@ def _load_cue(path: str, notes: list[tuple[float, float]], volume: float) -> Cue
             return cue
         except (OSError, EOFError, wave.Error) as err:
             _LOGGER.warning("  Cannot read %s (%s), using the built-in sound", path, err)
-    return Cue.tones(notes, volume)
+    return default
 
 
-def _waiting_cues(cfg: SatelliteConfig) -> WaitingCues:
-    return WaitingCues(
-        thinking=(
-            _load_cue(cfg.thinking_sound, THINKING_NOTES, 0.15)
-            if cfg.thinking_sound_enabled else None
-        ),
-        search=(
-            _load_cue(cfg.search_sound, SEARCH_NOTES, 0.2)
-            if cfg.search_sound_enabled else None
-        ),
-        thinking_delay_s=cfg.thinking_delay_ms / 1000,
+class PhraseRegistry:
+    """One TtsPhrase per distinct (text, engine, voice), shared by all
+    satellites and signals."""
+
+    def __init__(self, cache_dir: str, engine: str, voice: str):
+        self.cache_dir = cache_dir
+        self.engine = engine  # app-wide defaults
+        self.voice = voice
+        self._phrases: dict[tuple[str, str, str], TtsPhrase] = {}
+
+    def get(self, text: str, engine: str = "", voice: str = "") -> TtsPhrase:
+        key = (text, engine or self.engine, voice or self.voice)
+        if key not in self._phrases:
+            self._phrases[key] = TtsPhrase(*key, cache_dir=self.cache_dir)
+        return self._phrases[key]
+
+    @property
+    def phrases(self) -> list[TtsPhrase]:
+        return list(self._phrases.values())
+
+
+def _announcement(
+    mode: str, sound_file: str, builtin: Optional[Cue], text: str,
+    cfg: SatelliteConfig, phrases: PhraseRegistry,
+) -> Optional[Announcement]:
+    """The announcement for one signal (None if its mode is "none")."""
+    if mode == "none":
+        return None
+    sound = _load_cue(sound_file, builtin)
+    phrase = None
+    if mode in ("phrase", "sound_then_phrase"):
+        phrase = phrases.get(text, cfg.vision_tts_engine, cfg.vision_tts_voice)
+    return Announcement(
+        sound=sound if mode in ("sound", "sound_then_phrase") else None,
+        phrase=phrase,
+        # Phrase not synthesized: this signal's sound (vision has no
+        # built-in one: the thinking sound)
+        fallback=sound or Cue.tones(THINKING_NOTES, 0.15),
     )
 
 
-def _vision_phrases(
-    satellites: list[SatelliteConfig], cache_dir: str
-) -> dict[str, TtsPhrase]:
-    """One TtsPhrase per distinct (text, engine, voice), by satellite name."""
-    phrases: dict[tuple[str, str, str], TtsPhrase] = {}
-    by_satellite: dict[str, TtsPhrase] = {}
-    for sat in satellites:
-        if not sat.vision_phrase_enabled:
-            continue
-        key = (sat.vision_phrase, sat.vision_tts_engine, sat.vision_tts_voice)
-        if key not in phrases:
-            phrases[key] = TtsPhrase(*key, cache_dir=cache_dir)
-        by_satellite[sat.name] = phrases[key]
-    return by_satellite
+def _waiting_cues(cfg: SatelliteConfig, phrases: PhraseRegistry) -> WaitingCues:
+    return WaitingCues(
+        listen_end=_announcement(
+            cfg.listen_end_mode, cfg.listen_end_sound,
+            Cue.tones(LISTEN_END_NOTES, 0.12), "", cfg, phrases,
+        ),
+        thinking=_announcement(
+            cfg.thinking_mode, cfg.thinking_sound, Cue.tones(THINKING_NOTES, 0.15),
+            cfg.thinking_text, cfg, phrases,
+        ),
+        thinking_delay_s=cfg.thinking_delay_ms / 1000,
+        search=_announcement(
+            cfg.search_mode, cfg.search_sound, Cue.tones(SEARCH_NOTES, 0.2),
+            cfg.search_text, cfg, phrases,
+        ),
+        vision=_announcement(
+            cfg.vision_mode, cfg.vision_sound, None, cfg.vision_phrase, cfg, phrases,
+        ),
+    )
 
 
 def _config_from_args(args: argparse.Namespace) -> SatelliteConfig:
@@ -258,7 +299,7 @@ async def run_satellite(
     vban_receiver: VbanReceiver,
     state_watcher: Optional[HaStateWatcher] = None,
     publish_exchanges: bool = False,
-    vision_phrase: Optional[TtsPhrase] = None,
+    waiting_cues: Optional[WaitingCues] = None,
     debug_mirrors: Optional[SatelliteMirrors] = None,
 ) -> None:
     """Run one satellite (Wyoming server, TTS outputs, Zeroconf) until cancelled."""
@@ -317,13 +358,12 @@ async def run_satellite(
         beep=cfg.followup_beep,
         timeout_s=cfg.followup_timeout_s,
     )
-    waiting_cues = _waiting_cues(cfg)
-    waiting_cues.vision = vision_phrase
+    waiting_cues = waiting_cues or WaitingCues()
     _LOGGER.info(
-        "  Waiting sounds: thinking %s, search %s, vision phrase %s",
-        f"after {cfg.thinking_delay_ms} ms" if waiting_cues.thinking else "off",
-        "on" if waiting_cues.search else "off",
-        f"'{cfg.vision_phrase}'" if vision_phrase else "off",
+        "  Announcements: listen end %s, thinking %s (after %d ms), search %s, "
+        "vision %s",
+        cfg.listen_end_mode, cfg.thinking_mode, cfg.thinking_delay_ms,
+        cfg.search_mode, cfg.vision_mode,
     )
     _LOGGER.info(
         "  Follow-up without wake word: %s",
@@ -405,6 +445,8 @@ async def main() -> int:
 
     debug = args.debug
     publish_exchanges = args.publish_exchanges
+    announcements_tts_engine = args.announcements_tts_engine
+    announcements_tts_voice = args.announcements_tts_voice
     mirror_options: list[DebugMirror] = []
     try:
         if args.options:
@@ -413,6 +455,8 @@ async def main() -> int:
             debug = debug or app_options.debug_logging
             publish_exchanges = app_options.publish_exchanges
             mirror_options = app_options.debug_mirrors
+            announcements_tts_engine = app_options.announcements_tts_engine
+            announcements_tts_voice = app_options.announcements_tts_voice
         else:
             if not args.name:
                 raise ConfigError("--name is required without --options")
@@ -485,21 +529,25 @@ async def main() -> int:
     # output (real start/end of playback, to unmute the mic on time) and
     # publishes voice exchanges as HA events
     media_players = [s.tts_media_player for s in satellites if s.tts_output == "media_player"]
-    search_sounds = any(s.search_sound_enabled for s in satellites)
-    # Vision phrase: synthesized by HA once, cached on disk
-    vision_phrases = _vision_phrases(satellites, args.cache_dir)
-    unique_phrases = list({id(p): p for p in vision_phrases.values()}.values())
-    remove_stale_phrases(unique_phrases)
-    phrase_tasks = [asyncio.create_task(p.run()) for p in unique_phrases]
+    # Announcements; their phrases are synthesized by HA once, cached on disk
+    phrase_registry = PhraseRegistry(
+        args.cache_dir, announcements_tts_engine, announcements_tts_voice,
+    )
+    announcements = {sat.name: _waiting_cues(sat, phrase_registry) for sat in satellites}
+    remove_stale_phrases(phrase_registry.phrases)
+    remove_legacy_cache()
+    phrase_tasks = [asyncio.create_task(p.run()) for p in phrase_registry.phrases]
+    search_events = any(cues.search for cues in announcements.values())
+    vision_events = any(cues.vision for cues in announcements.values())
     state_watcher = (
         HaStateWatcher(media_players)
-        if media_players or publish_exchanges or search_sounds or vision_phrases
+        if media_players or publish_exchanges or search_events or vision_events
         else None
     )
-    if state_watcher and search_sounds:
+    if state_watcher and search_events:
         # Internet search started (fired by script.demander_ia_externe)
         state_watcher.add_event_listener("jarvis_recherche", notify_search)
-    if state_watcher and vision_phrases:
+    if state_watcher and vision_events:
         # Camera look started (fired by script.regarder_la_camera)
         state_watcher.add_event_listener("jarvis_vision", notify_vision)
     _LOGGER.info(
@@ -518,7 +566,7 @@ async def main() -> int:
         asyncio.create_task(
             run_satellite(
                 sat, receivers[sat.vban_receive_port], state_watcher, publish_exchanges,
-                vision_phrases.get(sat.name), mirrors.get(sat.name),
+                announcements[sat.name], mirrors.get(sat.name),
             )
         ): sat.name
         for sat in satellites

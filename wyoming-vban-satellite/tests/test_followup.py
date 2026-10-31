@@ -24,8 +24,10 @@ from wyoming.tts import Synthesize
 from wyoming.vad import VoiceStarted
 
 from wyoming_vban.satellite import (
+    LISTEN_END_NOTES,
     SEARCH_NOTES,
     THINKING_NOTES,
+    Announcement,
     Cue,
     FollowupSettings,
     VbanSatelliteHandler,
@@ -307,29 +309,38 @@ class FollowupBeepTest(FollowupTest):
 
 THINKING = Cue.tones(THINKING_NOTES, 0.15)
 SEARCH = Cue.tones(SEARCH_NOTES, 0.2)
+BLIP = Cue.tones(LISTEN_END_NOTES, 0.12)
 
 
 class FakePhrase:
-    """A synthesized phrase (TtsPhrase stand-in)."""
+    """A synthesized phrase (TtsPhrase stand-in); distinct lengths."""
 
-    cue = Cue(bytes(2 * 22050), 22050)  # 1 s
+    def __init__(self, text: str, seconds: float, synthesized: bool = True):
+        self.text = text
+        self.cue = Cue(bytes(2 * int(22050 * seconds)), 22050) if synthesized else None
 
 
-class WaitingSoundTest(unittest.IsolatedAsyncioTestCase):
-    """Waiting sounds between transcript and response (VBAN output)."""
+THINK_PHRASE = FakePhrase("Je réfléchis.", 0.3)
+SEARCH_PHRASE = FakePhrase("Je cherche sur internet.", 0.32)
+VISION_PHRASE = FakePhrase("Attends, j'observe.", 0.34)
 
-    async def asyncSetUp(self) -> None:
+
+def size(item) -> int:
+    return len(item.cue.pcm if isinstance(item, FakePhrase) else item.pcm)
+
+
+class AnnouncementTest(unittest.IsolatedAsyncioTestCase):
+    """Announcements between transcript and response (VBAN output)."""
+
+    async def start(self, cues: WaitingCues) -> None:
         self.sender = FakeVbanSender()
-        self.phrase = FakePhrase()
         port = _free_tcp_port()
         self.server = AsyncServer.from_uri(f"tcp://127.0.0.1:{port}")
         await self.server.start(
             lambda reader, writer: VbanSatelliteHandler(
                 reader, writer, make_satellite_info("Bureau"), FakeReceiver(),
                 self.sender, followup=FollowupSettings(enabled=True, beep=False),
-                waiting_cues=WaitingCues(
-                    THINKING, SEARCH, thinking_delay_s=0.3, vision=self.phrase,
-                ),
+                waiting_cues=cues,
             )
         )
         self.ha = AsyncTcpClient("127.0.0.1", port)
@@ -351,84 +362,126 @@ class WaitingSoundTest(unittest.IsolatedAsyncioTestCase):
         await self.ha.write_event(AudioStart(rate=22050, width=2, channels=1).event())
         await asyncio.sleep(0.05)
 
+    def assertSent(self, *items) -> None:
+        self.assertEqual(self.sender.sent, [size(item) for item in items])
+
+    # Modes
+
+    async def test_none_plays_nothing(self) -> None:
+        await self.start(WaitingCues(thinking_delay_s=0.2))
+        await self.transcript()
+        await asyncio.sleep(0.3)
+        notify_search({"question": "x"})
+        notify_vision({"question": "x", "piece": "bureau"})
+        await asyncio.sleep(0.3)
+        self.assertSent()
+
+    async def test_listen_end_blip_right_away(self) -> None:
+        await self.start(WaitingCues(listen_end=Announcement(sound=BLIP)))
+        await self.transcript()
+        self.assertSent(BLIP)
+
     async def test_fast_response_plays_nothing(self) -> None:
+        await self.start(WaitingCues(
+            thinking=Announcement(phrase=THINK_PHRASE), thinking_delay_s=0.3,
+        ))
         await self.transcript()
         await asyncio.sleep(0.1)
         await self.response()
         await asyncio.sleep(0.4)
-        self.assertEqual(self.sender.sent, [])
+        self.assertSent()
 
-    async def test_slow_response_plays_thinking_sound(self) -> None:
-        await self.transcript()
-        await asyncio.sleep(0.45)
-        self.assertEqual(self.sender.sent, [len(THINKING.pcm)])
-        await self.response()
-        self.assertEqual(self.sender.sent, [len(THINKING.pcm)])
+    async def test_thinking_modes(self) -> None:
+        for announcement, expected in (
+            (Announcement(sound=THINKING), [THINKING]),
+            (Announcement(phrase=THINK_PHRASE), [THINK_PHRASE]),
+            (Announcement(sound=THINKING, phrase=THINK_PHRASE), [THINKING, THINK_PHRASE]),
+        ):
+            with self.subTest(expected=len(expected)):
+                await self.start(WaitingCues(thinking=announcement, thinking_delay_s=0.2))
+                await self.transcript()
+                await asyncio.sleep(0.9)
+                self.assertSent(*expected)
+                await self.asyncTearDown()
 
-    async def test_search_sound_once_after_thinking(self) -> None:
+    async def test_phrase_not_synthesized_falls_back_to_sound(self) -> None:
+        await self.start(WaitingCues(
+            thinking=Announcement(
+                phrase=FakePhrase("Je réfléchis.", 0.3, synthesized=False),
+                fallback=THINKING,
+            ),
+            thinking_delay_s=0.2,
+        ))
         await self.transcript()
-        await asyncio.sleep(0.35)  # thinking sound starts
-        notify_search({"question": "actualités"})
-        notify_search({"question": "actualités"})  # at most one per run
         await asyncio.sleep(0.5)
-        self.assertEqual(self.sender.sent, [len(THINKING.pcm), len(SEARCH.pcm)])
+        self.assertSent(THINKING)
+
+    # Priorities
+
+    async def test_vision_before_thinking_delay_replaces_it(self) -> None:
+        await self.start(WaitingCues(
+            thinking=Announcement(phrase=THINK_PHRASE), thinking_delay_s=0.3,
+            vision=Announcement(phrase=VISION_PHRASE),
+        ))
+        await self.transcript()
+        notify_vision({"question": "assis ou debout ?", "piece": "bureau"})
+        await asyncio.sleep(0.9)
+        self.assertSent(VISION_PHRASE)
+
+    async def test_thinking_playing_then_vision(self) -> None:
+        await self.start(WaitingCues(
+            thinking=Announcement(phrase=THINK_PHRASE), thinking_delay_s=0.2,
+            vision=Announcement(phrase=VISION_PHRASE),
+        ))
+        await self.transcript()
+        await asyncio.sleep(0.25)  # thinking phrase playing
+        notify_vision({"question": "x", "piece": "bureau"})
+        notify_vision({"question": "x", "piece": "bureau"})  # at most once
+        await asyncio.sleep(0.9)
+        self.assertSent(THINK_PHRASE, VISION_PHRASE)
+
+    async def test_vision_drops_thinking_phrase_not_started(self) -> None:
+        await self.start(WaitingCues(
+            thinking=Announcement(sound=THINKING, phrase=THINK_PHRASE),
+            thinking_delay_s=0.2, vision=Announcement(phrase=VISION_PHRASE),
+        ))
+        await self.transcript()
+        await asyncio.sleep(0.25)  # thinking sound playing, phrase queued
+        notify_vision({"question": "x", "piece": "bureau"})
+        await asyncio.sleep(0.9)
+        self.assertSent(THINKING, VISION_PHRASE)
+
+    async def test_thinking_then_search_sound_then_phrase(self) -> None:
+        await self.start(WaitingCues(
+            thinking=Announcement(phrase=THINK_PHRASE), thinking_delay_s=0.2,
+            search=Announcement(sound=SEARCH, phrase=SEARCH_PHRASE),
+        ))
+        await self.transcript()
+        await asyncio.sleep(0.25)
+        notify_search({"question": "actualités"})
+        notify_search({"question": "actualités"})  # at most once
+        await asyncio.sleep(1.2)
+        self.assertSent(THINK_PHRASE, SEARCH, SEARCH_PHRASE)
 
     async def test_search_ignored_when_not_thinking(self) -> None:
+        await self.start(WaitingCues(search=Announcement(sound=SEARCH)))
         notify_search({"question": "actualités"})
         await asyncio.sleep(0.1)
-        self.assertEqual(self.sender.sent, [])
+        self.assertSent()
 
-    async def test_response_does_not_cut_or_stack_sounds(self) -> None:
+    async def test_response_lets_announcement_finish_drops_pending(self) -> None:
+        await self.start(WaitingCues(
+            thinking=Announcement(sound=THINKING, phrase=THINK_PHRASE),
+            thinking_delay_s=0.2,
+        ))
         await self.transcript()
-        await asyncio.sleep(0.32)  # thinking sound playing
-        notify_search({"question": "actualités"})  # queued after it
+        await asyncio.sleep(0.25)  # thinking sound playing, phrase queued
         cleared = self.sender.cleared
-        await self.response()  # arrives while the thinking sound plays
-        await asyncio.sleep(0.5)
-        # The playing sound isn't cut, the queued search sound is dropped
-        self.assertEqual(self.sender.cleared, cleared)
-        self.assertEqual(self.sender.sent, [len(THINKING.pcm)])
-
-
-class VisionPhraseTest(WaitingSoundTest):
-    """'Attends, je regarde.' on the jarvis_vision event."""
-
-    PHRASE = len(FakePhrase.cue.pcm)
-
-    async def test_phrase_replaces_waiting_sounds(self) -> None:
-        await self.transcript()
-        await asyncio.sleep(0.1)  # before the thinking sound
-        notify_vision({"question": "Combien de doigts ?", "piece": "bureau"})
-        notify_search({"question": "x"})  # no sound after the phrase
+        await self.response()
         await asyncio.sleep(0.6)
-        self.assertEqual(self.sender.sent, [self.PHRASE])
-
-    async def test_phrase_after_playing_thinking_sound(self) -> None:
-        await self.transcript()
-        await asyncio.sleep(0.32)  # thinking sound playing
-        notify_vision({"question": "x", "piece": "bureau"})
-        await asyncio.sleep(0.5)
-        self.assertEqual(self.sender.sent, [len(THINKING.pcm), self.PHRASE])
-
-    async def test_response_waits_for_the_phrase(self) -> None:
-        await self.transcript()
-        await asyncio.sleep(0.1)
-        notify_vision({"question": "x", "piece": "bureau"})
-        await asyncio.sleep(0.1)
-        cleared = self.sender.cleared
-        await self.response()  # during the phrase: it isn't cut
+        # The sound isn't cut (VBAN buffer not cleared), the phrase is dropped
         self.assertEqual(self.sender.cleared, cleared)
-        self.assertEqual(self.sender.sent, [self.PHRASE])
-
-    async def test_not_synthesized_yet_or_not_thinking(self) -> None:
-        notify_vision({"question": "x", "piece": "bureau"})  # not thinking
-        self.phrase.cue = None  # synthesis not done
-        await self.transcript()
-        notify_vision({"question": "x", "piece": "bureau"})
-        await asyncio.sleep(0.1)
-        self.assertEqual(self.sender.sent, [])
-
-    # Inherited waiting sound tests also run with a vision phrase configured
+        self.assertSent(THINKING)
 
 
 class FollowupDisabledTest(FollowupTest):

@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.2.0
+
+- **New**: configurable announcements while the response is prepared, per satellite. Each signal has a mode: `none`, `sound`, `phrase` (spoken text) or `sound_then_phrase`; every text and sound can be changed.
+  - End of listening (`waiting_sounds.listen_end_mode`: `none` by default, or `sound`: new built-in blip, 1200 Hz, 60 ms)
+  - Thinking (`waiting_sounds.thinking_mode`, default phrase "Je réfléchis." after `thinking_delay_ms`)
+  - Internet search, `jarvis_recherche` (`waiting_sounds.search_mode`, default sound then "Je cherche sur internet.")
+  - Camera look, `jarvis_vision` (`camera_phrase.mode`, default phrase, now "Attends, j'observe.")
+- Priorities: a vision/search announcement replaces the thinking one if it hasn't started (otherwise it finishes first); at most one of each per request; a response arriving during an announcement lets it finish and drops the pending ones.
+- Phrases synthesized by HA's TTS at startup, cached in `/data/annonces`; app options `announcements_tts_engine` (default `tts.piper`) and `announcements_tts_voice` (default `fr_FR-siwis-medium`). A failed synthesis logs a clear error and plays the signal's built-in sound instead; retries slow down to every 10 min.
+- No configuration rewrite needed: the new fields are optional and live in the existing `waiting_sounds` and `camera_phrase` blocks (a new required block would have made the update fail, as in 3.0). The 3.1 switches `waiting_sounds.thinking` / `search` and `camera_phrase.enabled` are still read when the matching mode isn't set (on = sound, as in 3.1), with a warning: remove them to get the new spoken defaults.
+- README updated to the 3.x configuration format.
+
 ## 3.1.0
 
 - **New**: debug audio copies — the `debug_mirror` app option sends a copy of a satellite's audio as a VBAN stream to any address/port, e.g. to listen with VBAN Receptor or VoiceMeeter: `mic_received` (microphone as received), `mic_sent` (audio sent to HA, with mutes and guards), `tts` (responses, paced in real time). The satellite keeps working normally.

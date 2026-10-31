@@ -176,7 +176,56 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(sat.tts_vban_enabled)
         self.assertTrue(sat.followup_enabled and sat.followup_beep)
         self.assertEqual(sat.thinking_delay_ms, 1000)
-        self.assertEqual(sat.vision_phrase, "Attends, je regarde.")
+        self.assertEqual(sat.vision_phrase, "Attends, j'observe.")
+
+    def test_announcement_defaults(self) -> None:
+        sats = self._load([{"name": "Bureau", "wyoming_port": 10700,
+                            "waiting_sounds": {}, "camera_phrase": {}}])
+        validate(sats)
+        sat = sats[0]
+        self.assertEqual(
+            (sat.listen_end_mode, sat.thinking_mode, sat.search_mode, sat.vision_mode),
+            ("none", "phrase", "sound_then_phrase", "phrase"),
+        )
+        self.assertEqual(
+            (sat.thinking_text, sat.search_text, sat.vision_phrase),
+            ("Je réfléchis.", "Je cherche sur internet.", "Attends, j'observe."),
+        )
+
+    def test_announcement_migration_from_3_1(self) -> None:
+        sats = self._load([{
+            "name": "Bureau", "wyoming_port": 10700,
+            "waiting_sounds": {"thinking": True, "thinking_delay_ms": 1500, "search": False},
+            "camera_phrase": {"enabled": False, "text": "Je regarde."},
+        }])
+        with self.assertLogs("wyoming_vban.config", "WARNING") as logs:
+            validate(sats)
+        sat = sats[0]
+        self.assertEqual((sat.thinking_mode, sat.search_mode, sat.vision_mode),
+                         ("sound", "none", "none"))
+        self.assertEqual(sat.thinking_delay_ms, 1500)
+        self.assertEqual(sat.vision_phrase, "Je regarde.")
+        self.assertIn("thinking_mode", logs.output[0])
+
+    def test_explicit_mode_wins_over_old_switch(self) -> None:
+        sats = self._load([{
+            "name": "Bureau", "wyoming_port": 10700,
+            "waiting_sounds": {"thinking": True, "thinking_mode": "none",
+                               "listen_end_mode": "sound"},
+            "camera_phrase": {"mode": "sound_then_phrase", "file": "/share/o.wav"},
+        }])
+        validate(sats)
+        sat = sats[0]
+        self.assertEqual((sat.thinking_mode, sat.listen_end_mode, sat.vision_mode),
+                         ("none", "sound", "sound_then_phrase"))
+        self.assertEqual(sat.vision_sound, "/share/o.wav")
+
+    def test_unknown_mode_uses_default(self) -> None:
+        sats = self._load([{"name": "Bureau", "wyoming_port": 10700,
+                            "waiting_sounds": {"search_mode": "loud"}}])
+        with self.assertLogs("wyoming_vban.config", "WARNING"):
+            validate(sats)
+        self.assertEqual(sats[0].search_mode, "sound_then_phrase")
 
     def test_duplicate_wyoming_port(self) -> None:
         sats = self._load([

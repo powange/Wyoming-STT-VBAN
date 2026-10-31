@@ -6,12 +6,28 @@ Use any VBAN-capable microphone on your network (VoiceMeeter, ESP32, VBAN Recept
 
 ## Features
 
-- **Multiple satellites** — configure as many VBAN sources as you need, each with its own Wyoming port
-- **VBAN audio reception** — unicast and multicast (IGMP)
-- **Automatic resampling** — any VBAN source format is converted to 16kHz 16-bit mono for the voice pipeline
-- **Optional TTS output** — send voice assistant responses back via VBAN to a remote speaker
-- **Stream name filtering** — target a specific VBAN stream on a shared port
+- **Multiple satellites** — as many VBAN microphones as you need, each with its own Wyoming port; several can share one VBAN port (routed by stream name)
+- **VBAN audio reception** — unicast and multicast (IGMP), any format resampled to 16 kHz 16-bit mono
+- **Responses** on a VBAN speaker (e.g. an ESP32 Atom) or on any Home Assistant media player (e.g. a Google Nest)
+- **Follow-up without wake word** when Jarvis asks a question
+- **Announcements while waiting** — sounds or spoken phrases while the response is prepared (see below)
+- **Exchanges published** as Home Assistant events (`jarvis_echange`), **debug audio copies** as VBAN streams
 - **Host networking** — full UDP multicast support in Docker
+
+## Announcements
+
+Between the end of a request and the response, the satellite tells you what
+is happening, without disturbing fast commands. Each signal is set per
+satellite: off, sound, phrase, or sound then phrase; texts and sounds can be
+changed.
+
+| Situation | Default signal |
+|---|---|
+| End of listening (request recorded) | nothing (option: blip) |
+| Home Assistant command (response in < 1 s) | nothing |
+| Local AI thinking (no response after the delay) | phrase "Je réfléchis." |
+| Internet search (`jarvis_recherche` HA event) | sound, then "Je cherche sur internet." |
+| Camera look (`jarvis_vision` HA event) | phrase "Attends, j'observe." |
 
 ## Architecture
 
@@ -33,77 +49,79 @@ Use any VBAN-capable microphone on your network (VoiceMeeter, ESP32, VBAN Recept
 
 ## Configuration
 
-The addon uses a `satellites` list. Each entry creates a separate Wyoming satellite.
-
-### Per-satellite options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `name` | `VBAN Satellite 1` | Name shown in Home Assistant |
-| `wyoming_port` | `10700` | Wyoming protocol TCP port (must be unique per satellite) |
-| `vban_receive_port` | `6980` | UDP port to listen on |
-| `vban_receive_mode` | `unicast` | `unicast` or `multicast` |
-| `vban_receive_multicast_group` | | Multicast group (e.g. `239.0.0.1`). Required for multicast mode. |
-| `vban_receive_stream_name` | | Filter by stream name. Empty = accept all. |
-| `tts_vban_enabled` | `false` | Enable TTS audio output via VBAN |
-| `tts_vban_mode` | `unicast` | `unicast` or `multicast` |
-| `tts_vban_address` | | Target IP for TTS output |
-| `tts_vban_port` | `6980` | Target UDP port |
-| `tts_vban_stream_name` | `TTS1` | Outgoing VBAN stream name |
-| `tts_vban_volume` | `1.0` | Volume multiplier for TTS audio (0.0–2.0). 0.5 = half, 1.5 = +50% louder (with clipping protection) |
+The app uses a `satellites` list; each entry creates a separate Wyoming
+satellite, with a few fields and one block per feature (`microphone`,
+`vban_output`, `media_player`, `followup`, `waiting_sounds`,
+`camera_phrase`). Every block must be present but can be empty (`{}` =
+defaults). See [DOCS.md](wyoming-vban-satellite/DOCS.md) for all options and
+a full example.
 
 ### Global options
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `publish_exchanges` | `true` | Fire a `jarvis_echange` HA event for each request and response |
+| `announcements_tts_engine` | `tts.piper` | TTS entity synthesizing the spoken announcements |
+| `announcements_tts_voice` | `fr_FR-siwis-medium` | Voice of the spoken announcements |
+| `debug_mirror` | `[]` | Debug copies of audio streams as VBAN |
 | `debug_logging` | `false` | Enable verbose logging |
 
 ## Examples
 
-### Single satellite — unicast
+### Single satellite — VBAN microphone and speaker
 
 ```yaml
 satellites:
-  - name: "Living Room Mic"
+  - name: "Living Room"
     wyoming_port: 10700
-    vban_receive_port: 6980
-    vban_receive_mode: unicast
-    vban_receive_stream_name: "Stream1"
-    tts_vban_enabled: false
+    microphone:
+      vban_port: 6980
+      stream_name: "Stream1"
+    vban_output:
+      enabled: true
+      address: "192.168.1.50"
+    media_player: {}
+    followup: {}
+    waiting_sounds: {}
+    camera_phrase: {}
 ```
 
-### Two satellites — multicast + unicast
+### Two satellites — one answering on a Google Nest, custom announcements
 
 ```yaml
 satellites:
-  - name: "Kitchen Mic"
+  - name: "Office"
     wyoming_port: 10700
-    vban_receive_port: 6980
-    vban_receive_mode: multicast
-    vban_receive_multicast_group: "239.0.0.1"
-    vban_receive_stream_name: "Kitchen"
-    tts_vban_enabled: true
-    tts_vban_mode: unicast
-    tts_vban_address: "192.168.1.50"
-    tts_vban_stream_name: "KitchenTTS"
-  - name: "Office Mic"
+    output: media_player
+    microphone:
+      vban_port: 6980
+      stream_name: "Office"
+    vban_output: {}
+    media_player:
+      entity: media_player.office_nest
+    followup: {}
+    waiting_sounds:
+      listen_end_mode: sound
+      thinking_text: "Un instant."
+    camera_phrase:
+      mode: none
+  - name: "Kitchen"
     wyoming_port: 10701
-    vban_receive_port: 6981
-    vban_receive_mode: unicast
-    vban_receive_stream_name: "Office"
-    tts_vban_enabled: false
-```
-
-### Multicast mic, no speaker
-
-```yaml
-satellites:
-  - name: "Garage Mic"
-    wyoming_port: 10700
-    vban_receive_port: 6980
-    vban_receive_mode: multicast
-    vban_receive_multicast_group: "239.0.0.1"
-    tts_vban_enabled: false
+    microphone:
+      vban_port: 6980
+      vban_mode: multicast
+      multicast_group: "239.0.0.1"
+      stream_name: "Kitchen"
+    vban_output:
+      enabled: true
+      address: "192.168.1.51"
+      stream_name: "KitchenTTS"
+    media_player: {}
+    followup: {}
+    waiting_sounds:
+      thinking_mode: sound
+      search_mode: sound
+    camera_phrase: {}
 ```
 
 ## Network requirements

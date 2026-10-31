@@ -83,43 +83,73 @@ configuration:
             name: Timeout (s)
             description: Back to the wake word without speech (3-30, default 8)
       waiting_sounds:
-        name: Waiting sounds
-        description: Sounds while the response is prepared (empty = defaults)
+        name: Announcements while waiting
+        description: What the satellite plays between your request and the response (empty = defaults)
         fields:
-          thinking:
-            name: Thinking sound
-            description: Soft sound when the response takes a while (default on)
+          listen_end_mode:
+            name: End of listening
+            description: 'none (default) or sound: short blip as soon as your request is recorded'
+          listen_end_file:
+            name: End of listening sound file
+            description: WAV replacing the built-in blip, e.g. /share/jarvis/fin.wav
+          thinking_mode:
+            name: Thinking
+            description: 'When no response after the delay: none, sound, phrase (spoken text), or sound_then_phrase (default phrase)'
           thinking_delay_ms:
             name: Thinking delay (ms)
             description: 300-5000 (default 1000)
+          thinking_text:
+            name: Thinking phrase
+            description: Default "Je réfléchis."
           thinking_file:
             name: Thinking sound file
-            description: WAV replacing the built-in sound, e.g. /share/jarvis/reflexion.wav
-          search:
-            name: Internet search sound
-            description: Sound on the jarvis_recherche event (default on)
-          search_file:
-            name: Search sound file
             description: WAV replacing the built-in sound
+          search_mode:
+            name: Internet search
+            description: 'On the jarvis_recherche event: none, sound, phrase (spoken text), or sound_then_phrase (default sound_then_phrase)'
+          search_text:
+            name: Internet search phrase
+            description: Default "Je cherche sur internet."
+          search_file:
+            name: Internet search sound file
+            description: WAV replacing the built-in sound
+          thinking:
+            name: (old) Thinking sound on/off
+            description: Before 3.2; used only if Thinking is empty (on = sound). Prefer Thinking
+          search:
+            name: (old) Search sound on/off
+            description: Before 3.2; used only if Internet search is empty (on = sound). Prefer Internet search
       camera_phrase:
-        name: Camera phrase
-        description: '"Attends, je regarde." on a camera look (empty = defaults)'
+        name: Camera announcement
+        description: On the jarvis_vision event, when Jarvis looks at a camera (empty = defaults)
         fields:
-          enabled:
-            name: Enabled
-            description: Say a phrase on the jarvis_vision event (default on)
+          mode:
+            name: Mode
+            description: none, sound, phrase (spoken text), or sound_then_phrase (default phrase)
           text:
             name: Phrase
-            description: Default "Attends, je regarde."
+            description: Default "Attends, j'observe."
+          file:
+            name: Sound file
+            description: WAV played in sound modes (no built-in sound)
           tts_engine:
             name: TTS engine
-            description: Default tts.piper
+            description: For this satellite's phrases (empty = app option)
           tts_voice:
             name: TTS voice
-            description: Default fr_FR-siwis-medium
+            description: For this satellite's phrases (empty = app option)
+          enabled:
+            name: (old) Enabled
+            description: Before 3.2; used only if Mode is empty (off = none). Prefer Mode
   publish_exchanges:
     name: Publish exchanges
     description: Fire a jarvis_echange Home Assistant event with each request and response (satellite, transcript, response, follow-up)
+  announcements_tts_engine:
+    name: Announcements TTS engine
+    description: TTS entity synthesizing the spoken announcements (default tts.piper)
+  announcements_tts_voice:
+    name: Announcements TTS voice
+    description: Voice of the spoken announcements (default fr_FR-siwis-medium)
   debug_mirror:
     name: Debug audio copies
     description: Send a copy of a satellite's audio as a VBAN stream, e.g. to listen with VBAN Receptor or VoiceMeeter (empty = none)
@@ -129,7 +159,7 @@ configuration:
         description: Satellite name, exactly as configured (e.g. VBAN Satellite Bureau)
       stream:
         name: Stream
-        description: "mic_received: microphone as received; mic_sent: audio sent to Home Assistant (16 kHz, with mutes); tts: responses"
+        description: 'mic_received: microphone as received; mic_sent: audio sent to Home Assistant (16 kHz, with mutes); tts: responses'
       address:
         name: Address
         description: IP of the computer receiving the copy

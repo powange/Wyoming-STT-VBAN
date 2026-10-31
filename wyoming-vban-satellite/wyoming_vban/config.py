@@ -3,14 +3,22 @@
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from .const import DEFAULT_VBAN_PORT
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TTS_HTTP_PORT = 10800  # + satellite index
-DEFAULT_VISION_PHRASE = "Attends, je regarde."
+DEFAULT_VISION_PHRASE = "Attends, j'observe."
+DEFAULT_THINKING_TEXT = "Je réfléchis."
+DEFAULT_SEARCH_TEXT = "Je cherche sur internet."
+DEFAULT_TTS_ENGINE = "tts.piper"
+DEFAULT_TTS_VOICE = "fr_FR-siwis-medium"
+
+# Announcement modes (waiting_sounds.*_mode, camera_phrase.mode)
+ANNOUNCEMENT_MODES = ("none", "sound", "phrase", "sound_then_phrase")
+LISTEN_END_MODES = ("none", "sound")
 
 
 # App options (3.0 format): satellite fields grouped in blocks, mapped to
@@ -43,6 +51,13 @@ OPTION_BLOCKS: dict[str, dict[str, str]] = {
         "timeout_s": "followup_timeout_s",
     },
     "waiting_sounds": {
+        "listen_end_mode": "listen_end_mode",
+        "listen_end_file": "listen_end_sound",
+        "thinking_mode": "thinking_mode",
+        "thinking_text": "thinking_text",
+        "search_mode": "search_mode",
+        "search_text": "search_text",
+        # Before 3.2 (still read: they set the mode when it isn't set)
         "thinking": "thinking_sound_enabled",
         "thinking_delay_ms": "thinking_delay_ms",
         "thinking_file": "thinking_sound",
@@ -50,8 +65,11 @@ OPTION_BLOCKS: dict[str, dict[str, str]] = {
         "search_file": "search_sound",
     },
     "camera_phrase": {
-        "enabled": "vision_phrase_enabled",
+        "mode": "vision_mode",
         "text": "vision_phrase",
+        "file": "vision_sound",
+        # Before 3.2 (still read: sets the mode when it isn't set)
+        "enabled": "vision_phrase_enabled",
         "tts_engine": "vision_tts_engine",
         "tts_voice": "vision_tts_voice",
     },
@@ -106,15 +124,28 @@ class SatelliteConfig:
     followup_enabled: bool = True
     followup_beep: bool = True
     followup_timeout_s: int = 8
-    thinking_sound_enabled: bool = True
-    search_sound_enabled: bool = True
+    # Announcements while the response is prepared. Modes: ANNOUNCEMENT_MODES
+    # ("" = not set: default, or from the pre-3.2 booleans below)
+    listen_end_mode: str = "none"
+    listen_end_sound: str = ""  # WAV replacing the built-in blip
+    thinking_mode: str = ""
+    thinking_text: str = DEFAULT_THINKING_TEXT
+    search_mode: str = ""
+    search_text: str = DEFAULT_SEARCH_TEXT
+    vision_mode: str = ""
+    vision_sound: str = ""  # no built-in sound
+    # Pre-3.2 on/off switches (None = not set)
+    thinking_sound_enabled: Optional[bool] = None
+    search_sound_enabled: Optional[bool] = None
     thinking_delay_ms: int = 1000
     thinking_sound: str = ""  # WAV file replacing the built-in sound
     search_sound: str = ""
-    vision_phrase_enabled: bool = True
+    vision_phrase_enabled: Optional[bool] = None
     vision_phrase: str = DEFAULT_VISION_PHRASE
-    vision_tts_engine: str = "tts.piper"  # HA TTS entity used for the phrase
-    vision_tts_voice: str = "fr_FR-siwis-medium"
+    # Per-satellite TTS engine/voice for the phrases ("" = app options
+    # announcements_tts_engine / announcements_tts_voice)
+    vision_tts_engine: str = ""
+    vision_tts_voice: str = ""
 
     @classmethod
     def from_options(cls, options: dict[str, Any], index: int) -> "SatelliteConfig":
@@ -179,8 +210,61 @@ class SatelliteConfig:
         self.thinking_sound = self.thinking_sound.strip()
         self.search_sound = self.search_sound.strip()
         self.vision_phrase = self.vision_phrase.strip() or DEFAULT_VISION_PHRASE
-        self.vision_tts_engine = self.vision_tts_engine.strip() or "tts.piper"
+        self.thinking_text = self.thinking_text.strip() or DEFAULT_THINKING_TEXT
+        self.search_text = self.search_text.strip() or DEFAULT_SEARCH_TEXT
+        self.vision_tts_engine = self.vision_tts_engine.strip()
         self.vision_tts_voice = self.vision_tts_voice.strip()
+        self.listen_end_sound = self.listen_end_sound.strip()
+        self.vision_sound = self.vision_sound.strip()
+        self._resolve_announcement_modes()
+
+    def _resolve_announcement_modes(self) -> None:
+        """Set each announcement mode: explicit, from the pre-3.2 switches
+        (on = built-in sound, kept as in 3.1), or the default."""
+        legacy = []
+
+        def resolve(mode: str, switch: Optional[bool], on: str, default: str,
+                    old_name: str, new_name: str) -> str:
+            mode = mode.strip()
+            if not mode and switch is not None:
+                legacy.append(f"{old_name} → {new_name}: {on if switch else 'none'}")
+                return on if switch else "none"
+            if mode and mode not in ANNOUNCEMENT_MODES:
+                _LOGGER.warning(
+                    "[%s] %s '%s' unknown (%s): using %s",
+                    self.name, new_name, mode, ", ".join(ANNOUNCEMENT_MODES), default,
+                )
+                return default
+            return mode or default
+
+        self.thinking_mode = resolve(
+            self.thinking_mode, self.thinking_sound_enabled, "sound", "phrase",
+            "waiting_sounds.thinking", "waiting_sounds.thinking_mode",
+        )
+        self.search_mode = resolve(
+            self.search_mode, self.search_sound_enabled, "sound", "sound_then_phrase",
+            "waiting_sounds.search", "waiting_sounds.search_mode",
+        )
+        self.vision_mode = resolve(
+            self.vision_mode, self.vision_phrase_enabled, "phrase", "phrase",
+            "camera_phrase.enabled", "camera_phrase.mode",
+        )
+        mode = self.listen_end_mode.strip() or "none"
+        if mode not in LISTEN_END_MODES:
+            _LOGGER.warning(
+                "[%s] waiting_sounds.listen_end_mode '%s' unknown (none, sound): "
+                "using none", self.name, mode,
+            )
+            mode = "none"
+        self.listen_end_mode = mode
+        if legacy:
+            _LOGGER.warning(
+                "[%s] Deprecated announcement options, converted: %s. Since 3.2 "
+                "each signal has a mode (none, sound, phrase, sound_then_phrase): "
+                "remove these options to get the new defaults (spoken phrases), "
+                "or set the modes. See DOCS, Announcements.",
+                self.name, "; ".join(legacy),
+            )
 
 
 MIRROR_STREAMS = ("mic_received", "mic_sent", "tts")
@@ -213,6 +297,8 @@ class AppOptions:
     debug_logging: bool = False
     publish_exchanges: bool = True
     debug_mirrors: list[DebugMirror] = field(default_factory=list)
+    announcements_tts_engine: str = DEFAULT_TTS_ENGINE
+    announcements_tts_voice: str = DEFAULT_TTS_VOICE
 
 
 def load_options(path: str) -> AppOptions:
@@ -237,6 +323,12 @@ def load_options(path: str) -> AppOptions:
         debug_logging=bool(options.get("debug_logging")),
         publish_exchanges=True if publish is None else bool(publish),
         debug_mirrors=mirrors,
+        announcements_tts_engine=(
+            (options.get("announcements_tts_engine") or "").strip() or DEFAULT_TTS_ENGINE
+        ),
+        announcements_tts_voice=(
+            (options.get("announcements_tts_voice") or "").strip() or DEFAULT_TTS_VOICE
+        ),
     )
 
 
