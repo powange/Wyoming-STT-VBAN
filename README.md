@@ -8,11 +8,39 @@ Use any VBAN-capable microphone on your network (VoiceMeeter, ESP32, VBAN Recept
 
 - **Multiple satellites** — as many VBAN microphones as you need, each with its own Wyoming port; several can share one VBAN port (routed by stream name)
 - **VBAN audio reception** — unicast and multicast (IGMP), any format resampled to 16 kHz 16-bit mono
+- **Camera microphone** — the audio of an RTSP stream (e.g. go2rtc) as a satellite's microphone
 - **Responses** on a VBAN speaker (e.g. an ESP32 Atom) or on any Home Assistant media player (e.g. a Google Nest)
 - **Follow-up without wake word** when Jarvis asks a question
 - **Announcements while waiting** — sounds or spoken phrases while the response is prepared (see below)
 - **Exchanges published** as Home Assistant events (`jarvis_echange`), **debug audio copies** as VBAN streams
 - **Host networking** — full UDP multicast support in Docker
+
+## Microphone from a camera (RTSP)
+
+A satellite's microphone can be the audio of a camera stream instead of a
+VBAN stream, read with ffmpeg (video ignored). Prefer a go2rtc stream to the
+camera itself (cameras accept few connections, and Frigate may already read
+it through go2rtc):
+
+```yaml
+  - name: "VBAN Satellite Chambre"
+    wyoming_port: 10702
+    output: none
+    microphone:
+      source: rtsp
+      rtsp_url: "rtsp://192.168.0.201:8554/chambre"
+    vban_output: {}
+    media_player: {}
+    followup:
+      enabled: false
+    waiting_sounds: {}
+    camera_phrase: {}
+```
+
+The stream is reconnected automatically (after 1, 2, 5, 10 then 30 s).
+`output: none` lets you test the microphone, wake word and transcription
+before choosing a speaker: **a satellite without output doesn't speak**
+(responses aren't played; follow-ups are pointless, hence `enabled: false`).
 
 ## Announcements
 

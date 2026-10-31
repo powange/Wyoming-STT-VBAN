@@ -11,14 +11,23 @@ configuration:
         description: Port TCP de ce satellite, unique par satellite (ex. 10700, 10701...)
       output:
         name: Sortie des reponses
-        description: 'vban (defaut) : bloc Sortie VBAN ; media_player : bloc Media player (Sortie VBAN en secours si activee)'
+        description: 'vban (defaut) : bloc Sortie VBAN ; media_player : bloc Media player (Sortie VBAN en secours si activee) ; none : reponses non jouees (ex. pour tester un micro)'
       microphone:
         name: Micro
         description: Flux VBAN du micro
         fields:
+          source:
+            name: Source
+            description: 'vban (defaut) : flux VBAN ; rtsp : audio d''un flux camera (ex. go2rtc)'
+          rtsp_url:
+            name: URL du flux camera
+            description: Seulement avec la source rtsp, ex. rtsp://192.168.0.201:8554/chambre
+          rtsp_transport:
+            name: Transport RTSP
+            description: tcp (defaut) ou udp
           vban_port:
             name: Port VBAN
-            description: Port UDP qui recoit le flux du micro (partageable entre satellites)
+            description: Port UDP qui recoit le flux du micro (partageable entre satellites) ; seulement avec la source vban
           vban_mode:
             name: Mode VBAN
             description: unicast (defaut) ou multicast

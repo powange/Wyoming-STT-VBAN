@@ -1,6 +1,9 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
+# ffmpeg reads the audio of camera streams (microphone.source: rtsp)
+RUN apk add --no-cache ffmpeg
+
 WORKDIR /app
 
 COPY requirements.txt /app/

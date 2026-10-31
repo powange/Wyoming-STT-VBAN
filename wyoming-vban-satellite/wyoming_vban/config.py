@@ -16,6 +16,8 @@ DEFAULT_SEARCH_TEXT = "Je cherche sur internet."
 DEFAULT_TTS_ENGINE = "tts.piper"
 DEFAULT_TTS_VOICE = "fr_FR-siwis-medium"
 
+MIC_SOURCES = ("vban", "rtsp")
+
 # Announcement modes (waiting_sounds.*_mode, camera_phrase.mode)
 ANNOUNCEMENT_MODES = ("none", "sound", "phrase", "sound_then_phrase")
 LISTEN_END_MODES = ("none", "sound")
@@ -25,6 +27,9 @@ LISTEN_END_MODES = ("none", "sound")
 # the flat SatelliteConfig fields. "output" stays at the satellite level.
 OPTION_BLOCKS: dict[str, dict[str, str]] = {
     "microphone": {
+        "source": "mic_source",
+        "rtsp_url": "rtsp_url",
+        "rtsp_transport": "rtsp_transport",
         "vban_port": "vban_receive_port",
         "vban_mode": "vban_receive_mode",
         "multicast_group": "vban_receive_multicast_group",
@@ -109,6 +114,11 @@ class SatelliteConfig:
     vban_receive_mode: str = "unicast"
     vban_receive_multicast_group: str = ""
     vban_receive_stream_name: str = ""
+    # Microphone source: "vban" (the vban_receive_* fields) or "rtsp" (the
+    # audio of a camera stream, e.g. published by go2rtc)
+    mic_source: str = "vban"
+    rtsp_url: str = ""
+    rtsp_transport: str = "tcp"
     tts_vban_enabled: bool = False
     tts_vban_mode: str = "unicast"
     tts_vban_address: str = ""
@@ -116,7 +126,7 @@ class SatelliteConfig:
     tts_vban_stream_name: str = "TTS1"
     tts_vban_volume: float = 1.0
     tts_vban_batch_packets: int = 1
-    tts_output: str = "vban"
+    tts_output: str = "vban"  # vban | media_player | none (responses not played)
     tts_media_player: str = ""
     tts_http_port: int = DEFAULT_TTS_HTTP_PORT
     tts_http_host: str = ""
@@ -161,6 +171,16 @@ class SatelliteConfig:
 
     def normalize(self) -> None:
         """Clean up options and clamp numeric ones to their valid range."""
+        self.mic_source = self.mic_source.strip() or "vban"
+        if self.mic_source not in MIC_SOURCES:
+            _LOGGER.warning(
+                "[%s] microphone.source '%s' unknown (vban, rtsp): using vban",
+                self.name, self.mic_source,
+            )
+            self.mic_source = "vban"
+        self.rtsp_url = self.rtsp_url.strip()
+        if self.rtsp_transport not in ("tcp", "udp"):
+            self.rtsp_transport = "tcp"
         # The multicast group is only used in multicast mode (and optional
         # in the schema): ignore a leftover value in unicast mode.
         self.vban_receive_multicast_group = (
@@ -360,12 +380,26 @@ def validate_mirrors(
     return valid
 
 
-def validate(satellites: list[SatelliteConfig]) -> None:
+def validate(satellites: list[SatelliteConfig], strict: bool = False) -> None:
     """Check per-satellite settings and conflicts between satellites.
 
     Raises ConfigError on a fatal problem; logs warnings for ambiguous
-    stream routing on a shared VBAN port.
+    stream routing on a shared VBAN port. A camera satellite without its
+    RTSP URL is removed from the list with an error (the others still
+    start), or raises ConfigError if strict (configuration interface).
     """
+    for sat in list(satellites):
+        sat.normalize()
+        if sat.mic_source == "rtsp" and not sat.rtsp_url:
+            message = (
+                f"Satellite '{sat.name}': microphone.source is rtsp but "
+                "microphone.rtsp_url is empty (e.g. rtsp://192.168.0.201:8554/chambre)"
+            )
+            if strict:
+                raise ConfigError(message)
+            _LOGGER.error("%s: this satellite is not started", message)
+            satellites.remove(sat)
+
     if not satellites:
         raise ConfigError("No satellite configured")
 
@@ -375,8 +409,6 @@ def validate(satellites: list[SatelliteConfig]) -> None:
     by_vban_port: dict[int, list[SatelliteConfig]] = {}
 
     for sat in satellites:
-        sat.normalize()
-
         if sat.wyoming_port in wyoming_ports:
             raise ConfigError(
                 f"Satellite '{sat.name}' uses Wyoming port {sat.wyoming_port} which "
@@ -385,14 +417,18 @@ def validate(satellites: list[SatelliteConfig]) -> None:
             )
         wyoming_ports[sat.wyoming_port] = sat.name
 
-        if sat.vban_receive_mode == "multicast" and not sat.vban_receive_multicast_group:
+        if (
+            sat.mic_source == "vban"
+            and sat.vban_receive_mode == "multicast"
+            and not sat.vban_receive_multicast_group
+        ):
             raise ConfigError(
                 f"Satellite '{sat.name}': microphone.vban_mode is multicast but "
                 "microphone.multicast_group is empty. Set the multicast group "
                 "address (e.g. 239.0.0.1), or use unicast mode."
             )
 
-        if sat.tts_vban_enabled and not sat.tts_vban_address:
+        if sat.tts_output != "none" and sat.tts_vban_enabled and not sat.tts_vban_address:
             raise ConfigError(
                 f"Satellite '{sat.name}': vban_output is enabled but vban_output.address "
                 "is empty"
@@ -412,7 +448,8 @@ def validate(satellites: list[SatelliteConfig]) -> None:
                 )
             http_ports[sat.tts_http_port] = sat.name
 
-        by_vban_port.setdefault(sat.vban_receive_port, []).append(sat)
+        if sat.mic_source == "vban":
+            by_vban_port.setdefault(sat.vban_receive_port, []).append(sat)
 
     for port, sats in by_vban_port.items():
         if len(sats) < 2:

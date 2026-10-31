@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.5.0
+
+- **New**: microphone from a camera stream — `microphone.source: rtsp` with `rtsp_url` (e.g. a go2rtc stream) and `rtsp_transport` (`tcp` default, or `udp`). The audio is read by ffmpeg (video ignored, 16 kHz mono) and goes through the same chain as a VBAN microphone (mic mute, levels, debug copies, status).
+- Reconnection: when ffmpeg stops or sends no audio for 5 s, it is restarted after 1, 2, 5, 10 then 30 s (back to 1 s once audio returns). Logs: `First RTSP audio from …`, `No RTSP audio received for N seconds`, `RTSP audio resumed`. Credentials in the URL are hidden in all logs. ffmpeg is terminated and reaped when the satellite or the app stops.
+- A camera satellite with an empty `rtsp_url` doesn't start (clear error in the log); the other satellites do. `microphone.vban_port` is now optional (ignored with source `rtsp`).
+- **New**: `output: none` — responses are not played anywhere (log: `Response not played (output: none)`); the run ends normally and the satellite goes back to wake word listening. Useful to test a microphone before choosing a speaker.
+- Configuration interface: microphone source (VBAN / camera) and output "none".
+- The image now includes ffmpeg.
+
 ## 3.4.0
 
 - **Configuration interface — fine-grained apply**: saving applies only what changed. Most settings (announcements, follow-up beep/timeout, VBAN output address/port/stream/volume, media player entity, mic mute tail, debug copies, exchange publishing, TTS engine/voice, debug logging) apply while the satellite keeps running; settings tied to sockets or servers restart that satellite only; an added/removed satellite starts/stops alone; the Home Assistant connection is started, stopped or re-subscribed as needed. The message after saving lists what was done. A failure still restores the previous configuration.

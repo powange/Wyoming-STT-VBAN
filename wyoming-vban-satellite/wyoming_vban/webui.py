@@ -114,7 +114,7 @@ class WebUI:
         try:
             options = (await request.json())["options"]
             parsed = parse_options(copy.deepcopy(options))
-            validate(parsed.satellites)
+            validate(parsed.satellites, strict=True)
         except (ValueError, KeyError, TypeError) as err:
             return web.json_response({"error": f"Invalid request: {err}"}, status=400)
         except ConfigError as err:
@@ -180,7 +180,7 @@ class WebUI:
             ):
                 raise ValueError("a 'satellites' list is expected")
             parsed = parse_options(copy.deepcopy(options))
-            validate(parsed.satellites)
+            validate(parsed.satellites, strict=True)
         except (yaml.YAMLError, ValueError, KeyError, TypeError) as err:
             return web.json_response({"error": f"Invalid YAML: {err}"}, status=400)
         except ConfigError as err:

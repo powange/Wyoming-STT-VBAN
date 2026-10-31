@@ -40,6 +40,7 @@ from .satellite import (
     notify_search,
     notify_vision,
 )
+from .rtsp_source import RtspSource, mask_url
 from .tts_phrase import TtsPhrase, remove_legacy_cache, remove_stale_phrases
 from .vban import VbanPacket, VbanReceiver, VbanSender
 
@@ -178,6 +179,7 @@ RESTART_FIELDS = (
     "vban_receive_multicast_group", "vban_receive_stream_name", "tts_output",
     "tts_vban_enabled", "tts_vban_mode", "tts_vban_batch_packets",
     "tts_http_port", "tts_http_host", "followup_enabled",
+    "mic_source", "rtsp_url", "rtsp_transport",
 )
 
 
@@ -196,13 +198,21 @@ class SatelliteRunner:
     def __init__(
         self,
         cfg: SatelliteConfig,
-        receiver: VbanReceiver,
+        receiver: Optional[VbanReceiver],
         watcher: Optional[HaStateWatcher],
         publisher: ExchangePublisher,
         cues: WaitingCues,
         mirrors: list[DebugMirror],
     ):
         self.cfg = cfg
+        # Microphone: the shared VBAN receiver of the port, or this
+        # satellite's own camera stream reader
+        self.rtsp: Optional[RtspSource] = None
+        self._rtsp_task: Optional[asyncio.Task] = None
+        if cfg.mic_source == "rtsp":
+            self.rtsp = RtspSource(cfg.rtsp_url, cfg.rtsp_transport, name="camera")
+            receiver = self.rtsp
+        assert receiver is not None
         self.receiver = receiver
         self.watcher = watcher
         self.publisher = publisher
@@ -226,14 +236,27 @@ class SatelliteRunner:
     def start(self) -> asyncio.Task:
         self.mirrors.open()
         self._subscribe()
+        if self.rtsp is not None:
+            self._rtsp_task = asyncio.create_task(self._run_rtsp())
         self.task = asyncio.create_task(self._run())
         return self.task
+
+    async def _run_rtsp(self) -> None:
+        _SATELLITE_NAME.set(self.cfg.name)
+        assert self.rtsp is not None
+        await self.rtsp.run()
 
     async def stop(self) -> None:
         if self.task is not None:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
+        if self._rtsp_task is not None:
+            assert self.rtsp is not None
+            self.rtsp.stop()
+            self._rtsp_task.cancel()
+            await asyncio.gather(self._rtsp_task, return_exceptions=True)
+            self._rtsp_task = None
         self._unsubscribe()
         await self.mirrors.close()
 
@@ -252,13 +275,21 @@ class SatelliteRunner:
         """Run until cancelled (former run_satellite)."""
         cfg = self.cfg
         _SATELLITE_NAME.set(cfg.name)
-        _LOGGER.info(
-            "Starting: Wyoming port %d, VBAN receive port %d stream '%s'",
-            cfg.wyoming_port, cfg.vban_receive_port,
-            cfg.vban_receive_stream_name or "<any>",
-        )
+        if self.rtsp is not None:
+            _LOGGER.info(
+                "Starting: Wyoming port %d, microphone from camera stream %s",
+                cfg.wyoming_port, mask_url(cfg.rtsp_url),
+            )
+        else:
+            _LOGGER.info(
+                "Starting: Wyoming port %d, VBAN receive port %d stream '%s'",
+                cfg.wyoming_port, cfg.vban_receive_port,
+                cfg.vban_receive_stream_name or "<any>",
+            )
+        if cfg.tts_output == "none":
+            _LOGGER.info("  No response output: responses are not played")
 
-        if cfg.tts_vban_enabled:
+        if cfg.tts_vban_enabled and cfg.tts_output != "none":
             self.vban_sender = VbanSender(
                 address=cfg.tts_vban_address,
                 port=cfg.tts_vban_port,
@@ -311,6 +342,7 @@ class SatelliteRunner:
                 followup=self.followup,
                 exchange_publisher=self.publisher,
                 satellite_name=cfg.name,
+                mic_label="RTSP" if self.rtsp is not None else "VBAN",
                 waiting_cues=self.cues,
                 debug_mirrors=self.mirrors,
             )
@@ -614,8 +646,9 @@ class AppRuntime:
         self, sat: SatelliteConfig, cues: WaitingCues, mirrors: list[DebugMirror],
     ) -> None:
         runner = SatelliteRunner(
-            sat, self._receivers[sat.vban_receive_port], self._watcher,
-            self.publisher, cues, mirrors,
+            sat,
+            self._receivers[sat.vban_receive_port] if sat.mic_source == "vban" else None,
+            self._watcher, self.publisher, cues, mirrors,
         )
         self._runners[sat.name] = runner
         runner.start().add_done_callback(
@@ -663,7 +696,7 @@ class AppRuntime:
         # satellites on that port and routing packets by stream name.
         # validate() ensured they agree on mode / multicast group.
         for sat in options.satellites:
-            if sat.vban_receive_port not in self._receivers:
+            if sat.mic_source == "vban" and sat.vban_receive_port not in self._receivers:
                 self._start_receiver(sat.vban_receive_port, sat)
 
         mirrors = validate_mirrors(options.debug_mirrors, options.satellites)
@@ -758,7 +791,8 @@ class AppRuntime:
         # (their satellites restart with the new receiver)
         wanted = {}
         for sat in new.satellites:
-            wanted.setdefault(sat.vban_receive_port, sat)
+            if sat.mic_source == "vban":
+                wanted.setdefault(sat.vban_receive_port, sat)
         changed_ports = {
             port for port, receiver in self._receivers.items()
             if port not in wanted
@@ -767,7 +801,8 @@ class AppRuntime:
         }
         restart |= {
             name for name, sat in old_sats.items()
-            if name in new_sats and sat.vban_receive_port in changed_ports
+            if name in new_sats and sat.mic_source == "vban"
+            and sat.vban_receive_port in changed_ports
         }
 
         for name in list(self._runners):

@@ -84,9 +84,22 @@ debug_logging: false
 
 - **name**: Name shown in Home Assistant
 - **wyoming_port**: TCP port for the Wyoming protocol, unique per satellite (e.g. 10700, 10701…)
-- **output**: where responses are played: `vban` (default, `vban_output` block) or `media_player` (`media_player` block, with the VBAN output as fallback if enabled)
+- **output**: where responses are played: `vban` (default, `vban_output` block), `media_player` (`media_player` block, with the VBAN output as fallback if enabled) or `none`: responses are not played anywhere (e.g. to test a microphone; the log says `Response not played (output: none)`)
 
 ### Microphone (`microphone` block)
+
+- **source**: `vban` (default: the fields below) or `rtsp`: the audio of a camera stream
+- **rtsp_url** (source `rtsp`): stream URL, e.g. `rtsp://192.168.0.201:8554/chambre` (a go2rtc stream is best: cameras accept few connections). Credentials in the URL are hidden in the logs.
+- **rtsp_transport** (source `rtsp`): `tcp` (default) or `udp`
+
+A camera stream is read with ffmpeg (audio only, converted to 16 kHz mono)
+and reconnected when it stops or sends no audio for 5 s (after 1, 2, 5, 10
+then 30 s). Logs: `First RTSP audio from …`, `No RTSP audio received for N
+seconds`, `RTSP audio resumed`. With an empty `rtsp_url`, that satellite
+doesn't start (error in the log); the others do. The VBAN fields are
+ignored with source `rtsp`.
+
+VBAN source:
 
 - **vban_port**: UDP port to listen on (e.g. 6980)
 - **vban_mode**: `unicast` (default) or `multicast`

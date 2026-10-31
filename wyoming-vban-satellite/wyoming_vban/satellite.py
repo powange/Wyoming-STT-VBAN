@@ -276,6 +276,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         followup: Optional[FollowupSettings] = None,
         exchange_publisher: Optional[HaStateWatcher] = None,
         satellite_name: str = "",
+        mic_label: str = "VBAN",
         waiting_cues: Optional[WaitingCues] = None,
         debug_mirrors: Optional["SatelliteMirrors"] = None,
     ):
@@ -308,6 +309,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # Publishes each exchange (transcript + response) as a HA event
         self._exchange_publisher = exchange_publisher
         self._satellite_name = satellite_name
+        self._mic_label = mic_label  # microphone source in logs (VBAN, RTSP)
         self._last_transcript = ""
         self._last_transcript_at = 0.0
 
@@ -508,6 +510,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if AudioStop.is_type(event.type):
             _LOGGER.debug("TTS audio finished")
+            if self._response_audio and not self._has_output():
+                _LOGGER.info("Response not played (output: none)")
             self._tts_receiving = False
             # Run to end once the response has played (follow-up mode)
             seq = self._run_seq if (self._response_audio and self._driven) else None
@@ -1140,8 +1144,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     had_timeout = True
                     if timeouts == 1 or timeouts % 5 == 0:
                         _LOGGER.warning(
-                            "No VBAN audio received for %d seconds (chunks sent so far: %d)",
-                            timeouts * 2, chunks_sent,
+                            "No %s audio received for %d seconds (chunks sent so far: %d)",
+                            self._mic_label, timeouts * 2, chunks_sent,
                         )
                     continue
 
@@ -1197,8 +1201,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                         )
                     elif had_timeout:
                         _LOGGER.info(
-                            "VBAN audio resumed (chunk #%d, %.1f dB)",
-                            chunks_sent, db,
+                            "%s audio resumed (chunk #%d, %.1f dB)",
+                            self._mic_label, chunks_sent, db,
                         )
                         had_timeout = False
                     elif chunks_sent % 50 == 0:
@@ -1271,8 +1275,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
         """Callback from VBAN receiver — enqueue resampled audio."""
         if not self._first_packet_logged:
             _LOGGER.info(
-                "First VBAN packet from stream '%s': %dHz, %dch, format=%d",
-                packet.stream_name,
+                "First %s packet from stream '%s': %dHz, %dch, format=%d",
+                self._mic_label, packet.stream_name,
                 packet.sample_rate,
                 packet.channels,
                 packet.data_format,
