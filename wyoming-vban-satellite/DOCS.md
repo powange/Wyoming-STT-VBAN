@@ -256,8 +256,14 @@ warning. Leave the list empty (`debug_mirror: []`) when not debugging.
 ### Upgrading from 2.x
 
 Version 3.0 groups the satellite options in blocks. A 2.x configuration is
-rejected by Home Assistant until it is rewritten in the new format (edit in
-YAML mode, see the example above). Option names:
+rejected by Home Assistant until it is rewritten in the new format.
+
+The update itself is installed, but the app can't restart: Home Assistant
+reports `Error updating Wyoming VBAN Satellite: App ... has invalid options:
+Missing option 'media_player' in satellites`, and a second attempt says
+`No update available`. To finish: Configuration tab → ⋮ → Edit in YAML,
+replace the content with the new format (see the example above and the
+table below), save, then start the app. Option names:
 
 | 2.x | 3.0 |
 |---|---|
