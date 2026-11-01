@@ -7,105 +7,197 @@
 <style>
   :root {
     --bg: #f6f7f9; --card: #ffffff; --text: #1f2328; --muted: #656d76;
-    --border: #d8dee4; --accent: #03a9f4; --danger: #d1242f; --ok: #1a7f37;
+    --border: #d8dee4; --accent: #03a9f4; --accent-text: #ffffff;
+    --danger: #d1242f; --ok: #1a7f37; --field: #f6f8fa;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #111418; --card: #1c2128; --text: #e6edf3; --muted: #8d96a0;
-      --border: #30363d; --accent: #4fc3f7; --danger: #f85149; --ok: #3fb950;
+      --border: #30363d; --accent: #4fc3f7; --accent-text: #0d1117;
+      --danger: #f85149; --ok: #3fb950; --field: #0d1117;
     }
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
-    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  }
-  main { max-width: 900px; margin: 0 auto; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { padding: 0 16px 32px; }
+
+  /* Header: title, tabs, actions */
   header {
-    position: sticky; top: 0; z-index: 2; background: var(--bg);
-    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-    padding: 8px 0 12px;
+    position: sticky; top: 0; z-index: 3; background: var(--bg);
+    border-bottom: 1px solid var(--border); padding: 10px 16px 0; margin: 0 -16px 16px;
   }
-  header h1 { font-size: 20px; margin: 0 auto 0 0; }
+  .top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  .top h1 { font-size: 20px; margin: 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+  .tabs { display: flex; gap: 4px; overflow-x: auto; margin-top: 8px; }
+  .tab {
+    border: 0; border-bottom: 3px solid transparent; border-radius: 0;
+    background: none; padding: 8px 14px; font-weight: 500; color: var(--muted);
+    white-space: nowrap;
+  }
+  .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  .tab .dirty { color: var(--accent); }
+  #message { margin: 6px 0 8px; min-height: 1.4em; }
+  #message.error { color: var(--danger); }
+  #message.ok { color: var(--ok); }
+
   button {
     font: inherit; border: 1px solid var(--border); background: var(--card);
     color: var(--text); border-radius: 6px; padding: 6px 12px; cursor: pointer;
   }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
   button.danger { color: var(--danger); }
   button:disabled { opacity: .5; cursor: default; }
-  #message { width: 100%; margin: 0; min-height: 1.4em; }
-  #message.error { color: var(--danger); }
-  #message.ok { color: var(--ok); }
+  button.small { padding: 2px 10px; font-size: 12px; }
+
   .card {
     background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 12px 16px; margin-bottom: 16px;
+    margin-bottom: 12px;
   }
-  .card > summary {
-    font-size: 16px; font-weight: 600; cursor: pointer; padding: 4px 0;
+  .panel { padding: 12px 16px; }
+
+  /* Satellite cards (collapsed by default) */
+  details.sat > summary {
+    list-style: none; cursor: pointer; padding: 12px 16px;
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
   }
-  .card-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
-  fieldset {
-    border: 0; border-top: 1px solid var(--border); margin: 12px 0 0;
-    padding: 8px 0 0;
+  details.sat > summary::-webkit-details-marker { display: none; }
+  details.sat > summary::before {
+    content: "▸"; color: var(--muted); transition: transform .15s; display: inline-block;
   }
-  legend { font-weight: 600; padding-right: 8px; }
+  details.sat[open] > summary::before { transform: rotate(90deg); }
+  details.sat[open] > summary { border-bottom: 1px solid var(--border); }
+  .sat-name { font-size: 16px; font-weight: 600; }
+  .sat-info { color: var(--muted); font-size: 13px; }
+  .sat-body { padding: 4px 16px 16px; }
+  /* Sections flow in as many columns as the width allows */
+  .sections { columns: 380px; column-gap: 32px; }
+  .sections > * { break-inside: avoid; }
+  .general-cards {
+    display: grid; gap: 0 12px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
+  }
+  .card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+  fieldset { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; }
+  legend {
+    font-weight: 600; padding: 0; margin-bottom: 8px; width: 100%;
+    display: flex; align-items: center; gap: 8px;
+  }
   .grid {
     display: grid; gap: 10px 16px;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr));
   }
-  .group { margin-top: 10px; }
-  .group-title { font-weight: 500; color: var(--muted); margin-bottom: 4px; }
-  label { display: flex; flex-direction: column; gap: 4px; }
-  label.check { flex-direction: row; align-items: center; gap: 8px; }
+  .grid > .wide { grid-column: 1 / -1; }
+  .group { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+  .group:first-of-type { border-top: 0; padding-top: 0; }
+  .group-title {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    font-weight: 500; margin-bottom: 6px;
+  }
+  label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   label span.name { font-weight: 500; }
   .help { color: var(--muted); font-size: 12px; }
   .notice { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
   input, select {
     font: inherit; padding: 6px 8px; border-radius: 6px; width: 100%;
-    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); background: var(--field); color: var(--text);
   }
-  input[type=checkbox] { width: auto; }
+
+  /* Switch (instead of checkboxes) */
+  .switch { flex-direction: row; align-items: center; gap: 10px; cursor: pointer; }
+  .switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .switch .track {
+    flex: none; width: 36px; height: 20px; border-radius: 10px;
+    background: var(--border); position: relative; transition: background .15s;
+  }
+  .switch .track::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; transition: transform .15s;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+  }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(16px); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Segmented buttons (one choice among a few) */
+  .segmented {
+    display: inline-flex; flex-wrap: wrap; border: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden; max-width: 100%;
+  }
+  .segmented button {
+    border: 0; border-radius: 0; border-right: 1px solid var(--border);
+    background: var(--field); padding: 5px 12px;
+  }
+  .segmented button:last-child { border-right: 0; }
+  @media (max-width: 600px) {
+    /* Choices wrapped on two lines share the width evenly */
+    .segmented { display: flex; width: 100%; }
+    .segmented button { flex: 1 1 auto; }
+  }
+  .segmented button[aria-pressed="true"] {
+    background: var(--accent); color: var(--accent-text); font-weight: 500;
+  }
+  .choice {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 10px;
+  }
+
+  /* Debug copies rows */
   .row {
     display: grid; gap: 8px; align-items: end; margin-bottom: 8px;
     grid-template-columns: 2fr 1.4fr 1.4fr 0.8fr 1.2fr auto;
   }
-  @media (max-width: 700px) { .row { grid-template-columns: 1fr 1fr; } }
-  .group-title { display: flex; align-items: center; gap: 8px; }
-  button.test { padding: 1px 8px; font-size: 12px; }
-  .status-sat {
-    display: grid; gap: 4px 12px; align-items: center; padding: 4px 0;
-    grid-template-columns: minmax(140px, 1.4fr) 1fr 2fr;
+  @media (max-width: 800px) { .row { grid-template-columns: 1fr 1fr; } }
+
+  /* Status tab */
+  .status-grid {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
   }
-  .meter {
-    height: 8px; border-radius: 4px; background: var(--border); overflow: hidden;
-  }
+  .status-sat { padding: 12px 16px; }
+  .status-sat h3 { margin: 0 0 6px; font-size: 15px; }
+  .status-line { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+  .meter { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin: 6px 0 2px; }
   .meter > div { height: 100%; background: var(--accent); transition: width .3s; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-         margin-right: 6px; background: var(--muted); }
+  .dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
   .dot.on { background: var(--ok); }
   .dot.off { background: var(--danger); }
-  .exchanges { margin: 4px 0 0; padding: 0; list-style: none; }
-  .exchanges li { padding: 3px 0; border-top: 1px solid var(--border); }
+  .two-cols {
+    display: grid; gap: 12px; margin-top: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+  }
+  .exchanges { margin: 0; padding: 0; list-style: none; }
+  .exchanges li { padding: 6px 0; border-top: 1px solid var(--border); }
+  .exchanges li:first-child { border-top: 0; }
   .exchanges .meta { color: var(--muted); font-size: 12px; }
+  h2 { font-size: 15px; margin: 0 0 8px; }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>VBAN Satellite</h1>
-    <button id="export">Exporter</button>
-    <button id="import">Importer</button>
-    <input id="import-file" type="file" accept=".yaml,.yml,text/yaml" hidden>
-    <button id="revert" disabled>Annuler les modifications</button>
-    <button id="save" class="primary" disabled>Enregistrer et appliquer</button>
+    <div class="top">
+      <h1>VBAN Satellite</h1>
+      <div class="actions" id="actions">
+        <button id="export">Exporter</button>
+        <button id="import">Importer</button>
+        <input id="import-file" type="file" accept=".yaml,.yml,text/yaml" hidden>
+        <button id="revert" disabled>Annuler les modifications</button>
+        <button id="save" class="primary" disabled>Enregistrer et appliquer</button>
+      </div>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab" role="tab" data-tab="status">État</button>
+      <button class="tab" role="tab" data-tab="satellites">Satellites</button>
+      <button class="tab" role="tab" data-tab="general">Général</button>
+    </nav>
     <p id="message" role="status"></p>
   </header>
-  <details id="status" class="card" open>
-    <summary>État</summary>
-    <div id="status-body" class="help">Chargement…</div>
-  </details>
-  <div id="form"></div>
+  <section id="tab-status" role="tabpanel"></section>
+  <section id="tab-satellites" role="tabpanel" hidden></section>
+  <section id="tab-general" role="tabpanel" hidden></section>
 </main>
 <script>
 "use strict";
@@ -124,7 +216,14 @@ const LEGACY = [
 
 let saved = null;   // options as stored by the Supervisor
 let options = null; // options being edited
-const form = document.getElementById("form");
+let currentTab = "satellites";
+const openSatellites = new Set(); // indexes of expanded satellite cards
+
+const panels = {
+  status: document.getElementById("tab-status"),
+  satellites: document.getElementById("tab-satellites"),
+  general: document.getElementById("tab-general"),
+};
 const saveButton = document.getElementById("save");
 const revertButton = document.getElementById("revert");
 const message = document.getElementById("message");
@@ -134,10 +233,19 @@ function say(text, kind = "") {
   message.className = kind;
 }
 
+function isDirty() {
+  return options !== null && JSON.stringify(options) !== JSON.stringify(saved);
+}
+
 function setDirty() {
-  const dirty = JSON.stringify(options) !== JSON.stringify(saved);
+  const dirty = isDirty();
   saveButton.disabled = !dirty;
   revertButton.disabled = !dirty;
+  for (const tab of document.querySelectorAll(".tab")) {
+    const name = tab.dataset.tab;
+    const label = { status: "État", satellites: "Satellites", general: "Général" }[name];
+    tab.replaceChildren(label, dirty && name !== "status" ? el("span", { class: "dirty" }, " •") : "");
+  }
   if (dirty) say("Modifications non enregistrées.");
 }
 
@@ -146,78 +254,117 @@ function el(tag, attrs = {}, ...children) {
   for (const [key, value] of Object.entries(attrs)) {
     if (key === "class") node.className = value;
     else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
-    else if (value !== undefined && value !== null) node.setAttribute(key, value);
+    else if (value !== undefined && value !== null && value !== false) node.setAttribute(key, value);
   }
-  for (const child of children.flat()) {
-    if (child !== null && child !== undefined && child !== false) {
+  for (const child of children.flat(Infinity)) {
+    if (child !== null && child !== undefined && child !== false && child !== "") {
       node.append(child);
     }
   }
   return node;
 }
 
+function changed(rerender = false) {
+  setDirty();
+  if (rerender) renderConfig();
+}
+
 /* A form field bound to obj[key]. An empty optional field is removed from
-   the options, so the default applies. Fields changing what is shown
-   re-render the form. */
+   the options, so the default applies. */
 function field(obj, key, spec) {
   const { label, type = "text", choices, help, placeholder, def, rerender,
-          required, min, max, step } = spec;
-  let input;
-  const changed = (value) => {
+          required, min, max, step, wide } = spec;
+  const set = (value) => {
     if (value === undefined) delete obj[key];
     else obj[key] = value;
-    setDirty();
-    if (rerender) render();
+    changed(rerender);
   };
-  if (type === "checkbox") {
-    input = el("input", { type: "checkbox" });
+  if (type === "switch") {
+    const input = el("input", { type: "checkbox", role: "switch" });
     input.checked = key in obj ? !!obj[key] : !!def;
-    input.addEventListener("change", () => changed(input.checked));
-    return el("label", { class: "check" }, input,
-              el("span", { class: "name" }, label),
-              help ? el("span", { class: "help" }, `— ${help}`) : null);
+    input.addEventListener("change", () => set(input.checked));
+    return el("label", { class: `switch${wide ? " wide" : ""}` }, input,
+              el("span", { class: "track" }),
+              el("span", {}, el("span", { class: "name" }, label),
+                 help ? el("span", { class: "help" }, ` — ${help}`) : null));
   }
+  let input;
   if (type === "select") {
-    input = el("select", {},
-      choices.map(([value, text]) => el("option", { value }, text)));
+    input = el("select", {}, choices.map(([value, text]) => el("option", { value }, text)));
     input.value = key in obj ? obj[key] : def;
-    input.addEventListener("change", () => changed(input.value));
+    input.addEventListener("change", () => set(input.value));
   } else {
-    input = el("input", { type, placeholder, min, max, step,
-                          required: required ? "" : null });
+    input = el("input", { type, placeholder, min, max, step, required: required ? "" : null });
     input.value = key in obj ? obj[key] : "";
     input.addEventListener("input", () => {
       const raw = input.value.trim();
-      if (raw === "") changed(required ? obj[key] : undefined);
+      if (raw === "") set(required ? obj[key] : undefined);
       else if (type === "number") {
         const number = Number(raw);
-        if (!Number.isNaN(number)) changed(number);
-      } else changed(input.value);
+        if (!Number.isNaN(number)) set(number);
+      } else set(input.value);
     });
   }
-  return el("label", {}, el("span", { class: "name" }, label), input,
+  return el("label", { class: wide ? "wide" : "" }, el("span", { class: "name" }, label), input,
             help ? el("span", { class: "help" }, help) : null);
 }
 
-function section(title, ...fields) {
-  return el("fieldset", {}, el("legend", {}, title),
-            el("div", { class: "grid" }, fields));
+/* Segmented buttons: one choice among a few; onPick(value) applies it. */
+function segmented(label, value, choices, onPick, help) {
+  return el("div", { class: "choice" },
+    label ? el("span", { class: "name" }, label) : null,
+    el("div", { class: "segmented", role: "group" },
+      choices.map(([choice, text]) => el("button", {
+        type: "button", "aria-pressed": String(choice === value),
+        onclick: () => { if (choice !== value) onPick(choice); },
+      }, text))),
+    help ? el("span", { class: "help" }, help) : null);
 }
 
-/* A titled row of fields inside a section (one per announcement), with an
-   optional button playing it on the satellite. */
-function group(title, test, ...fields) {
-  return el("div", { class: "group" },
-            el("div", { class: "group-title" }, title, test),
-            el("div", { class: "grid" }, fields));
+function section(title, extra, ...content) {
+  return el("fieldset", {}, el("legend", {}, title, extra), ...content);
+}
+
+const grid = (...fields) => el("div", { class: "grid" }, fields);
+
+/* A titled group inside a section (one per announcement), with an optional
+   test button. */
+function group(title, test, ...content) {
+  return el("div", { class: "group" }, el("div", { class: "group-title" }, title, test), ...content);
+}
+
+/* Effective announcement mode, considering the pre-3.2 booleans. */
+function effectiveMode(block, modeKey, legacyKey, on, def) {
+  if (block[modeKey]) return block[modeKey];
+  if (legacyKey in block) return block[legacyKey] ? on : "none";
+  return def;
+}
+
+function modeChoice(block, modeKey, legacyKey, on, def, help) {
+  const mode = effectiveMode(block, modeKey, legacyKey, on, def);
+  return segmented(null, mode, MODES, (value) => {
+    block[modeKey] = value;
+    delete block[legacyKey];
+    changed(true);
+  }, help);
+}
+
+const hasSound = (mode) => mode === "sound" || mode === "sound_then_phrase";
+const hasPhrase = (mode) => mode === "phrase" || mode === "sound_then_phrase";
+
+/* Where responses are played; "vban" with the VBAN output off plays
+   nothing, so it shows as "none". */
+function effectiveOutput(sat) {
+  const output = sat.output || "vban";
+  return output === "vban" && !sat.vban_output.enabled ? "none" : output;
 }
 
 /* Plays a signal with the saved (running) configuration. */
 function testButton(sat, signal) {
-  return el("button", { class: "test", title: "Jouer sur la sortie du satellite",
+  return el("button", { class: "small", type: "button", title: "Jouer sur la sortie du satellite",
     onclick: async (event) => {
       const button = event.currentTarget;
-      if (JSON.stringify(options) !== JSON.stringify(saved)) {
+      if (isDirty()) {
         say("Le test utilise la configuration enregistrée : enregistrez d'abord vos modifications.");
       }
       const name = sat.name;
@@ -232,8 +379,7 @@ function testButton(sat, signal) {
           say(body.error === "Unknown satellite"
               ? `« ${name} » ne tourne pas encore : enregistrez d'abord.`
               : body.error || `Erreur ${resp.status}`, "error");
-        }
-        else if (!body.played.length) say("Rien à jouer (désactivé, ou pas de sortie).");
+        } else if (!body.played.length) say("Rien à jouer (désactivé, ou pas de sortie).");
         else say(`Joué : ${body.played.join(", ")}.`, "ok");
       } catch (err) {
         say(`Erreur : ${err}`, "error");
@@ -243,145 +389,178 @@ function testButton(sat, signal) {
     } }, "▶ Tester");
 }
 
-/* Effective announcement mode, considering the pre-3.2 booleans. */
-function effectiveMode(block, modeKey, legacyKey, on, def) {
-  if (block[modeKey]) return block[modeKey];
-  if (legacyKey in block) return block[legacyKey] ? on : "none";
-  return def;
+function vbanOutputFields(vban) {
+  return grid(
+    field(vban, "address", { label: "Adresse de l'enceinte", required: true,
+          placeholder: "192.168.0.179" }),
+    field(vban, "stream_name", { label: "Nom du flux", placeholder: "TTS1" }),
+    field(vban, "port", { label: "Port", type: "number", placeholder: "6980" }),
+    field(vban, "volume", { label: "Volume", type: "number", min: 0, max: 2, step: 0.05,
+          placeholder: "1.0", help: "0 à 2" }),
+    field(vban, "batch_packets", { label: "Paquets par envoi", type: "number", min: 1, max: 8,
+          placeholder: "1", help: "1 = le plus régulier" }),
+    field(vban, "mode", { label: "Mode", type: "select", def: "unicast",
+          choices: [["unicast", "Unicast"], ["multicast", "Multicast"]] }));
 }
 
-function modeField(block, modeKey, legacyKey, on, def, label, help) {
-  const current = { [modeKey]: effectiveMode(block, modeKey, legacyKey, on, def) };
-  const input = field(current, modeKey, { label, type: "select", choices: MODES, help });
-  input.querySelector("select").addEventListener("change", () => {
-    block[modeKey] = current[modeKey];
-    delete block[legacyKey];
-    setDirty();
-    render();
-  });
-  return input;
+function outputSection(sat, index) {
+  const vban = sat.vban_output, mp = sat.media_player;
+  const output = effectiveOutput(sat);
+  const pick = (value) => {
+    sat.output = value;
+    if (value === "vban") vban.enabled = true;
+    changed(true);
+  };
+  return section("Sortie des réponses", null,
+    segmented(null, output, [["vban", "VBAN"], ["media_player", "Media player"],
+                             ["none", "Aucune"]], pick),
+    output === "vban" && vbanOutputFields(vban),
+    output === "media_player" && [
+      grid(
+        field(mp, "entity", { label: "Entité", required: true,
+              placeholder: "media_player.nestmini7039" }),
+        field(mp, "mic_mute_tail_ms", { label: "Marge de coupure micro (ms)", type: "number",
+              min: 0, max: 5000, placeholder: "250" }),
+        field(mp, "http_port", { label: "Port HTTP", type: "number",
+              placeholder: String(10800 + index) }),
+        field(mp, "http_host", { label: "Hôte HTTP", help: "Vide = détection automatique" }),
+        field(vban, "enabled", { label: "Secours VBAN", type: "switch", rerender: true,
+              wide: true, help: "si le media player ne répond pas" })),
+      vban.enabled && el("div", { class: "group" }, vbanOutputFields(vban)),
+    ],
+    output === "none" && el("p", { class: "notice" },
+      "Sans sortie, le satellite ne parle pas : les réponses ne sont jouées nulle part."));
 }
 
-const hasSound = (mode) => mode === "sound" || mode === "sound_then_phrase";
-const hasPhrase = (mode) => mode === "phrase" || mode === "sound_then_phrase";
+function microphoneSection(mic) {
+  const source = mic.source || "vban";
+  return section("Micro", null,
+    segmented(null, source, [["vban", "Flux VBAN"], ["rtsp", "Caméra (RTSP)"]],
+              (value) => { mic.source = value; changed(true); }),
+    source === "rtsp"
+      ? grid(
+          field(mic, "rtsp_url", { label: "URL du flux caméra", required: true, wide: true,
+                placeholder: "rtsp://192.168.0.201:8554/chambre", help: "Par exemple un flux go2rtc" }),
+          field(mic, "rtsp_transport", { label: "Transport", type: "select", def: "tcp",
+                choices: [["tcp", "TCP"], ["udp", "UDP"]] }))
+      : grid(
+          field(mic, "vban_port", { label: "Port VBAN", type: "number", required: true,
+                placeholder: "6980" }),
+          field(mic, "stream_name", { label: "Nom du flux",
+                help: "Vide = tout flux non réclamé sur ce port" }),
+          field(mic, "vban_mode", { label: "Mode", type: "select", def: "unicast", rerender: true,
+                choices: [["unicast", "Unicast"], ["multicast", "Multicast"]] }),
+          mic.vban_mode === "multicast" && field(mic, "multicast_group", {
+                label: "Groupe multicast", placeholder: "239.0.0.1", required: true })));
+}
 
-function satelliteCard(sat, index) {
-  for (const block of BLOCKS) sat[block] = sat[block] || {};
-  const mic = sat.microphone, vban = sat.vban_output, mp = sat.media_player;
-  const fu = sat.followup, ws = sat.waiting_sounds, cam = sat.camera_phrase;
-  const output = sat.output || "vban";
+function followupSection(sat, output) {
+  const fu = sat.followup;
+  const on = fu.enabled !== false;
+  return section("Relance sans mot-clé", null,
+    grid(field(fu, "enabled", { label: "Activée", type: "switch", def: true, rerender: true,
+                wide: true, help: "écouter la réponse quand Jarvis pose une question" })),
+    on && el("div", { class: "group" }, grid(
+      field(fu, "timeout_s", { label: "Délai sans parole (s)", type: "number",
+            min: 3, max: 30, placeholder: "8" }),
+      el("div", { class: "wide group-title" },
+        field(fu, "beep", { label: "Bip avant l'écoute", type: "switch", def: true }),
+        output !== "none" && testButton(sat, "followup_beep")))));
+}
 
+function announcementsSection(sat, output) {
+  const ws = sat.waiting_sounds, cam = sat.camera_phrase;
   const thinking = effectiveMode(ws, "thinking_mode", "thinking", "sound", "phrase");
   const search = effectiveMode(ws, "search_mode", "search", "sound", "sound_then_phrase");
   const vision = effectiveMode(cam, "mode", "enabled", "phrase", "phrase");
-  const legacy = LEGACY.some(([b, , key]) => key in sat[b]);
-
-  const card = el("details", { class: "card", open: "" },
-    el("summary", {}, sat.name || `Satellite ${index + 1}`),
-    section("Général",
-      field(sat, "name", { label: "Nom", required: true, rerender: false }),
-      field(sat, "wyoming_port", { label: "Port Wyoming", type: "number",
-            required: true, help: "Unique par satellite (10700, 10701…)" }),
-      field(sat, "output", { label: "Sortie des réponses", type: "select",
-            def: "vban", rerender: true,
-            choices: [["vban", "VBAN (enceinte)"], ["media_player", "Media player HA"],
-                      ["none", "Aucune (réponses non jouées)"]] })),
-    section("Micro",
-      field(mic, "source", { label: "Source", type: "select", def: "vban", rerender: true,
-            choices: [["vban", "Flux VBAN"], ["rtsp", "Audio d'une caméra (RTSP)"]] }),
-      ...(mic.source === "rtsp" ? [
-        field(mic, "rtsp_url", { label: "URL du flux caméra", required: true,
-              placeholder: "rtsp://192.168.0.201:8554/chambre",
-              help: "Par exemple un flux go2rtc" }),
-        field(mic, "rtsp_transport", { label: "Transport", type: "select", def: "tcp",
-              choices: [["tcp", "TCP"], ["udp", "UDP"]] }),
-      ] : [
-        field(mic, "vban_port", { label: "Port VBAN", type: "number", required: true,
-              placeholder: "6980" }),
-        field(mic, "stream_name", { label: "Nom du flux",
-              help: "Vide = tout flux non réclamé sur ce port" }),
-        field(mic, "vban_mode", { label: "Mode", type: "select", def: "unicast",
-              rerender: true, choices: [["unicast", "Unicast"], ["multicast", "Multicast"]] }),
-        (mic.vban_mode === "multicast") &&
-          field(mic, "multicast_group", { label: "Groupe multicast",
-                placeholder: "239.0.0.1", required: true }),
-      ])),
-    output === "none" && el("p", { class: "notice" },
-      "Sans sortie, le satellite ne parle pas : les réponses ne sont jouées nulle part."),
-    output !== "none" && section(output === "media_player" ? "Sortie VBAN (secours)" : "Sortie VBAN",
-      field(vban, "enabled", { label: "Activée", type: "checkbox", rerender: true,
-            help: output === "media_player" ? "si play_media échoue" : null }),
-      vban.enabled && field(vban, "address", { label: "Adresse de l'enceinte",
-            required: true, placeholder: "192.168.0.179" }),
-      vban.enabled && field(vban, "stream_name", { label: "Nom du flux", placeholder: "TTS1" }),
-      vban.enabled && field(vban, "port", { label: "Port", type: "number", placeholder: "6980" }),
-      vban.enabled && field(vban, "volume", { label: "Volume", type: "number",
-            min: 0, max: 2, step: 0.05, placeholder: "1.0", help: "0 à 2" }),
-      vban.enabled && field(vban, "batch_packets", { label: "Paquets par envoi",
-            type: "number", min: 1, max: 8, placeholder: "1", help: "1 = le plus régulier" }),
-      vban.enabled && field(vban, "mode", { label: "Mode", type: "select", def: "unicast",
-            choices: [["unicast", "Unicast"], ["multicast", "Multicast"]] })),
-    output === "media_player" && section("Media player",
-      field(mp, "entity", { label: "Entité", required: true,
-            placeholder: "media_player.nestmini7039" }),
-      field(mp, "mic_mute_tail_ms", { label: "Marge de coupure micro (ms)",
-            type: "number", min: 0, max: 5000, placeholder: "250" }),
-      field(mp, "http_port", { label: "Port HTTP", type: "number",
-            placeholder: String(10800 + index) }),
-      field(mp, "http_host", { label: "Hôte HTTP", help: "Vide = détection automatique" })),
-    section("Relance sans mot-clé",
-      field(fu, "enabled", { label: "Activée", type: "checkbox", def: true, rerender: true,
-            help: "écouter la réponse quand Jarvis pose une question" }),
-      fu.enabled !== false && field(fu, "beep", { label: "Bip", type: "checkbox", def: true }),
-      fu.enabled !== false && el("div", {}, testButton(sat, "followup_beep")),
-      fu.enabled !== false && field(fu, "timeout_s", { label: "Délai sans parole (s)",
-            type: "number", min: 3, max: 30, placeholder: "8" })),
-    el("fieldset", {}, el("legend", {}, "Annonces d'attente"),
-      group("Fin d'écoute", testButton(sat, "listen_end"),
-        field(ws, "listen_end_mode", { label: "Mode", type: "select", def: "none",
-              rerender: true, choices: [["none", "Aucun"], ["sound", "Bip"]],
-              help: "dès que la demande est enregistrée" }),
-        ws.listen_end_mode === "sound" && field(ws, "listen_end_file", {
-              label: "Son", placeholder: "Bip intégré", help: "Fichier WAV dans /share" })),
-      group("Réflexion", testButton(sat, "thinking"),
-        modeField(ws, "thinking_mode", "thinking", "sound", "phrase", "Mode",
-                  "si pas de réponse après le délai"),
-        thinking !== "none" && field(ws, "thinking_delay_ms", { label: "Délai (ms)",
-              type: "number", min: 300, max: 5000, placeholder: "1000" }),
+  const listenEnd = ws.listen_end_mode || "none";
+  const test = (signal, mode) => output !== "none" && mode !== "none" && testButton(sat, signal);
+  const anyPhrase = hasPhrase(thinking) || hasPhrase(search) || hasPhrase(vision);
+  if (output === "none") {
+    return section("Annonces d'attente", null,
+      el("p", { class: "notice" }, "Sans sortie, aucune annonce n'est jouée."));
+  }
+  return section("Annonces d'attente", null,
+    group("Fin d'écoute", test("listen_end", listenEnd),
+      segmented(null, listenEnd, [["none", "Aucun"], ["sound", "Bip"]],
+                (value) => { ws.listen_end_mode = value; changed(true); },
+                "dès que la demande est enregistrée"),
+      listenEnd === "sound" && grid(field(ws, "listen_end_file", { label: "Son",
+            placeholder: "Bip intégré", help: "Fichier WAV dans /share" }))),
+    group("Réflexion", test("thinking", thinking),
+      modeChoice(ws, "thinking_mode", "thinking", "sound", "phrase",
+                 "si pas de réponse après le délai"),
+      thinking !== "none" && grid(
+        field(ws, "thinking_delay_ms", { label: "Délai (ms)", type: "number",
+              min: 300, max: 5000, placeholder: "1000" }),
         hasPhrase(thinking) && field(ws, "thinking_text", { label: "Phrase",
               placeholder: "Je réfléchis." }),
         hasSound(thinking) && field(ws, "thinking_file", { label: "Son",
-              placeholder: "Son intégré", help: "Fichier WAV dans /share" })),
-      group("Recherche internet", testButton(sat, "search"),
-        modeField(ws, "search_mode", "search", "sound", "sound_then_phrase", "Mode",
-                  "événement jarvis_recherche"),
+              placeholder: "Son intégré", help: "Fichier WAV dans /share" }))),
+    group("Recherche internet", test("search", search),
+      modeChoice(ws, "search_mode", "search", "sound", "sound_then_phrase",
+                 "événement jarvis_recherche"),
+      search !== "none" && grid(
         hasPhrase(search) && field(ws, "search_text", { label: "Phrase",
               placeholder: "Je cherche sur internet." }),
         hasSound(search) && field(ws, "search_file", { label: "Son",
-              placeholder: "Son intégré", help: "Fichier WAV dans /share" })),
-      group("Regard caméra", testButton(sat, "vision"),
-        modeField(cam, "mode", "enabled", "phrase", "phrase", "Mode",
-                  "événement jarvis_vision"),
+              placeholder: "Son intégré", help: "Fichier WAV dans /share" }))),
+    group("Regard caméra", test("vision", vision),
+      modeChoice(cam, "mode", "enabled", "phrase", "phrase", "événement jarvis_vision"),
+      vision !== "none" && grid(
         hasPhrase(vision) && field(cam, "text", { label: "Phrase",
               placeholder: "Attends, j'observe." }),
         hasSound(vision) && field(cam, "file", { label: "Son",
-              help: "Fichier WAV dans /share (pas de son intégré)" })),
-      (hasPhrase(thinking) || hasPhrase(search) || hasPhrase(vision)) && group(
-        "Voix des phrases de ce satellite", null,
-        field(cam, "tts_engine", { label: "Moteur TTS", help: "Vide = réglage général" }),
-        field(cam, "tts_voice", { label: "Voix", help: "Vide = réglage général" }))),
-    legacy ? el("p", { class: "notice" },
-      "Anciens réglages des annonces (avant 3.2) : ils seront convertis en modes à l'enregistrement.")
-      : null,
-    el("div", { class: "card-actions" },
-      el("button", { class: "danger", onclick: () => {
-        if (confirm(`Supprimer le satellite « ${sat.name} » ?`)) {
-          options.satellites.splice(index, 1);
-          setDirty();
-          render();
-        }
-      } }, "Supprimer ce satellite")));
-  card.querySelector("input")?.addEventListener("change", () => render());
+              help: "Fichier WAV dans /share (pas de son intégré)" }))),
+    anyPhrase && group("Voix des phrases de ce satellite", null, grid(
+      field(cam, "tts_engine", { label: "Moteur TTS", help: "Vide = réglage général" }),
+      field(cam, "tts_voice", { label: "Voix", help: "Vide = réglage général" }))));
+}
+
+function summaryInfo(sat) {
+  const mic = sat.microphone;
+  const micText = (mic.source || "vban") === "rtsp"
+    ? "micro caméra"
+    : `micro VBAN ${mic.vban_port ?? "?"}${mic.stream_name ? ` · ${mic.stream_name}` : ""}`;
+  const out = { vban: "sortie VBAN", media_player: "sortie media player", none: "sans sortie" }[
+    effectiveOutput(sat)];
+  return `port ${sat.wyoming_port ?? "?"} · ${micText} · ${out}`;
+}
+
+function satelliteCard(sat, index) {
+  for (const block of BLOCKS) sat[block] = sat[block] || {};
+  const output = effectiveOutput(sat);
+  const legacy = LEGACY.some(([b, , key]) => key in sat[b]);
+  const card = el("details", { class: "card sat", open: openSatellites.has(index) },
+    el("summary", {},
+      el("span", { class: "sat-name" }, sat.name || `Satellite ${index + 1}`),
+      el("span", { class: "sat-info" }, summaryInfo(sat))),
+    el("div", { class: "sat-body" },
+      el("div", { class: "sections" },
+        section("Général", null, grid(
+          field(sat, "name", { label: "Nom", required: true }),
+          field(sat, "wyoming_port", { label: "Port Wyoming", type: "number", required: true,
+                help: "Unique par satellite (10700, 10701…)" }))),
+        microphoneSection(sat.microphone),
+        outputSection(sat, index),
+        followupSection(sat, output),
+        announcementsSection(sat, output)),
+      legacy && el("p", { class: "notice" },
+        "Anciens réglages des annonces (avant 3.2) : ils seront convertis en modes à l'enregistrement."),
+      el("div", { class: "card-actions" },
+        el("button", { class: "danger", type: "button", onclick: () => {
+          if (confirm(`Supprimer le satellite « ${sat.name} » ?`)) {
+            options.satellites.splice(index, 1);
+            openSatellites.clear();
+            changed(true);
+          }
+        } }, "Supprimer ce satellite"))));
+  card.addEventListener("toggle", () => {
+    if (card.open) openSatellites.add(index);
+    else openSatellites.delete(index);
+  });
+  // Name shown in the summary: refresh when the field is left
+  card.querySelector("input")?.addEventListener("change", () => renderConfig());
   return card;
 }
 
@@ -396,56 +575,59 @@ function mirrorRow(mirror, index) {
     field(mirror, "address", { label: "Adresse", required: true, placeholder: "192.168.0.42" }),
     field(mirror, "port", { label: "Port", type: "number", placeholder: "6980" }),
     field(mirror, "stream_name", { label: "Nom du flux", placeholder: "Bureau-tx" }),
-    el("button", { class: "danger", onclick: () => {
+    el("button", { class: "danger", type: "button", onclick: () => {
       options.debug_mirror.splice(index, 1);
-      setDirty();
-      render();
+      changed(true);
     } }, "Retirer"));
 }
 
-function globalCard() {
-  options.debug_mirror = options.debug_mirror || [];
-  return el("details", { class: "card" },
-    el("summary", {}, "Réglages généraux"),
-    section("Annonces parlées",
-      field(options, "announcements_tts_engine", { label: "Moteur TTS",
-            placeholder: "tts.piper" }),
-      field(options, "announcements_tts_voice", { label: "Voix",
-            placeholder: "fr_FR-siwis-medium" })),
-    section("Home Assistant",
-      field(options, "publish_exchanges", { label: "Publier les échanges",
-            type: "checkbox", def: true, help: "événement jarvis_echange" }),
-      field(options, "debug_logging", { label: "Journalisation de débogage",
-            type: "checkbox" })),
-    el("fieldset", {}, el("legend", {}, "Copies audio de debug (VBAN)"),
-      options.debug_mirror.map(mirrorRow),
-      el("button", { onclick: () => {
-        options.debug_mirror.push({ satellite: options.satellites[0]?.name,
-                                    stream: "mic_sent" });
-        setDirty();
-        render();
-      } }, "Ajouter une copie")));
-}
-
-function render() {
-  const open = [...form.querySelectorAll("details")].map((d) => d.open);
-  form.replaceChildren(
+function renderSatellites() {
+  panels.satellites.replaceChildren(
     ...options.satellites.map(satelliteCard),
     el("div", { class: "card-actions" },
-      el("button", { onclick: () => {
+      el("button", { type: "button", onclick: () => {
         const i = options.satellites.length;
         options.satellites.push({
           name: `VBAN Satellite ${i + 1}`, wyoming_port: 10700 + i, output: "vban",
-          microphone: { vban_port: 6980 }, vban_output: {}, media_player: {},
+          microphone: { vban_port: 6980 }, vban_output: { enabled: true }, media_player: {},
           followup: {}, waiting_sounds: {}, camera_phrase: {},
         });
-        setDirty();
-        render();
-      } }, "Ajouter un satellite")),
-    globalCard());
-  form.querySelectorAll("details").forEach((d, i) => {
-    if (open[i] !== undefined) d.open = open[i];
-  });
+        openSatellites.add(i);
+        changed(true);
+      } }, "Ajouter un satellite")));
+}
+
+function renderGeneral() {
+  options.debug_mirror = options.debug_mirror || [];
+  panels.general.replaceChildren(
+    el("div", { class: "general-cards" },
+      el("div", { class: "card panel" },
+        section("Annonces parlées", null, grid(
+          field(options, "announcements_tts_engine", { label: "Moteur TTS",
+                placeholder: "tts.piper" }),
+          field(options, "announcements_tts_voice", { label: "Voix",
+                placeholder: "fr_FR-siwis-medium" })))),
+      el("div", { class: "card panel" },
+        section("Home Assistant", null, grid(
+          field(options, "publish_exchanges", { label: "Publier les échanges", type: "switch",
+                def: true, wide: true, help: "événement jarvis_echange" }),
+          field(options, "debug_logging", { label: "Journalisation de débogage",
+                type: "switch", wide: true }))))),
+    el("div", { class: "card panel" },
+      section("Copies audio de debug (VBAN)", null,
+        el("p", { class: "help" }, "Envoie une copie d'un flux audio vers un ordinateur (VBAN Receptor, VoiceMeeter)."),
+        options.debug_mirror.map(mirrorRow),
+        el("button", { type: "button", onclick: () => {
+          options.debug_mirror.push({ satellite: options.satellites[0]?.name,
+                                      stream: "mic_sent" });
+          changed(true);
+        } }, "Ajouter une copie"))));
+}
+
+function renderConfig() {
+  if (options === null) return;
+  renderSatellites();
+  renderGeneral();
 }
 
 /* Explicit modes instead of the pre-3.2 booleans. */
@@ -454,7 +636,7 @@ function forSave(opts) {
   for (const sat of copy.satellites) {
     for (const [block, modeKey, legacyKey, on, def] of LEGACY) {
       const b = sat[block];
-      if (legacyKey in b) {
+      if (b && legacyKey in b) {
         b[modeKey] = effectiveMode(b, modeKey, legacyKey, on, def);
         delete b[legacyKey];
       }
@@ -471,86 +653,81 @@ function translateDone(text) {
     .replace(/^satellite '(.*)' removed$/, "« $1 » supprimé");
 }
 
-const statusBody = document.getElementById("status-body");
+/* Status tab */
 
 function dot(state) {
   return el("span", { class: `dot ${state === true ? "on" : state === false ? "off" : ""}` });
 }
 
 function renderStatus(status) {
-  const rows = status.satellites.map((sat) => {
+  const cards = status.satellites.map((sat) => {
     const level = sat.mic_level_db;
     const width = level === null ? 0 : Math.max(0, Math.min(100, (level + 70) / 70 * 100));
     const audio = sat.last_packet_s === null ? "aucun audio reçu"
       : sat.last_packet_s > 2 ? `plus d'audio depuis ${Math.round(sat.last_packet_s)} s`
       : `micro ${level === null ? "?" : level.toFixed(0)} dB`;
-    return el("div", { class: "status-sat" },
-      el("strong", {}, sat.name),
-      el("span", {}, dot(sat.ha_connected),
-         sat.ha_connected ? (sat.streaming ? "HA : écoute" : "HA : connecté")
-                          : sat.running ? "HA : non connecté" : "arrêté"),
-      el("span", {}, el("div", { class: "meter" }, el("div", { style: `width: ${width}%` })),
-         el("span", { class: "help" }, audio)));
+    const out = { vban: "VBAN", media_player: "media player", none: "aucune" }[sat.output] || sat.output;
+    return el("div", { class: "card status-sat" },
+      el("h3", {}, sat.name),
+      el("div", { class: "status-line" }, dot(sat.ha_connected),
+         sat.ha_connected ? (sat.streaming ? "Home Assistant : écoute" : "Home Assistant : connecté")
+                          : sat.running ? "Home Assistant : non connecté" : "arrêté"),
+      el("div", { class: "meter" }, el("div", { style: `width: ${width}%` })),
+      el("div", { class: "help" }, `${audio} · sortie ${out}`));
   });
   const phrases = status.phrases.map((p) =>
-    el("span", { class: "help" }, dot(p.ready), `« ${p.text} » ${p.ready ? "prête" : "en synthèse…"}  `));
-  const exchanges = status.exchanges.slice(0, 8).map((x) =>
+    el("div", { class: "status-line help" }, dot(p.ready),
+       `« ${p.text} » ${p.ready ? "prête" : "en synthèse…"}`));
+  const exchanges = status.exchanges.slice(0, 15).map((x) =>
     el("li", {},
       el("div", { class: "meta" },
          new Date(x.time * 1000).toLocaleTimeString("fr-FR"), " · ", x.satellite,
          x.followup ? " · relance" : ""),
       `« ${x.transcript} » → « ${x.response} »`));
-  statusBody.className = "";
-  statusBody.replaceChildren(
-    ...rows,
-    el("p", { class: "help" }, dot(status.ha_websocket),
-       status.ha_websocket === null ? "Connexion Home Assistant : non utilisée"
-       : status.ha_websocket ? "Connexion Home Assistant : connectée"
-       : "Connexion Home Assistant : déconnectée"),
-    phrases.length ? el("p", {}, ...phrases) : null,
-    el("div", {}, el("strong", {}, "Derniers échanges"),
-       exchanges.length ? el("ul", { class: "exchanges" }, exchanges)
-                        : el("p", { class: "help" }, "Aucun pour l'instant.")));
+  panels.status.replaceChildren(
+    el("div", { class: "status-grid" }, cards),
+    el("div", { class: "two-cols" },
+      el("div", { class: "card panel" },
+        el("h2", {}, "Derniers échanges"),
+        exchanges.length ? el("ul", { class: "exchanges" }, exchanges)
+                         : el("p", { class: "help" }, "Aucun pour l'instant.")),
+      el("div", { class: "card panel" },
+        el("h2", {}, "Home Assistant"),
+        el("div", { class: "status-line" }, dot(status.ha_websocket),
+           status.ha_websocket === null ? "Connexion : non utilisée"
+           : status.ha_websocket ? "Connexion : établie" : "Connexion : coupée"),
+        phrases.length ? [el("h2", { style: "margin-top: 12px" }, "Phrases des annonces"), phrases]
+                       : null)));
 }
 
 async function refreshStatus() {
+  if (currentTab !== "status") return;
   try {
     const resp = await fetch("api/status");
     if (resp.ok) renderStatus(await resp.json());
   } catch (err) {
-    statusBody.textContent = `État indisponible : ${err}`;
+    panels.status.textContent = `État indisponible : ${err}`;
   }
 }
 
-document.getElementById("export").addEventListener("click", async () => {
-  const resp = await fetch("api/export", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ options: forSave(options) }),
-  });
-  if (!resp.ok) { say("Export impossible", "error"); return; }
-  const link = el("a", { href: URL.createObjectURL(await resp.blob()),
-                         download: "vban-satellite.yaml" });
-  link.click();
-  URL.revokeObjectURL(link.href);
-});
+/* Tabs */
 
-const importFile = document.getElementById("import-file");
-document.getElementById("import").addEventListener("click", () => importFile.click());
-importFile.addEventListener("change", async () => {
-  const file = importFile.files[0];
-  importFile.value = "";
-  if (!file) return;
-  const resp = await fetch("api/import", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ yaml: await file.text() }),
-  });
-  const body = await resp.json();
-  if (!resp.ok) { say(body.error || "Import impossible", "error"); return; }
-  options = body.options;
-  render();
-  setDirty();
-  say(`« ${file.name} » importé : vérifiez, puis enregistrez pour l'appliquer.`);
-});
+function showTab(name) {
+  currentTab = name;
+  for (const tab of document.querySelectorAll(".tab")) {
+    tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
+  }
+  for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== name;
+  document.getElementById("actions").hidden = name === "status";
+  try { localStorage.setItem("vban-satellite-tab", name); } catch (err) { /* private mode */ }
+  if (name === "status") refreshStatus();
+}
+
+for (const tab of document.querySelectorAll(".tab")) {
+  tab.addEventListener("click", () => showTab(tab.dataset.tab));
+}
+
+/* Load, save, import, export */
 
 async function load() {
   say("Chargement…");
@@ -562,7 +739,7 @@ async function load() {
   }
   saved = body.options;
   options = JSON.parse(JSON.stringify(saved));
-  render();
+  renderConfig();
   setDirty();
   say("");
 }
@@ -594,13 +771,49 @@ saveButton.addEventListener("click", async () => {
 
 revertButton.addEventListener("click", () => {
   options = JSON.parse(JSON.stringify(saved));
-  render();
+  renderConfig();
   setDirty();
   say("");
 });
 
+document.getElementById("export").addEventListener("click", async () => {
+  const resp = await fetch("api/export", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ options: forSave(options) }),
+  });
+  if (!resp.ok) { say("Export impossible", "error"); return; }
+  const link = el("a", { href: URL.createObjectURL(await resp.blob()),
+                         download: "vban-satellite.yaml" });
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
+
+const importFile = document.getElementById("import-file");
+document.getElementById("import").addEventListener("click", () => importFile.click());
+importFile.addEventListener("change", async () => {
+  const file = importFile.files[0];
+  importFile.value = "";
+  if (!file) return;
+  const resp = await fetch("api/import", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ yaml: await file.text() }),
+  });
+  const body = await resp.json();
+  if (!resp.ok) { say(body.error || "Import impossible", "error"); return; }
+  options = body.options;
+  renderConfig();
+  setDirty();
+  say(`« ${file.name} » importé : vérifiez, puis enregistrez pour l'appliquer.`);
+});
+
+window.addEventListener("beforeunload", (event) => {
+  if (isDirty()) event.preventDefault();
+});
+
+let initialTab = "satellites";
+try { initialTab = localStorage.getItem("vban-satellite-tab") || initialTab; } catch (err) { /* private mode */ }
+showTab(panels[initialTab] ? initialTab : "satellites");
 load().catch((err) => say(`Erreur : ${err}`, "error"));
-refreshStatus();
 setInterval(refreshStatus, 2000);
 </script>
 </body>

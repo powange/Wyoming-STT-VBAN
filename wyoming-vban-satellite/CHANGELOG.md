@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.5.1
+
+- **Configuration interface redesigned**:
+  - Tabs: *État* (status), *Satellites*, *Général*; save/import/export only on the configuration tabs; unsaved changes marked on the tabs.
+  - Full width, sections flowing in columns; responsive down to phone width.
+  - Satellites collapsed by default, with a summary (port, microphone, output); an added satellite opens.
+  - Response output chosen with grouped buttons (VBAN / Media player / None), showing only the settings of the chosen output; the VBAN fallback of a media player is a switch.
+  - Same for the microphone source (VBAN / camera) and each announcement mode; switches instead of checkboxes; settings hidden while their feature is off (follow-up, announcements without output…).
+- Fix: phrase list shown as "[object HTMLDivElement]" in the status panel.
+
 ## 3.5.0
 
 - **New**: microphone from a camera stream — `microphone.source: rtsp` with `rtsp_url` (e.g. a go2rtc stream) and `rtsp_transport` (`tcp` default, or `udp`). The audio is read by ffmpeg (video ignored, 16 kHz mono) and goes through the same chain as a VBAN microphone (mic mute, levels, debug copies, status).
