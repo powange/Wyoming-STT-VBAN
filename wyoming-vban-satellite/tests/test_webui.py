@@ -56,7 +56,9 @@ class FakeSupervisor:
         await self._runner.cleanup()
 
     async def _info(self, request: web.Request) -> web.Response:
-        return web.json_response({"result": "ok", "data": {"options": self.options}})
+        return web.json_response(
+            {"result": "ok", "data": {"options": self.options, "version": "9.9.9"}}
+        )
 
     async def _set(self, request: web.Request) -> web.Response:
         if self.reject:
@@ -117,9 +119,12 @@ class WebUITest(unittest.IsolatedAsyncioTestCase):
     async def test_page_and_options(self) -> None:
         async with self.http.get(self.url("/")) as resp:
             self.assertEqual(resp.status, 200)
+            self.assertIn("no-store", resp.headers["Cache-Control"])  # never stale
             self.assertIn("VBAN Satellite", await resp.text())
         async with self.http.get(self.url("/api/options")) as resp:
-            self.assertEqual((await resp.json())["options"], self.initial)
+            body = await resp.json()
+        self.assertEqual(body["options"], self.initial)
+        self.assertEqual(body["version"], "9.9.9")
 
     async def test_save_applies_without_restart(self) -> None:
         new = copy.deepcopy(self.initial)

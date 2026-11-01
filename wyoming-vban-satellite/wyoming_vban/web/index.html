@@ -179,7 +179,7 @@
 <main>
   <header>
     <div class="top">
-      <h1>VBAN Satellite</h1>
+      <h1>VBAN Satellite <span id="version" class="help"></span></h1>
       <div class="actions" id="actions">
         <button id="export">Exporter</button>
         <button id="import">Importer</button>
@@ -739,6 +739,7 @@ async function load() {
   }
   saved = body.options;
   options = JSON.parse(JSON.stringify(saved));
+  if (body.version) document.getElementById("version").textContent = `v${body.version}`;
   renderConfig();
   setDirty();
   say("");

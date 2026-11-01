@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.5.2
+
+- **Fix**: after an update, the configuration interface could still show the previous version (page cached by the browser). The page is now sent with `Cache-Control: no-cache, no-store`, so a new version shows at once.
+- The interface shows the app version next to its title.
+
 ## 3.5.1
 
 - **Configuration interface redesigned**:

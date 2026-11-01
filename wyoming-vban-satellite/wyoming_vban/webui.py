@@ -51,8 +51,12 @@ class SupervisorOptions:
             raise SupervisorError(body.get("message") or f"HTTP {resp.status}")
         return body.get("data")
 
+    async def info(self) -> dict[str, Any]:
+        """This app's info: options, version…"""
+        return await self._call("GET", "/addons/self/info")
+
     async def get(self) -> dict[str, Any]:
-        return (await self._call("GET", "/addons/self/info"))["options"]
+        return (await self.info())["options"]
 
     async def set(self, options: dict[str, Any]) -> None:
         await self._call("POST", "/addons/self/options", {"options": options})
@@ -100,14 +104,18 @@ class WebUI:
         return await handler(request)
 
     async def _index(self, request: web.Request) -> web.Response:
-        return web.FileResponse(WEB_DIR / "index.html")
+        # Never reuse a cached page: after an update, the new interface
+        # must show at once
+        return web.FileResponse(
+            WEB_DIR / "index.html", headers={"Cache-Control": "no-cache, no-store"},
+        )
 
     async def _get_options(self, request: web.Request) -> web.Response:
         try:
-            options = await self.supervisor.get()
+            info = await self.supervisor.info()
         except (SupervisorError, aiohttp.ClientError, OSError) as err:
             return web.json_response({"error": f"Supervisor: {err}"}, status=502)
-        return web.json_response({"options": options})
+        return web.json_response({"options": info["options"], "version": info.get("version")})
 
     async def _save_options(self, request: web.Request) -> web.Response:
         """Validate, save through the Supervisor, then apply."""
