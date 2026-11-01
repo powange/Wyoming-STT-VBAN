@@ -692,6 +692,21 @@ function dot(state) {
   return el("span", { class: `dot ${state === true ? "on" : state === false ? "off" : ""}` });
 }
 
+/* Noise floor and loudest moment over the last 10 s: the gap between a
+   voice and the background matters more than the levels themselves. */
+function levelStats(sat) {
+  if (sat.noise_floor_db === null || sat.last_packet_s === null || sat.last_packet_s > 2) {
+    return null;
+  }
+  const db = (value) => `${value.toFixed(0)} dB`;
+  const gap = sat.peak_db - sat.noise_floor_db;
+  return el("div", { class: "help" },
+    `10 dernières s : bruit de fond ${db(sat.noise_floor_db)} · pic ${db(sat.peak_db)} · écart ${gap.toFixed(0)} dB`,
+    sat.dc_offset_db > -40
+      ? el("div", {}, `décalage continu ${db(sat.dc_offset_db)} (inaudible, retiré de la mesure)`)
+      : null);
+}
+
 function renderStatus(status) {
   const cards = status.satellites.map((sat) => {
     const level = sat.mic_level_db;
@@ -706,7 +721,8 @@ function renderStatus(status) {
          sat.ha_connected ? (sat.streaming ? "Home Assistant : écoute" : "Home Assistant : connecté")
                           : sat.running ? "Home Assistant : non connecté" : "arrêté"),
       el("div", { class: "meter" }, el("div", { style: `width: ${width}%` })),
-      el("div", { class: "help" }, `${audio} · sortie ${out}`));
+      el("div", { class: "help" }, `${audio} · sortie ${out}`),
+      levelStats(sat));
   });
   const phrases = status.phrases.map((p) =>
     el("div", { class: "status-line help" }, dot(p.ready),

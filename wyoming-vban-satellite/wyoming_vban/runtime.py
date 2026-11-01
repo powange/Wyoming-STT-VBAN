@@ -194,6 +194,7 @@ class SatelliteRunner:
     """
 
     LEVEL_WINDOW_S = 1.0  # microphone level = peak over this window
+    STATS_WINDOW_S = 10.0  # noise floor and peak over this window
 
     def __init__(
         self,
@@ -228,7 +229,8 @@ class SatelliteRunner:
         self.handlers: weakref.WeakSet[VbanSatelliteHandler] = weakref.WeakSet()
         self.task: Optional[asyncio.Task] = None
         # Microphone level from the received VBAN packets
-        self._levels: collections.deque[tuple[float, float]] = collections.deque()
+        # (time, level dB without DC, DC offset / full scale) per packet
+        self._levels: collections.deque[tuple[float, float, float]] = collections.deque()
         self.last_packet_at = 0.0
 
     # Lifecycle
@@ -447,32 +449,45 @@ class SatelliteRunner:
     # Status and tests
 
     def _on_packet(self, packet: VbanPacket) -> None:
+        """Microphone level of each packet, without its DC offset (a constant
+        shift, common on ESP32 microphones, that isn't heard)."""
         now = time.monotonic()
         self.last_packet_at = now
         width = packet.sample_width
-        if width in (1, 2, 4) and len(packet.payload) >= width:
-            rms = audioop.rms(packet.payload[: len(packet.payload) // width * width], width)
-            db = 20 * math.log10(max(rms, 1) / (1 << (8 * width - 1)))
-            self._levels.append((now, db))
-        while self._levels and now - self._levels[0][0] > self.LEVEL_WINDOW_S:
+        payload = packet.payload[: len(packet.payload) // width * width]
+        if width in (1, 2, 4) and payload:
+            full_scale = 1 << (8 * width - 1)
+            if width == 1:  # VBAN 8-bit is unsigned
+                payload = audioop.bias(payload, 1, -128)
+            dc = audioop.avg(payload, width)
+            rms = audioop.rms(audioop.bias(payload, width, -dc), width)
+            self._levels.append((now, _db(rms / full_scale), abs(dc) / full_scale))
+        self._expire_levels(now)
+
+    def _expire_levels(self, now: float) -> None:
+        while self._levels and now - self._levels[0][0] > self.STATS_WINDOW_S:
             self._levels.popleft()
 
     def status(self) -> dict[str, Any]:
         now = time.monotonic()
-        self._on_levels_expire(now)
+        self._expire_levels(now)
+        recent = [db for t, db, _ in self._levels if now - t <= self.LEVEL_WINDOW_S]
+        levels = sorted(db for _, db, _ in self._levels)
+        dc = sum(d for _, _, d in self._levels) / len(self._levels) if self._levels else 0.0
         return {
             "name": self.cfg.name,
             "running": self.task is not None and not self.task.done(),
             "ha_connected": any(h.ha_ready for h in self.handlers),
             "streaming": any(h.is_streaming for h in self.handlers),
-            "mic_level_db": round(max(db for _, db in self._levels), 1) if self._levels else None,
+            # Now (peak over 1 s), and over the last STATS_WINDOW_S: noise
+            # floor (quietest moments) and loudest moment (e.g. a voice)
+            "mic_level_db": round(max(recent), 1) if recent else None,
+            "noise_floor_db": round(levels[len(levels) // 10], 1) if levels else None,
+            "peak_db": round(levels[-1], 1) if levels else None,
+            "dc_offset_db": round(_db(dc), 1) if self._levels else None,
             "last_packet_s": round(now - self.last_packet_at, 1) if self.last_packet_at else None,
             "output": self.cfg.tts_output,
         }
-
-    def _on_levels_expire(self, now: float) -> None:
-        while self._levels and now - self._levels[0][0] > self.LEVEL_WINDOW_S:
-            self._levels.popleft()
 
     async def test(self, signal: str) -> list[str]:
         """Play an announcement (or the follow-up beep) on the outputs."""
@@ -509,6 +524,11 @@ class SatelliteRunner:
             await asyncio.sleep(cue.duration + 0.1)
             return True
         return False
+
+
+def _db(ratio: float) -> float:
+    """Level relative to full scale in dB (floor: -90 dB, about one 16-bit step)."""
+    return 20 * math.log10(max(ratio, 3e-5))
 
 
 class AppRuntime:

@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.5.4
+
+- **Status panel — reliable microphone levels**: the level no longer includes the DC offset (a constant shift, common on ESP32 microphones, that isn't heard and inflated the reading). Each satellite now also shows, over the last 10 s, its **background noise** (quietest moments), its **peak** (e.g. a voice) and the **gap** between them, plus the DC offset when it is significant. The gap between voice and background is what matters for the wake word and transcription.
+
 ## 3.5.3
 
 - **Configuration interface — clearer layout**:
