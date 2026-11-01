@@ -493,7 +493,11 @@ class SatelliteRunner:
             "noise_floor_db": round(levels[len(levels) // 10], 1) if levels else None,
             "peak_db": round(levels[-1], 1) if levels else None,
             "dc_offset_db": round(_db(dc), 1) if self._levels else None,
-            # Background noise after noise suppression / auto gain (if on)
+            # Level now and background noise after noise suppression / auto
+            # gain (if on)
+            "filtered_level_db": (
+                self.mic_filter.level_db() if self.mic_filter.active else None
+            ),
             "filtered_noise_floor_db": (
                 self.mic_filter.noise_floor_db() if self.mic_filter.active else None
             ),

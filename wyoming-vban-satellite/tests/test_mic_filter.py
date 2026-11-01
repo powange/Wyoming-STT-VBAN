@@ -77,6 +77,7 @@ class MicFilterTest(unittest.TestCase):
         self.assertTrue(filter_.active)
         run(filter_, noise(1, 300))
         self.assertIsNotNone(filter_.noise_floor_db())
+        self.assertIsNotNone(filter_.level_db())
         filter_.configure("off", False)
         self.assertFalse(filter_.active)
         self.assertIsNone(filter_.noise_floor_db())

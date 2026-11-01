@@ -192,8 +192,14 @@
   .status-sat { padding: 12px 16px; }
   .status-sat h3 { margin: 0 0 6px; font-size: 15px; }
   .status-line { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
-  .meter { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin: 6px 0 2px; }
+  /* Level meters: raw microphone, and after clean-up (if on) */
+  .meters { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 8px;
+            align-items: center; margin: 8px 0 4px; }
+  .meters .label, .meters .value { font-size: 12px; color: var(--muted); }
+  .meters .value { min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
+  .meter { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
   .meter > div { height: 100%; background: var(--accent); transition: width .3s; }
+  .meter.clean > div { background: var(--ok); }
   .dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
   .dot.on { background: var(--ok); }
   .dot.off { background: var(--danger); }
@@ -707,31 +713,41 @@ function levelStats(sat) {
   }
   const db = (value) => `${value.toFixed(0)} dB`;
   const gap = sat.peak_db - sat.noise_floor_db;
+  const cleanFloor = sat.filtered_noise_floor_db !== null && sat.filtered_noise_floor_db !== undefined
+    ? ` (nettoyé ${db(sat.filtered_noise_floor_db)})` : "";
   return el("div", { class: "help" },
-    `10 dernières s : bruit de fond ${db(sat.noise_floor_db)} · pic ${db(sat.peak_db)} · écart ${gap.toFixed(0)} dB`,
+    `10 dernières s : bruit de fond ${db(sat.noise_floor_db)}${cleanFloor} · pic ${db(sat.peak_db)} · écart ${gap.toFixed(0)} dB`,
     sat.dc_offset_db > -40
       ? el("div", {}, `décalage continu ${db(sat.dc_offset_db)} (inaudible, retiré)`)
-      : null,
-    sat.filtered_noise_floor_db !== null && sat.filtered_noise_floor_db !== undefined
-      ? el("div", {}, `après nettoyage : bruit de fond ${db(sat.filtered_noise_floor_db)}`)
       : null);
+}
+
+/* One level meter row: label, bar (-70 dB to 0 dB), value. */
+function meterRow(label, level, clean = false) {
+  const width = level === null ? 0 : Math.max(0, Math.min(100, (level + 70) / 70 * 100));
+  return [
+    el("span", { class: "label" }, label),
+    el("div", { class: clean ? "meter clean" : "meter" }, el("div", { style: `width: ${width}%` })),
+    el("span", { class: "value" }, level === null ? "—" : `${level.toFixed(0)} dB`),
+  ];
 }
 
 function renderStatus(status) {
   const cards = status.satellites.map((sat) => {
-    const level = sat.mic_level_db;
-    const width = level === null ? 0 : Math.max(0, Math.min(100, (level + 70) / 70 * 100));
-    const audio = sat.last_packet_s === null ? "aucun audio reçu"
-      : sat.last_packet_s > 2 ? `plus d'audio depuis ${Math.round(sat.last_packet_s)} s`
-      : `micro ${level === null ? "?" : level.toFixed(0)} dB`;
+    const receiving = sat.last_packet_s !== null && sat.last_packet_s <= 2;
+    const audio = sat.last_packet_s === null ? "aucun audio reçu · "
+      : !receiving ? `plus d'audio depuis ${Math.round(sat.last_packet_s)} s · ` : "";
+    const cleaned = sat.filtered_level_db !== null && sat.filtered_level_db !== undefined;
     const out = { vban: "VBAN", media_player: "media player", none: "aucune" }[sat.output] || sat.output;
     return el("div", { class: "card status-sat" },
       el("h3", {}, sat.name),
       el("div", { class: "status-line" }, dot(sat.ha_connected),
          sat.ha_connected ? (sat.streaming ? "Home Assistant : écoute" : "Home Assistant : connecté")
                           : sat.running ? "Home Assistant : non connecté" : "arrêté"),
-      el("div", { class: "meter" }, el("div", { style: `width: ${width}%` })),
-      el("div", { class: "help" }, `${audio} · sortie ${out}`),
+      el("div", { class: "meters" },
+        meterRow(cleaned ? "Brut" : "Micro", receiving ? sat.mic_level_db : null),
+        cleaned && meterRow("Nettoyé", receiving ? sat.filtered_level_db : null, true)),
+      el("div", { class: "help" }, `${audio}sortie ${out}`),
       levelStats(sat));
   });
   const phrases = status.phrases.map((p) =>

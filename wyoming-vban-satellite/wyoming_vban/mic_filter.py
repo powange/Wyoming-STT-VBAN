@@ -103,6 +103,12 @@ class MicFilter:
             return pcm
         return audioop.bias(pcm, WYOMING_WIDTH, -offset)
 
+    def level_db(self) -> Optional[float]:
+        """Level of the cleaned audio now (peak over the last second)."""
+        now = time.monotonic()
+        recent = [db for t, db in self._levels if now - t <= 1.0]
+        return round(max(recent), 1) if recent else None
+
     def noise_floor_db(self) -> Optional[float]:
         """Background noise of the cleaned audio over the last seconds."""
         if not self._levels or time.monotonic() - self._levels[-1][0] > 2:

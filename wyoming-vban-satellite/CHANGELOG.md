@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.6.1
+
+- **Status panel**: when microphone clean-up is on, a second level meter (green, "Nettoyé") shows the cleaned audio right under the raw one ("Brut"), each with its value; the cleaned background noise is shown next to the raw one in the 10 s statistics.
+
 ## 3.6.0
 
 - **New**: microphone clean-up, per satellite (`microphone` block), applied before the audio reaches Home Assistant and the wake word:
