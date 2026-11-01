@@ -9,12 +9,14 @@
     --bg: #f6f7f9; --card: #ffffff; --text: #1f2328; --muted: #656d76;
     --border: #d8dee4; --accent: #03a9f4; --accent-text: #ffffff;
     --danger: #d1242f; --ok: #1a7f37; --field: #f6f8fa;
+    --section: #f9fafb; --sub: #ffffff;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #111418; --card: #1c2128; --text: #e6edf3; --muted: #8d96a0;
       --border: #30363d; --accent: #4fc3f7; --accent-text: #0d1117;
       --danger: #f85149; --ok: #3fb950; --field: #0d1117;
+      --section: #161b22; --sub: #1c2128;
     }
   }
   * { box-sizing: border-box; }
@@ -71,9 +73,9 @@
   details.sat[open] > summary { border-bottom: 1px solid var(--border); }
   .sat-name { font-size: 16px; font-weight: 600; }
   .sat-info { color: var(--muted); font-size: 13px; }
-  .sat-body { padding: 4px 16px 16px; }
+  .sat-body { padding: 16px; }
   /* Sections flow in as many columns as the width allows */
-  .sections { columns: 380px; column-gap: 32px; }
+  .sections { columns: 380px; column-gap: 16px; }
   .sections > * { break-inside: avoid; }
   .general-cards {
     display: grid; gap: 0 12px;
@@ -81,24 +83,47 @@
   }
   .card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
-  fieldset { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; }
-  legend {
-    font-weight: 600; padding: 0; margin-bottom: 8px; width: 100%;
+  /* Level 1: a section of a satellite (Micro, Sortie…) */
+  .sec {
+    background: var(--section); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin: 0 0 16px; min-width: 0;
+  }
+  .sec-title {
+    font-size: 15px; font-weight: 600; margin-bottom: 10px;
     display: flex; align-items: center; gap: 8px;
   }
+  .panel > .sec { background: none; border: 0; padding: 0; margin: 0; }
   .grid {
     display: grid; gap: 10px 16px;
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr));
   }
   .grid > .wide { grid-column: 1 / -1; }
-  .group { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
-  .group:first-of-type { border-top: 0; padding-top: 0; }
+  /* Level 2: a part of a section (each announcement, VBAN fallback…) */
+  .sub {
+    background: var(--sub); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; margin-top: 10px;
+  }
+  .sub-title {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .sub-title > button { margin-left: auto; }
+  .sub .choice { margin-bottom: 8px; }
+  .sub .segmented button { padding: 5px 9px; font-size: 13px; }
+  /* Announcements: side by side as the width allows */
+  .sub-grid {
+    display: grid; gap: 10px; align-items: start;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  }
+  .sub-grid > .sub { margin-top: 0; }
   .group-title {
     display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
     font-weight: 500; margin-bottom: 6px;
   }
   label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-  label span.name { font-weight: 500; }
+  /* Level 3: field labels, discreet */
+  label span.name { font-size: 12px; font-weight: 500; color: var(--muted); }
+  .switch span.name { font-size: 14px; color: var(--text); }
   .help { color: var(--muted); font-size: 12px; }
   .notice { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
   input, select {
@@ -136,6 +161,14 @@
     /* Choices wrapped on two lines share the width evenly */
     .segmented { display: flex; width: 100%; }
     .segmented button { flex: 1 1 auto; }
+    /* Narrow screens: thinner margins, more room for the fields */
+    main { padding: 0 8px 24px; }
+    header { padding: 8px 8px 0; margin: 0 -8px 12px; }
+    .sat-body { padding: 8px; }
+    details.sat > summary { padding: 10px 8px; }
+    .sec { padding: 10px 8px; }
+    .sub { padding: 8px; }
+    .sub .segmented button { padding: 5px 6px; }
   }
   .segmented button[aria-pressed="true"] {
     background: var(--accent); color: var(--accent-text); font-weight: 500;
@@ -203,7 +236,7 @@
 "use strict";
 
 const MODES = [["none", "Aucun"], ["sound", "Son"], ["phrase", "Phrase"],
-               ["sound_then_phrase", "Son puis phrase"]];
+               ["sound_then_phrase", "Son + phrase"]];
 const BLOCKS = ["microphone", "vban_output", "media_player", "followup",
                 "waiting_sounds", "camera_phrase"];
 // Before 3.2, booleans switched announcements on/off; they set the mode when
@@ -322,15 +355,15 @@ function segmented(label, value, choices, onPick, help) {
 }
 
 function section(title, extra, ...content) {
-  return el("fieldset", {}, el("legend", {}, title, extra), ...content);
+  return el("div", { class: "sec" }, el("div", { class: "sec-title" }, title, extra), ...content);
 }
 
 const grid = (...fields) => el("div", { class: "grid" }, fields);
 
-/* A titled group inside a section (one per announcement), with an optional
-   test button. */
+/* A titled part of a section (one per announcement), with an optional
+   test button on its title line. */
 function group(title, test, ...content) {
-  return el("div", { class: "group" }, el("div", { class: "group-title" }, title, test), ...content);
+  return el("div", { class: "sub" }, el("div", { class: "sub-title" }, title, test), ...content);
 }
 
 /* Effective announcement mode, considering the pre-3.2 booleans. */
@@ -426,7 +459,7 @@ function outputSection(sat, index) {
         field(mp, "http_host", { label: "Hôte HTTP", help: "Vide = détection automatique" }),
         field(vban, "enabled", { label: "Secours VBAN", type: "switch", rerender: true,
               wide: true, help: "si le media player ne répond pas" })),
-      vban.enabled && el("div", { class: "group" }, vbanOutputFields(vban)),
+      vban.enabled && group("Enceinte VBAN de secours", null, vbanOutputFields(vban)),
     ],
     output === "none" && el("p", { class: "notice" },
       "Sans sortie, le satellite ne parle pas : les réponses ne sont jouées nulle part."));
@@ -460,7 +493,7 @@ function followupSection(sat, output) {
   return section("Relance sans mot-clé", null,
     grid(field(fu, "enabled", { label: "Activée", type: "switch", def: true, rerender: true,
                 wide: true, help: "écouter la réponse quand Jarvis pose une question" })),
-    on && el("div", { class: "group" }, grid(
+    on && el("div", { class: "sub" }, grid(
       field(fu, "timeout_s", { label: "Délai sans parole (s)", type: "number",
             min: 3, max: 30, placeholder: "8" }),
       el("div", { class: "wide group-title" },
@@ -480,7 +513,7 @@ function announcementsSection(sat, output) {
     return section("Annonces d'attente", null,
       el("p", { class: "notice" }, "Sans sortie, aucune annonce n'est jouée."));
   }
-  return section("Annonces d'attente", null,
+  return section("Annonces d'attente", null, el("div", { class: "sub-grid" },
     group("Fin d'écoute", test("listen_end", listenEnd),
       segmented(null, listenEnd, [["none", "Aucun"], ["sound", "Bip"]],
                 (value) => { ws.listen_end_mode = value; changed(true); },
@@ -514,7 +547,7 @@ function announcementsSection(sat, output) {
               help: "Fichier WAV dans /share (pas de son intégré)" }))),
     anyPhrase && group("Voix des phrases de ce satellite", null, grid(
       field(cam, "tts_engine", { label: "Moteur TTS", help: "Vide = réglage général" }),
-      field(cam, "tts_voice", { label: "Voix", help: "Vide = réglage général" }))));
+      field(cam, "tts_voice", { label: "Voix", help: "Vide = réglage général" })))));
 }
 
 function summaryInfo(sat) {
@@ -543,8 +576,8 @@ function satelliteCard(sat, index) {
                 help: "Unique par satellite (10700, 10701…)" }))),
         microphoneSection(sat.microphone),
         outputSection(sat, index),
-        followupSection(sat, output),
-        announcementsSection(sat, output)),
+        followupSection(sat, output)),
+      announcementsSection(sat, output),
       legacy && el("p", { class: "notice" },
         "Anciens réglages des annonces (avant 3.2) : ils seront convertis en modes à l'enregistrement."),
       el("div", { class: "card-actions" },

@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.5.3
+
+- **Configuration interface — clearer layout**:
+  - Three visual levels: each satellite section is a card (Général, Micro, Sortie des réponses, Relance), each part of a section a sub-card (each announcement, the VBAN fallback speaker), and field labels are smaller and discreet, so it's clear which settings go together.
+  - Announcements: one sub-card per signal (end of listening, thinking, internet search, camera look, phrase voice) with its title and Test button on one line, its mode, then its own fields; shown full width under the other sections, side by side as the width allows.
+  - Mode buttons fit on one line (shorter "Son + phrase"), down to phone width; thinner margins on phones.
+
 ## 3.5.2
 
 - **Fix**: after an update, the configuration interface could still show the previous version (page cached by the browser). The page is now sent with `Cache-Control: no-cache, no-store`, so a new version shows at once.
