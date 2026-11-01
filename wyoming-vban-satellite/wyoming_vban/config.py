@@ -17,6 +17,7 @@ DEFAULT_TTS_ENGINE = "tts.piper"
 DEFAULT_TTS_VOICE = "fr_FR-siwis-medium"
 
 MIC_SOURCES = ("vban", "rtsp")
+NOISE_SUPPRESSION_LEVELS = ("off", "light", "medium", "strong")
 
 # Announcement modes (waiting_sounds.*_mode, camera_phrase.mode)
 ANNOUNCEMENT_MODES = ("none", "sound", "phrase", "sound_then_phrase")
@@ -30,6 +31,8 @@ OPTION_BLOCKS: dict[str, dict[str, str]] = {
         "source": "mic_source",
         "rtsp_url": "rtsp_url",
         "rtsp_transport": "rtsp_transport",
+        "noise_suppression": "mic_noise_suppression",
+        "auto_gain": "mic_auto_gain",
         "vban_port": "vban_receive_port",
         "vban_mode": "vban_receive_mode",
         "multicast_group": "vban_receive_multicast_group",
@@ -119,6 +122,10 @@ class SatelliteConfig:
     mic_source: str = "vban"
     rtsp_url: str = ""
     rtsp_transport: str = "tcp"
+    # Clean-up before sending to HA: off | light | medium | strong, and
+    # automatic gain (DC offset removal is always on)
+    mic_noise_suppression: str = "off"
+    mic_auto_gain: bool = False
     tts_vban_enabled: bool = False
     tts_vban_mode: str = "unicast"
     tts_vban_address: str = ""
@@ -181,6 +188,12 @@ class SatelliteConfig:
         self.rtsp_url = self.rtsp_url.strip()
         if self.rtsp_transport not in ("tcp", "udp"):
             self.rtsp_transport = "tcp"
+        if self.mic_noise_suppression not in NOISE_SUPPRESSION_LEVELS:
+            _LOGGER.warning(
+                "[%s] microphone.noise_suppression '%s' unknown (%s): using off",
+                self.name, self.mic_noise_suppression, ", ".join(NOISE_SUPPRESSION_LEVELS),
+            )
+            self.mic_noise_suppression = "off"
         # The multicast group is only used in multicast mode (and optional
         # in the schema): ignore a leftover value in unicast mode.
         self.vban_receive_multicast_group = (

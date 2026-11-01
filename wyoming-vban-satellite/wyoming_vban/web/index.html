@@ -484,7 +484,14 @@ function microphoneSection(mic) {
           field(mic, "vban_mode", { label: "Mode", type: "select", def: "unicast", rerender: true,
                 choices: [["unicast", "Unicast"], ["multicast", "Multicast"]] }),
           mic.vban_mode === "multicast" && field(mic, "multicast_group", {
-                label: "Groupe multicast", placeholder: "239.0.0.1", required: true })));
+                label: "Groupe multicast", placeholder: "239.0.0.1", required: true })),
+    group("Nettoyage du son", null,
+      segmented("Réduction de bruit", mic.noise_suppression || "off",
+        [["off", "Aucune"], ["light", "Légère"], ["medium", "Moyenne"], ["strong", "Forte"]],
+        (value) => { mic.noise_suppression = value; changed(true); },
+        "atténue le bruit de fond stable (PC, frigo), appris pendant les moments calmes"),
+      grid(field(mic, "auto_gain", { label: "Gain automatique", type: "switch", wide: true,
+                 help: "ramène la voix à un niveau régulier" }))));
 }
 
 function followupSection(sat, output) {
@@ -703,7 +710,10 @@ function levelStats(sat) {
   return el("div", { class: "help" },
     `10 dernières s : bruit de fond ${db(sat.noise_floor_db)} · pic ${db(sat.peak_db)} · écart ${gap.toFixed(0)} dB`,
     sat.dc_offset_db > -40
-      ? el("div", {}, `décalage continu ${db(sat.dc_offset_db)} (inaudible, retiré de la mesure)`)
+      ? el("div", {}, `décalage continu ${db(sat.dc_offset_db)} (inaudible, retiré)`)
+      : null,
+    sat.filtered_noise_floor_db !== null && sat.filtered_noise_floor_db !== undefined
+      ? el("div", {}, `après nettoyage : bruit de fond ${db(sat.filtered_noise_floor_db)}`)
       : null);
 }
 

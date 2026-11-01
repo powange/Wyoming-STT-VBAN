@@ -25,6 +25,12 @@ configuration:
           rtsp_transport:
             name: RTSP transport
             description: tcp (default) or udp
+          noise_suppression:
+            name: Noise suppression
+            description: 'off (default), light, medium or strong: attenuates steady background noise (computer fan, fridge) learned during quiet moments'
+          auto_gain:
+            name: Automatic gain
+            description: Brings the voice to a steady level (default off)
           vban_port:
             name: VBAN port
             description: UDP port receiving the microphone stream (several satellites can share it); only with source vban

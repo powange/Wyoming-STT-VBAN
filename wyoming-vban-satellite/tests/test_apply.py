@@ -93,6 +93,19 @@ class ApplyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(salon.cues.thinking_delay_s, 2.5)
         self.assertIsNotNone(salon.cues.listen_end)
 
+    async def test_mic_clean_up_applied_live(self) -> None:
+        before = self.tasks()
+
+        def change(o):
+            o["satellites"][1]["microphone"]["noise_suppression"] = "medium"
+            o["satellites"][1]["microphone"]["auto_gain"] = True
+        done = await self.apply(change)
+        self.assertEqual(done, ["satellite 'Salon' updated without restart"])
+        self.assertEqual(self.tasks(), before)
+        mic_filter = self.runtime.runners["Salon"].mic_filter
+        self.assertEqual((mic_filter.noise_suppression, mic_filter.auto_gain), ("medium", True))
+        self.assertTrue(mic_filter.active)
+
     async def test_restart_field_restarts_only_that_satellite(self) -> None:
         before = self.tasks()
         new_port = _free_port()

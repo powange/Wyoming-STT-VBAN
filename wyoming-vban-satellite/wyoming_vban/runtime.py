@@ -23,6 +23,7 @@ from .config import (
     validate_mirrors,
 )
 from .ha_ws import HaStateWatcher
+from .mic_filter import MicFilter
 from .mirror import SatelliteMirrors
 from .media_player import MediaPlayerOutput, build_wav, detect_local_ip
 from .satellite import (
@@ -226,6 +227,7 @@ class SatelliteRunner:
             enabled=cfg.followup_enabled, beep=cfg.followup_beep,
             timeout_s=cfg.followup_timeout_s,
         )
+        self.mic_filter = MicFilter(cfg.mic_noise_suppression, cfg.mic_auto_gain)
         self.handlers: weakref.WeakSet[VbanSatelliteHandler] = weakref.WeakSet()
         self.task: Optional[asyncio.Task] = None
         # Microphone level from the received VBAN packets
@@ -345,6 +347,7 @@ class SatelliteRunner:
                 exchange_publisher=self.publisher,
                 satellite_name=cfg.name,
                 mic_label="RTSP" if self.rtsp is not None else "VBAN",
+                mic_filter=self.mic_filter,
                 waiting_cues=self.cues,
                 debug_mirrors=self.mirrors,
             )
@@ -410,6 +413,10 @@ class SatelliteRunner:
             cfg.search_mode, cfg.vision_mode,
         )
         _LOGGER.info(
+            "  Microphone clean-up: noise suppression %s, auto gain %s",
+            cfg.mic_noise_suppression, "on" if cfg.mic_auto_gain else "off",
+        )
+        _LOGGER.info(
             "  Follow-up without wake word: %s",
             f"on (beep={'on' if cfg.followup_beep else 'off'}, "
             f"timeout={cfg.followup_timeout_s}s)" if cfg.followup_enabled else "off",
@@ -431,6 +438,7 @@ class SatelliteRunner:
             self.media_output.entity_id = cfg.tts_media_player
         if self.mic_mute is not None:
             self.mic_mute.tail_s = cfg.mic_mute_tail_ms / 1000
+        self.mic_filter.configure(cfg.mic_noise_suppression, cfg.mic_auto_gain)
         self.followup.beep = cfg.followup_beep
         self.followup.timeout_s = cfg.followup_timeout_s
         # Handlers hold this object: change its content
@@ -485,6 +493,10 @@ class SatelliteRunner:
             "noise_floor_db": round(levels[len(levels) // 10], 1) if levels else None,
             "peak_db": round(levels[-1], 1) if levels else None,
             "dc_offset_db": round(_db(dc), 1) if self._levels else None,
+            # Background noise after noise suppression / auto gain (if on)
+            "filtered_noise_floor_db": (
+                self.mic_filter.noise_floor_db() if self.mic_filter.active else None
+            ),
             "last_packet_s": round(now - self.last_packet_at, 1) if self.last_packet_at else None,
             "output": self.cfg.tts_output,
         }

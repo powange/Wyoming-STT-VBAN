@@ -114,6 +114,15 @@ def parse_args() -> argparse.Namespace:
         help="Back to the wake word if no speech within this time (3-30)",
     )
 
+    # Microphone clean-up
+    parser.add_argument(
+        "--mic-noise-suppression", choices=["off", "light", "medium", "strong"], default="off",
+    )
+    parser.add_argument("--mic-auto-gain", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--mic-source", choices=["vban", "rtsp"], default="vban")
+    parser.add_argument("--rtsp-url", default="", help="Camera stream (with --mic-source rtsp)")
+    parser.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
+
     # Announcements while the response is prepared. Modes: none, sound,
     # phrase, sound_then_phrase ("" = default)
     parser.add_argument("--listen-end-mode", default="none", help="none or sound")

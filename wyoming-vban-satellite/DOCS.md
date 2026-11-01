@@ -99,6 +99,16 @@ seconds`, `RTSP audio resumed`. With an empty `rtsp_url`, that satellite
 doesn't start (error in the log); the others do. The VBAN fields are
 ignored with source `rtsp`.
 
+Microphone clean-up (any source), applied before the audio is sent to Home
+Assistant (and to the wake word):
+
+- **noise_suppression**: `off` (default), `light`, `medium` or `strong` (at most 6, 15 or 25 dB less noise). Learns the background noise during the quiet moments of the last seconds and attenuates it band by band: works on steady noise (computer fan, fridge, hiss), not on TV or other voices. Start with `light` or `medium`: too strong a setting makes the voice sound "metallic" and can hurt recognition.
+- **auto_gain**: brings the voice to a steady level (default off).
+- The DC offset (a constant shift of ESP32 microphones, inaudible) is always removed.
+
+The status tab shows the background noise before and after clean-up; a
+`mic_sent` debug copy lets you listen to the result.
+
 VBAN source:
 
 - **vban_port**: UDP port to listen on (e.g. 6980)

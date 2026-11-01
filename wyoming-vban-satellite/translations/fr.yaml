@@ -25,6 +25,12 @@ configuration:
           rtsp_transport:
             name: Transport RTSP
             description: tcp (defaut) ou udp
+          noise_suppression:
+            name: Reduction de bruit
+            description: 'off (defaut), light, medium ou strong : attenue le bruit de fond stable (ventilateur de PC, frigo) appris pendant les moments calmes'
+          auto_gain:
+            name: Gain automatique
+            description: Ramene la voix a un niveau regulier (desactive par defaut)
           vban_port:
             name: Port VBAN
             description: Port UDP qui recoit le flux du micro (partageable entre satellites) ; seulement avec la source vban

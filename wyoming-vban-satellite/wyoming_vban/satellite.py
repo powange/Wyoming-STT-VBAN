@@ -32,6 +32,7 @@ from .media_player import MediaPlayerOutput, build_wav
 from .vban import VbanPacket, VbanReceiver, VbanSender, resample_to_wyoming
 
 if TYPE_CHECKING:
+    from .mic_filter import MicFilter
     from .mirror import SatelliteMirrors
     from .tts_phrase import TtsPhrase
 
@@ -277,6 +278,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         exchange_publisher: Optional[HaStateWatcher] = None,
         satellite_name: str = "",
         mic_label: str = "VBAN",
+        mic_filter: Optional["MicFilter"] = None,
         waiting_cues: Optional[WaitingCues] = None,
         debug_mirrors: Optional["SatelliteMirrors"] = None,
     ):
@@ -310,6 +312,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._exchange_publisher = exchange_publisher
         self._satellite_name = satellite_name
         self._mic_label = mic_label  # microphone source in logs (VBAN, RTSP)
+        # Microphone clean-up (DC offset, noise suppression, auto gain);
+        # shared by the satellite's connections
+        self._mic_filter = mic_filter
         self._last_transcript = ""
         self._last_transcript_at = 0.0
 
@@ -1154,6 +1159,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     self._queue_full_logged = False
 
                 timeouts = 0
+                if self._mic_filter is not None:
+                    pcm = self._mic_filter.process(pcm)
                 audio_buffer.extend(pcm)
 
                 # Send when we have enough data

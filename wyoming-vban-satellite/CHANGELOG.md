@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.6.0
+
+- **New**: microphone clean-up, per satellite (`microphone` block), applied before the audio reaches Home Assistant and the wake word:
+  - `noise_suppression`: `off` (default), `light`, `medium`, `strong` (Speex: learns the steady background noise — computer fan, fridge — during quiet moments and attenuates it by up to 6, 15 or 25 dB, voice kept);
+  - `auto_gain`: brings the voice to a steady level (default off);
+  - the DC offset (constant shift of ESP32 microphones) is now always removed.
+- Applied live from the configuration interface (no restart); the status tab shows the background noise after clean-up next to the raw one; `mic_sent` debug copies carry the cleaned audio.
+- New dependency: pyspeex-noise (compiled at build time on Alpine; the compiler is removed afterwards).
+- Fix: running a single satellite from the command line failed since 3.5.0 (missing `--mic-source`, `--rtsp-url`, `--rtsp-transport` arguments).
+
 ## 3.5.4
 
 - **Status panel — reliable microphone levels**: the level no longer includes the DC offset (a constant shift, common on ESP32 microphones, that isn't heard and inflated the reading). Each satellite now also shows, over the last 10 s, its **background noise** (quietest moments), its **peak** (e.g. a voice) and the **gap** between them, plus the DC offset when it is significant. The gap between voice and background is what matters for the wake word and transcription.
