@@ -501,6 +501,7 @@ class SatelliteRunner:
             "filtered_noise_floor_db": (
                 self.mic_filter.noise_floor_db() if self.mic_filter.active else None
             ),
+            "filter_bypassed": self.mic_filter.bypassed,
             "last_packet_s": round(now - self.last_packet_at, 1) if self.last_packet_at else None,
             "output": self.cfg.tts_output,
         }

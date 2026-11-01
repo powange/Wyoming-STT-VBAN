@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.6.2
+
+- **Fix**: automatic gain made the satellite deaf — the cleaned audio was silence (-90 dB) as soon as `auto_gain` was on. pyspeex-noise 2.0.1's automatic gain outputs silence (it hands Speex its target level with the wrong type); it is no longer used. The app has its own automatic gain: speech brought to about -18 dB (gain -12 to +20 dB), adjusted only while speaking (background noise isn't boosted), rising slowly and dropping fast. Speex is still used for noise suppression.
+- Safety net: if the clean-up outputs silence for 3 s while the microphone receives sound, it is bypassed (raw audio sent to Home Assistant), with an error in the log and a warning in the status tab.
+
 ## 3.6.1
 
 - **Status panel**: when microphone clean-up is on, a second level meter (green, "Nettoyé") shows the cleaned audio right under the raw one ("Brut"), each with its value; the cleaned background noise is shown next to the raw one in the 10 s statistics.

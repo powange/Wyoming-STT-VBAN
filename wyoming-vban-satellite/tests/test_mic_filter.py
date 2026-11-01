@@ -63,6 +63,52 @@ class MicFilterTest(unittest.TestCase):
         out = run(filter_, voice)
         self.assertLess(abs(db(voice[RATE:]) - db(out[RATE // 2:])), 3)
 
+    def speech(self, seconds: int, amplitude: float) -> bytes:
+        """Half a second of "voice" (a tone), half a second of background."""
+        parts = []
+        for i in range(seconds * 2):
+            part = noise(0.5, 100, seed=i)
+            if i % 2 == 0:
+                part = mix(part, tone(0.5, amplitude))
+            parts.append(part)
+        return b"".join(parts)
+
+    def voice_level(self, out: bytes) -> float:
+        """Level of the last voice half-second."""
+        half = RATE // 2 * 2
+        return db(out[-2 * half:-half])
+
+    def test_auto_gain_raises_a_quiet_voice(self) -> None:
+        out = run(MicFilter(auto_gain=True), self.speech(8, 500))  # about -39 dB
+        self.assertAlmostEqual(self.voice_level(out), -18, delta=3)
+
+    def test_auto_gain_lowers_a_loud_voice(self) -> None:
+        out = run(MicFilter(auto_gain=True), self.speech(4, 20000))  # about -4 dB
+        self.assertAlmostEqual(self.voice_level(out), -16, delta=3)  # max -12 dB gain
+
+    def test_auto_gain_does_not_boost_background(self) -> None:
+        pcm = noise(4, 100)
+        out = run(MicFilter(auto_gain=True), pcm)
+        self.assertAlmostEqual(db(out[-RATE:]), db(pcm[-RATE:]), delta=1)
+
+    def test_auto_gain_with_noise_suppression_is_not_silent(self) -> None:
+        # pyspeex-noise's own automatic gain outputs silence: not used
+        out = run(MicFilter("medium", auto_gain=True), self.speech(8, 500))
+        self.assertGreater(self.voice_level(out), -25)
+
+    def test_silent_output_is_bypassed(self) -> None:
+        class Broken:  # e.g. pyspeex-noise's own automatic gain
+            def process_10ms(self, frame):
+                return bytes(len(frame))
+
+        filter_ = MicFilter("medium")
+        filter_._speex = Broken()
+        pcm = self.speech(5, 3000)
+        with self.assertLogs("wyoming_vban.mic_filter", "ERROR"):
+            out = run(filter_, pcm)
+        self.assertTrue(filter_.bypassed)
+        self.assertGreater(db(out[-2 * RATE:]), -40)  # last second: the voice gets through
+
     def test_output_cut_in_10ms_frames(self) -> None:
         filter_ = MicFilter("light", auto_gain=True)
         pcm = noise(1, 300)

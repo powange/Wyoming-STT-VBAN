@@ -748,6 +748,8 @@ function renderStatus(status) {
         meterRow(cleaned ? "Brut" : "Micro", receiving ? sat.mic_level_db : null),
         cleaned && meterRow("Nettoyé", receiving ? sat.filtered_level_db : null, true)),
       el("div", { class: "help" }, `${audio}sortie ${out}`),
+      sat.filter_bypassed && el("div", { class: "status-line" }, dot(false),
+        "Nettoyage contourné : il rendait le micro muet (son brut envoyé, voir le journal)"),
       levelStats(sat));
   });
   const phrases = status.phrases.map((p) =>
