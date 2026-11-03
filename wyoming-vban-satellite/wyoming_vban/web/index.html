@@ -212,6 +212,26 @@
   .exchanges li:first-child { border-top: 0; }
   .exchanges .meta { color: var(--muted); font-size: 12px; }
   h2 { font-size: 15px; margin: 0 0 8px; }
+
+  /* Calibration tab */
+  .calib { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); align-items: start; }
+  .vu { display: grid; grid-template-columns: minmax(110px, auto) 1fr; gap: 6px 12px; align-items: center; margin: 8px 0; }
+  .vu .bar { position: relative; height: 14px; border-radius: 4px; background: var(--border); overflow: hidden; }
+  .vu .bar > .rms { height: 100%; background: var(--accent); transition: width .08s; }
+  .vu .bar > .rms.after { background: var(--ok); }
+  .vu .bar > .peak { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); }
+  .vu .bar > .target { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--muted); opacity: .7; }
+  .vu .bar.clipping { box-shadow: 0 0 0 2px var(--danger); }
+  .vu .nums { grid-column: 2; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: -4px; }
+  .steps { display: grid; gap: 10px; }
+  .phrase { font-size: 17px; line-height: 1.5; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--section); border-radius: 4px; }
+  .results { width: 100%; border-collapse: collapse; margin: 8px 0; }
+  .results td { padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .results td:last-child { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
+  .advice { margin: 8px 0 0; padding-left: 18px; }
+  .advice li { margin: 4px 0; }
+  .countdown { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent); }
+  .row-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -230,12 +250,14 @@
     <nav class="tabs" role="tablist">
       <button class="tab" role="tab" data-tab="status">État</button>
       <button class="tab" role="tab" data-tab="satellites">Satellites</button>
+      <button class="tab" role="tab" data-tab="calibration">Calibrage</button>
       <button class="tab" role="tab" data-tab="general">Général</button>
     </nav>
     <p id="message" role="status"></p>
   </header>
   <section id="tab-status" role="tabpanel"></section>
   <section id="tab-satellites" role="tabpanel" hidden></section>
+  <section id="tab-calibration" role="tabpanel" hidden></section>
   <section id="tab-general" role="tabpanel" hidden></section>
 </main>
 <script>
@@ -259,6 +281,7 @@ let currentTab = "satellites";
 const openSatellites = new Set(); // indexes of expanded satellite cards
 
 const panels = {
+  calibration: document.getElementById("tab-calibration"),
   status: document.getElementById("tab-status"),
   satellites: document.getElementById("tab-satellites"),
   general: document.getElementById("tab-general"),
@@ -282,8 +305,10 @@ function setDirty() {
   revertButton.disabled = !dirty;
   for (const tab of document.querySelectorAll(".tab")) {
     const name = tab.dataset.tab;
-    const label = { status: "État", satellites: "Satellites", general: "Général" }[name];
-    tab.replaceChildren(label, dirty && name !== "status" ? el("span", { class: "dirty" }, " •") : "");
+    const label = { status: "État", satellites: "Satellites", calibration: "Calibrage",
+                    general: "Général" }[name];
+    const marked = dirty && (name === "satellites" || name === "general");
+    tab.replaceChildren(label, marked ? el("span", { class: "dirty" }, " •") : "");
   }
   if (dirty) say("Modifications non enregistrées.");
 }
@@ -496,8 +521,11 @@ function microphoneSection(mic) {
         [["off", "Aucune"], ["light", "Légère"], ["medium", "Moyenne"], ["strong", "Forte"]],
         (value) => { mic.noise_suppression = value; changed(true); },
         "atténue le bruit de fond stable (PC, frigo), appris pendant les moments calmes"),
-      grid(field(mic, "auto_gain", { label: "Gain automatique", type: "switch", wide: true,
-                 help: "ramène la voix à un niveau régulier" }))));
+      grid(
+        field(mic, "volume", { label: "Volume du micro", type: "number", min: 0.1, max: 10,
+              step: 0.05, placeholder: "1.0", help: "gain fixe, 0,1 à 10 (voir l'onglet Calibrage)" }),
+        field(mic, "auto_gain", { label: "Gain automatique", type: "switch", wide: true,
+              help: "ramène la voix à un niveau régulier" }))));
 }
 
 function followupSection(sat, output) {
@@ -787,6 +815,230 @@ async function refreshStatus() {
   }
 }
 
+/* Calibration tab */
+
+const CALIB_PHRASE = "Dis-moi Jarvis, allume la lumière du salon, règle le chauffage à vingt " +
+                     "degrés, puis dis-moi quel temps il fera demain matin.";
+const calib = { satellite: null, source: null, poll: null, result: null, noise: null,
+                busy: false, audio: null };
+
+function vuRow(label, stats, after) {
+  const pos = (db) => Math.max(0, Math.min(100, (db + 70) / 70 * 100));
+  const rms = stats ? pos(stats.rms_db) : 0;
+  const peak = stats ? pos(stats.peak_db) : 0;
+  const clipping = stats && stats.clip_pct > 0;
+  return [
+    el("span", { class: "name" }, label),
+    el("div", { class: `bar${clipping ? " clipping" : ""}` },
+      el("div", { class: `rms${after ? " after" : ""}`, style: `width: ${rms}%` }),
+      el("div", { class: "target", style: `left: ${pos(-20)}%`, title: "cible voix −20 dBFS" }),
+      stats && el("div", { class: "peak", style: `left: calc(${peak}% - 1px)` })),
+    el("span", { class: "nums" }, stats
+      ? `RMS ${stats.rms_db.toFixed(0)} dBFS · crête ${stats.peak_db.toFixed(0)} dBFS · écrêtage ${stats.clip_pct.toFixed(1)} %`
+      : after ? "pas de mesure (Home Assistant n'écoute pas ce satellite)" : "aucun audio reçu"),
+  ];
+}
+
+function renderVu(data) {
+  const box = document.getElementById("calib-vu");
+  if (!box) return;
+  box.replaceChildren(
+    ...vuRow("Avant traitement", data.before, false),
+    ...vuRow("Après (envoyé à HA)", data.after, true));
+  const volume = document.getElementById("calib-volume");
+  if (volume) volume.textContent = `Volume du micro actuel : ${data.volume.toFixed(2)}`;
+}
+
+function stopMeter() {
+  if (calib.source) { calib.source.close(); calib.source = null; }
+  if (calib.poll) { clearInterval(calib.poll); calib.poll = null; }
+}
+
+function startMeter() {
+  stopMeter();
+  if (!calib.satellite) return;
+  const query = `satellite=${encodeURIComponent(calib.satellite)}`;
+  const poll = () => {
+    calib.poll = setInterval(async () => {
+      try {
+        const resp = await fetch(`api/meter/once?${query}`);
+        if (resp.ok) renderVu(await resp.json());
+      } catch (err) { /* next tick */ }
+    }, 100);
+  };
+  if (window.EventSource) {
+    calib.source = new EventSource(`api/meter?${query}`);
+    calib.source.onmessage = (event) => renderVu(JSON.parse(event.data));
+    calib.source.onerror = () => { stopMeter(); poll(); }; // e.g. proxy buffering
+  } else {
+    poll();
+  }
+}
+
+async function clearRecordings() {
+  if (calib.audio) { calib.audio.pause(); calib.audio = null; }
+  if (calib.satellite && (calib.noise || calib.result)) {
+    try {
+      await fetch(`api/calibration?satellite=${encodeURIComponent(calib.satellite)}`,
+                  { method: "DELETE" });
+    } catch (err) { /* expires anyway */ }
+  }
+  calib.noise = null;
+  calib.result = null;
+}
+
+function closeCalibration() {
+  stopMeter();
+  clearRecordings();
+}
+
+function openCalibration() {
+  const names = (saved?.satellites || []).map((s) => s.name);
+  if (!names.includes(calib.satellite)) calib.satellite = names[0] || null;
+  renderCalibration();
+  startMeter();
+}
+
+async function countdown(seconds, label) {
+  const box = document.getElementById("calib-progress");
+  for (let left = seconds; left > 0; left--) {
+    if (box) box.replaceChildren(label, " ", el("span", { class: "countdown" }, `${left} s`));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  if (box) box.textContent = "Analyse…";
+}
+
+async function recordStep(step) {
+  calib.busy = true;
+  renderCalibration();
+  const seconds = step === "noise" ? 5 : 8;
+  const request = fetch("api/calibration/record", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ satellite: calib.satellite, step }),
+  });
+  await countdown(seconds, step === "noise" ? "Silence, mesure en cours…" : "Lisez la phrase…");
+  try {
+    const resp = await request;
+    const body = await resp.json();
+    if (!resp.ok) {
+      say(body.error || `Erreur ${resp.status}`, "error");
+    } else if (step === "noise") {
+      calib.noise = body.noise;
+      calib.result = null;
+      say("");
+    } else {
+      calib.result = body;
+      say("");
+    }
+  } catch (err) {
+    say(`Erreur : ${err}`, "error");
+  }
+  calib.busy = false;
+  renderCalibration();
+}
+
+function play(which) {
+  if (calib.audio) calib.audio.pause();
+  calib.audio = new Audio(`api/calibration/audio?satellite=${encodeURIComponent(calib.satellite)}` +
+                          `&which=${which}&t=${Date.now()}`);
+  calib.audio.play().catch((err) => say(`Lecture impossible : ${err}`, "error"));
+}
+
+async function applyVolume() {
+  const volume = calib.result.proposal.volume;
+  say("Application du volume…");
+  const resp = await fetch("api/calibration/apply", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ satellite: calib.satellite, volume }),
+  });
+  const body = await resp.json();
+  if (!resp.ok) { say(body.error || `Erreur ${resp.status}`, "error"); return; }
+  calib.noise = null;
+  calib.result = null;
+  await load(); // the saved options now hold the new volume
+  say(`Volume du micro réglé à ${volume.toFixed(2)} et appliqué. Enregistrements effacés.`, "ok");
+  renderCalibration();
+}
+
+function resultsCard() {
+  const r = calib.result;
+  if (!r) return null;
+  const p = r.proposal;
+  const db = (value) => `${value.toFixed(0)} dBFS`;
+  const row = (label, value) => el("tr", {}, el("td", {}, label), el("td", {}, value));
+  return el("div", { class: "card panel" },
+    el("h2", {}, "Résultat"),
+    el("table", { class: "results" },
+      row("Bruit de fond", db(r.noise.rms_db)),
+      row("Voix (passages parlés)", db(r.voice.rms_db)),
+      row("Crête de la voix", db(r.voice.peak_db)),
+      row("Écrêtage à l'arrivée", `${r.voice.clip_pct.toFixed(2)} %`),
+      row("Rapport signal/bruit", `${p.snr_db.toFixed(0)} dB`),
+      row("Volume du micro proposé", `${p.volume.toFixed(2)} (${p.gain_db >= 0 ? "+" : ""}${p.gain_db.toFixed(1)} dB)`),
+      row("Voix après", db(p.voice_after_db)),
+      row("Crête après", db(p.peak_after_db)),
+      row("Bruit de fond après", db(p.noise_after_db))),
+    p.advice.length
+      ? el("ul", { class: "advice" }, p.advice.map((text) => el("li", {}, text)))
+      : el("p", { class: "help" }, "Niveaux corrects : aucun réglage à faire côté appareil."),
+    el("div", { class: "row-buttons" },
+      el("button", { type: "button", onclick: () => play("before") }, "▶ Écouter avant"),
+      el("button", { type: "button", onclick: () => play("after") }, "▶ Écouter après (volume proposé)"),
+      el("button", { type: "button", class: "primary", onclick: applyVolume },
+         `Appliquer le volume ${p.volume.toFixed(2)}`),
+      el("button", { type: "button", onclick: async () => {
+        await clearRecordings();
+        say("Enregistrements effacés.", "ok");
+        renderCalibration();
+      } }, "Effacer les enregistrements")));
+}
+
+function renderCalibration() {
+  const names = (saved?.satellites || []).map((s) => s.name);
+  const disabled = calib.busy || !calib.satellite;
+  const select = el("select", { disabled: calib.busy || null },
+    names.map((name) => el("option", { value: name }, name)));
+  select.value = calib.satellite || "";
+  select.addEventListener("change", async () => {
+    await clearRecordings();
+    calib.satellite = select.value;
+    renderCalibration();
+    startMeter();
+  });
+  panels.calibration.replaceChildren(el("div", { class: "calib" },
+    el("div", {},
+      el("div", { class: "card panel" },
+        el("h2", {}, "Satellite"),
+        el("label", {}, select),
+        el("p", { class: "help", id: "calib-volume" }, ""),
+        el("h2", { style: "margin-top: 12px" }, "Niveaux en direct"),
+        el("div", { class: "vu", id: "calib-vu" }, ...vuRow("Avant traitement", null, false),
+           ...vuRow("Après (envoyé à HA)", null, true)),
+        el("p", { class: "help" },
+          "Barre : niveau RMS · trait : crête · repère : cible de la voix (−20 dBFS) · " +
+          "contour rouge : écrêtage. Le calibrage ne coupe jamais le son envoyé à Home Assistant.")),
+      resultsCard()),
+    el("div", { class: "card panel steps" },
+      el("h2", {}, "Assistant de calibrage"),
+      el("div", { class: "sub" },
+        el("div", { class: "sub-title" }, "1. Bruit de fond"),
+        el("p", { class: "help" }, "Restez silencieux pendant 5 secondes, dans les conditions habituelles (PC, frigo…)."),
+        calib.noise && el("p", {}, `Bruit de fond mesuré : ${calib.noise.rms_db.toFixed(0)} dBFS`),
+        el("button", { type: "button", disabled: disabled || null,
+                       onclick: () => recordStep("noise") },
+           calib.noise ? "Mesurer à nouveau" : "Mesurer le bruit (5 s)")),
+      el("div", { class: "sub" },
+        el("div", { class: "sub-title" }, "2. Voix"),
+        el("p", { class: "help" }, "À votre distance habituelle du micro, d'une voix normale, lisez pendant 8 secondes :"),
+        el("p", { class: "phrase" }, CALIB_PHRASE),
+        el("button", { type: "button", disabled: disabled || !calib.noise || null,
+                       onclick: () => recordStep("voice") }, "Lire la phrase (8 s)")),
+      el("p", { id: "calib-progress", class: "help" }, ""),
+      el("p", { class: "help" },
+        "Les enregistrements restent en mémoire, jamais sur disque, et sont effacés " +
+        "à l'application du volume, en quittant l'onglet, ou au bout de 15 minutes."))));
+}
+
 /* Tabs */
 
 function showTab(name) {
@@ -795,9 +1047,11 @@ function showTab(name) {
     tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
   }
   for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== name;
-  document.getElementById("actions").hidden = name === "status";
+  document.getElementById("actions").hidden = name === "status" || name === "calibration";
   try { localStorage.setItem("vban-satellite-tab", name); } catch (err) { /* private mode */ }
   if (name === "status") refreshStatus();
+  if (name === "calibration") openCalibration();
+  else closeCalibration();
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
@@ -815,9 +1069,15 @@ async function load() {
     return;
   }
   saved = body.options;
+  // Fill what the editor adds anyway, so loading doesn't look like a change
+  saved.debug_mirror = saved.debug_mirror || [];
+  for (const sat of saved.satellites || []) {
+    for (const block of BLOCKS) sat[block] = sat[block] || {};
+  }
   options = JSON.parse(JSON.stringify(saved));
   if (body.version) document.getElementById("version").textContent = `v${body.version}`;
   renderConfig();
+  if (currentTab === "calibration" && !calib.busy && !calib.result) openCalibration();
   setDirty();
   say("");
 }

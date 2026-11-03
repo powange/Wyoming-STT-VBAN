@@ -119,6 +119,7 @@ def parse_args() -> argparse.Namespace:
         "--mic-noise-suppression", choices=["off", "light", "medium", "strong"], default="off",
     )
     parser.add_argument("--mic-auto-gain", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--mic-volume", type=float, default=1.0, help="Fixed gain, 0.1-10")
     parser.add_argument("--mic-source", choices=["vban", "rtsp"], default="vban")
     parser.add_argument("--rtsp-url", default="", help="Camera stream (with --mic-source rtsp)")
     parser.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")

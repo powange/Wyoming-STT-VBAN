@@ -3,6 +3,7 @@
 16 kHz mono 16-bit in and out:
 - DC offset removal (always): a constant shift, common on ESP32
   microphones, that isn't heard;
+- microphone volume: a fixed gain (set by hand or by the calibration);
 - optional noise suppression (Speex): learns the background noise during
   the quiet moments of the last seconds and attenuates it, frequency band by
   frequency band (works on steady noise: computer fan, fridge, hiss);
@@ -15,7 +16,7 @@ import collections
 import logging
 import math
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from pyspeex_noise import AudioProcessor
 
@@ -81,9 +82,12 @@ class MicFilter:
     SILENT_OUTPUT_S = 3.0
     SILENT_DB = -85.0
 
-    def __init__(self, noise_suppression: str = "off", auto_gain: bool = False):
+    def __init__(
+        self, noise_suppression: str = "off", auto_gain: bool = False, volume: float = 1.0,
+    ):
         self.noise_suppression = "off"
         self.auto_gain = False
+        self.volume = 1.0
         self._speex: Optional[AudioProcessor] = None
         self._agc: Optional[AutoGain] = None
         self._pending = bytearray()  # < 10 ms waiting for the next call
@@ -92,18 +96,25 @@ class MicFilter:
         self._dc: Optional[float] = None  # tracked mean of the signal
         # (time, level dB) of the cleaned audio, for the status panel
         self._levels: collections.deque[tuple[float, float]] = collections.deque()
-        self.configure(noise_suppression, auto_gain)
+        # Optional live meter of what is sent to HA (calibration)
+        self.output_meter: Optional[Any] = None
+        self.configure(noise_suppression, auto_gain, volume)
 
     @property
     def active(self) -> bool:
-        """Noise suppression or automatic gain is on."""
-        return self._speex is not None or self._agc is not None
+        """Volume, noise suppression or automatic gain changes the audio."""
+        return self._speex is not None or self._agc is not None or self.volume != 1.0
 
-    def configure(self, noise_suppression: str, auto_gain: bool) -> None:
-        if (noise_suppression, auto_gain) == (self.noise_suppression, self.auto_gain):
+    def configure(
+        self, noise_suppression: str, auto_gain: bool, volume: float = 1.0,
+    ) -> None:
+        if (noise_suppression, auto_gain, volume) == (
+            self.noise_suppression, self.auto_gain, self.volume
+        ):
             return
         self.noise_suppression = noise_suppression
         self.auto_gain = auto_gain
+        self.volume = volume
         level = NOISE_LEVELS.get(noise_suppression, 0)
         # Speex for noise suppression only (its automatic gain is broken)
         self._speex = AudioProcessor(0, level) if level else None
@@ -116,12 +127,21 @@ class MicFilter:
     def process(self, pcm: bytes) -> bytes:
         """Clean a chunk. With noise suppression on, up to 10 ms is held for
         the next call (the output length may differ by a frame)."""
+        out = self._process(pcm)
+        if self.output_meter is not None and out:
+            self.output_meter.add(out)
+        return out
+
+    def _process(self, pcm: bytes) -> bytes:
         if not pcm:
             return pcm
         pcm = self._remove_dc(pcm)
         if not self.active or self.bypassed:
             return pcm
         raw = pcm
+        if self.volume != 1.0:
+            # audioop.mul clips at full scale instead of wrapping around
+            pcm = audioop.mul(pcm, WYOMING_WIDTH, self.volume)
         if self._speex is not None:
             self._pending.extend(pcm)
             out = bytearray()

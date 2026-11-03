@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.7.0
+
+- **New**: **Calibrage** tab in the interface, to set each microphone's level:
+  - live vu-meter (about 10/s, Server-Sent Events with a polling fallback) before and after the app's processing: RMS and peak in dBFS, clipped samples;
+  - assistant: 5 s of background noise, then 8 s of a read sentence; signal-to-noise ratio and a proposed microphone volume (voice around −20 dBFS RMS, peaks under −3 dBFS);
+  - plain-language advice on the device gain (ESPHome `mic_gain` / `vban_sender` gain): raise it for a voice under −40 dBFS or a volume over the maximum, lower it when the audio clips on arrival; warnings for a low signal-to-noise ratio or a background raised enough to cause false wake-ups;
+  - listen to the voice before and after the proposed volume; **Apply** writes `microphone.volume` (saved and applied without restart).
+  - The audio sent to Home Assistant is never interrupted; recordings stay in memory and are deleted when applied, when leaving the tab, or after 15 minutes.
+- **New**: `microphone.volume` (0.1–10, default 1.0), a fixed gain applied before noise suppression and automatic gain. Home Assistant's *Mic volume* / *Auto gain* / *Noise suppression level* entities for Wyoming satellites have no effect on the audio (not passed to the pipeline), hence this option in the app.
+- Fix: the interface marked the configuration as modified right after loading when the debug copies list or a satellite block was missing.
+
 ## 3.6.2
 
 - **Fix**: automatic gain made the satellite deaf — the cleaned audio was silence (-90 dB) as soon as `auto_gain` was on. pyspeex-noise 2.0.1's automatic gain outputs silence (it hands Speex its target level with the wrong type); it is no longer used. The app has its own automatic gain: speech brought to about -18 dB (gain -12 to +20 dB), adjusted only while speaking (background noise isn't boosted), rising slowly and dropping fast. Speex is still used for noise suppression.

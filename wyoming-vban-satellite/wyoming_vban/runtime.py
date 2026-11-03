@@ -23,6 +23,7 @@ from .config import (
     validate_mirrors,
 )
 from .ha_ws import HaStateWatcher
+from .calibration import LevelMeter
 from .mic_filter import MicFilter
 from .mirror import SatelliteMirrors
 from .media_player import MediaPlayerOutput, build_wav, detect_local_ip
@@ -43,7 +44,7 @@ from .satellite import (
 )
 from .rtsp_source import RtspSource, mask_url
 from .tts_phrase import TtsPhrase, remove_legacy_cache, remove_stale_phrases
-from .vban import VbanPacket, VbanReceiver, VbanSender
+from .vban import VbanPacket, VbanReceiver, VbanSender, resample_to_wyoming
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -227,7 +228,13 @@ class SatelliteRunner:
             enabled=cfg.followup_enabled, beep=cfg.followup_beep,
             timeout_s=cfg.followup_timeout_s,
         )
-        self.mic_filter = MicFilter(cfg.mic_noise_suppression, cfg.mic_auto_gain)
+        self.mic_filter = MicFilter(cfg.mic_noise_suppression, cfg.mic_auto_gain, cfg.mic_volume)
+        # Calibration: live levels before / after the app's processing, and
+        # recordings (copies of the received audio, in memory)
+        self.meter_in = LevelMeter()
+        self.meter_out = LevelMeter()
+        self.mic_filter.output_meter = self.meter_out
+        self._recordings: list[bytearray] = []
         self.handlers: weakref.WeakSet[VbanSatelliteHandler] = weakref.WeakSet()
         self.task: Optional[asyncio.Task] = None
         # Microphone level from the received VBAN packets
@@ -413,8 +420,8 @@ class SatelliteRunner:
             cfg.search_mode, cfg.vision_mode,
         )
         _LOGGER.info(
-            "  Microphone clean-up: noise suppression %s, auto gain %s",
-            cfg.mic_noise_suppression, "on" if cfg.mic_auto_gain else "off",
+            "  Microphone: volume %.2f, noise suppression %s, auto gain %s",
+            cfg.mic_volume, cfg.mic_noise_suppression, "on" if cfg.mic_auto_gain else "off",
         )
         _LOGGER.info(
             "  Follow-up without wake word: %s",
@@ -438,7 +445,7 @@ class SatelliteRunner:
             self.media_output.entity_id = cfg.tts_media_player
         if self.mic_mute is not None:
             self.mic_mute.tail_s = cfg.mic_mute_tail_ms / 1000
-        self.mic_filter.configure(cfg.mic_noise_suppression, cfg.mic_auto_gain)
+        self.mic_filter.configure(cfg.mic_noise_suppression, cfg.mic_auto_gain, cfg.mic_volume)
         self.followup.beep = cfg.followup_beep
         self.followup.timeout_s = cfg.followup_timeout_s
         # Handlers hold this object: change its content
@@ -461,6 +468,10 @@ class SatelliteRunner:
         shift, common on ESP32 microphones, that isn't heard)."""
         now = time.monotonic()
         self.last_packet_at = now
+        pcm16 = resample_to_wyoming(packet.payload, packet)
+        self.meter_in.add(pcm16)
+        for recording in self._recordings:
+            recording.extend(pcm16)
         width = packet.sample_width
         payload = packet.payload[: len(packet.payload) // width * width]
         if width in (1, 2, 4) and payload:
@@ -505,6 +516,17 @@ class SatelliteRunner:
             "last_packet_s": round(now - self.last_packet_at, 1) if self.last_packet_at else None,
             "output": self.cfg.tts_output,
         }
+
+    async def record(self, seconds: float) -> bytes:
+        """Copy of the received microphone audio (16 kHz mono 16-bit) for
+        `seconds`; the stream to HA goes on."""
+        recording = bytearray()
+        self._recordings.append(recording)
+        try:
+            await asyncio.sleep(seconds)
+        finally:
+            self._recordings.remove(recording)
+        return bytes(recording)
 
     async def test(self, signal: str) -> list[str]:
         """Play an announcement (or the follow-up beep) on the outputs."""

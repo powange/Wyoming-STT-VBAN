@@ -31,6 +31,9 @@ configuration:
           auto_gain:
             name: Gain automatique
             description: Ramene la voix a un niveau regulier (desactive par defaut)
+          volume:
+            name: Volume du micro
+            description: Gain fixe applique avant la reduction de bruit et le gain automatique, 0,1 a 10 (defaut 1,0) ; l'onglet Calibrage propose une valeur
           vban_port:
             name: Port VBAN
             description: Port UDP qui recoit le flux du micro (partageable entre satellites) ; seulement avec la source vban

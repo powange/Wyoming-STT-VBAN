@@ -15,6 +15,27 @@ Use any VBAN-capable microphone on your network (VoiceMeeter, ESP32, VBAN Recept
 - **Exchanges published** as Home Assistant events (`jarvis_echange`), **debug audio copies** as VBAN streams
 - **Host networking** — full UDP multicast support in Docker
 
+## Microphone calibration
+
+The **Calibrage** tab of the app's interface sets each microphone's level so
+the wake word and the transcription get a good signal: loud enough from a
+distance, without clipping, without raising the background noise too much
+(false wake-ups).
+
+- **Live vu-meter** (about 10 times a second) before and after the app's processing: RMS and peak in dBFS, clipped samples (%).
+- **Assistant**: 5 s of silence (background noise), then a sentence read for 8 s at the usual distance (voice level, peak). Result: signal-to-noise ratio and a proposed **microphone volume** for a voice around −20 dBFS RMS with peaks under −3 dBFS.
+- **Device advice** in plain words: raise the ESPHome gain (`mic_gain` of the codec, gain of the `vban_sender`) when the voice arrives under −40 dBFS or the volume would exceed the maximum; lower it when the audio already clips on arrival. The tool doesn't change the device: that gain also affects other receivers of the raw stream.
+- **Listen** to the 8 s voice before and after the proposed volume, then **Apply**: the volume is saved in the satellite's `microphone.volume` and applied at once.
+
+The calibration never interrupts the audio sent to Home Assistant. Recordings
+stay in memory (never on disk) and are deleted when the volume is applied,
+when leaving the tab, or after 15 minutes.
+
+Note: the *Mic volume*, *Auto gain* and *Noise suppression level* entities
+that Home Assistant creates for Wyoming satellites have no effect on the
+audio (Home Assistant doesn't pass them to the pipeline). Use the app's
+`microphone.volume`, `noise_suppression` and `auto_gain` instead.
+
 ## Microphone from a camera (RTSP)
 
 A satellite's microphone can be the audio of a camera stream instead of a

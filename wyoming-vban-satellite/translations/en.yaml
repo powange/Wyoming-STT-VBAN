@@ -31,6 +31,9 @@ configuration:
           auto_gain:
             name: Automatic gain
             description: Brings the voice to a steady level (default off)
+          volume:
+            name: Microphone volume
+            description: Fixed gain applied before noise suppression and automatic gain, 0.1-10 (default 1.0); the Calibration tab proposes a value
           vban_port:
             name: VBAN port
             description: UDP port receiving the microphone stream (several satellites can share it); only with source vban
