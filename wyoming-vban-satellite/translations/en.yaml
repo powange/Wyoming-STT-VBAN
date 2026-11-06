@@ -34,6 +34,12 @@ configuration:
           volume:
             name: Microphone volume
             description: Fixed gain applied before noise suppression and automatic gain, 0.1-10 (default 1.0); the Calibration tab proposes a value
+          auto_gain_target_db:
+            name: Automatic gain target
+            description: Voice level aimed at by the automatic gain, -31 to -3 dBFS (default -18); the Calibration tab proposes a value
+          follow_ha_entities:
+            name: Follow Home Assistant entities
+            description: The satellite's Mic volume, Auto gain and Noise suppression level entities in Home Assistant replace the three settings above (default off)
           vban_port:
             name: VBAN port
             description: UDP port receiving the microphone stream (several satellites can share it); only with source vban

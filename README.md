@@ -25,16 +25,49 @@ distance, without clipping, without raising the background noise too much
 - **Live vu-meter** (about 10 times a second) before and after the app's processing: RMS and peak in dBFS, clipped samples (%).
 - **Assistant**: 5 s of silence (background noise), then a sentence read for 8 s at the usual distance (voice level, peak). Result: signal-to-noise ratio and a proposed **microphone volume** for a voice around −20 dBFS RMS with peaks under −3 dBFS.
 - **Device advice** in plain words: raise the ESPHome gain (`mic_gain` of the codec, gain of the `vban_sender`) when the voice arrives under −40 dBFS or the volume would exceed the maximum; lower it when the audio already clips on arrival. The tool doesn't change the device: that gain also affects other receivers of the raw stream.
-- **Listen** to the 8 s voice before and after the proposed volume, then **Apply**: the volume is saved in the satellite's `microphone.volume` and applied at once.
+- **Listen** to the 8 s voice before and after the proposed volume, then **Apply**.
+- **A. Noise suppression**: the sentence is replayed offline through each level (off, light, medium, strong) with the proposed volume. A table shows the background left, the voice level and the voice/noise ratio for each, with a listen button per level. Proposed: the weakest level bringing the background under −55 dBFS or gaining 6 dB on that ratio (off if none gains more than 3 dB). A level lowering the voice by more than 3 dB is flagged and left out.
+- **B. Automatic gain**: two 6 s takes of the sentence, near the microphone (≈ 50 cm) then far (≈ 3 m). A gap over 10 dB proposes the auto gain, aiming at the near voice (bounded to −24…−14 dBFS); otherwise the fixed volume is enough. Warning when the far voice would stay under −45 dBFS even with the +20 dB of the auto gain. Listen before / after for both takes.
+- **C. Wake word test**: say "Dis-moi Jarvis" 5 times in 20 s. The audio, processed with the current then with the proposed settings, is sent to the openWakeWord app (`core-openwakeword:10400`, model `dis_moi_jarvis-6` by default, chosen from the models it offers) over its own Wyoming connection, never through Home Assistant's pipeline: the assistant doesn't wake up. Result side by side, e.g. "current 3/5, proposed 5/5". openWakeWord sends no confidence score, only detections.
+- **Summary** of the whole proposal with an **Apply all** button. Each step also has its own **Apply**.
 
-The calibration never interrupts the audio sent to Home Assistant. Recordings
-stay in memory (never on disk) and are deleted when the volume is applied,
-when leaving the tab, or after 15 minutes.
+**Apply** writes to the app's configuration (`microphone.volume`,
+`noise_suppression`, `auto_gain`, `auto_gain_target_db`, applied without
+restart), or to the satellite's Home Assistant entities when it follows them
+(see below).
 
-Note: the *Mic volume*, *Auto gain* and *Noise suppression level* entities
-that Home Assistant creates for Wyoming satellites have no effect on the
-audio (Home Assistant doesn't pass them to the pipeline). Use the app's
-`microphone.volume`, `noise_suppression` and `auto_gain` instead.
+The calibration never interrupts the audio sent to Home Assistant; the
+offline processing runs apart from the live stream. Recordings stay in
+memory (never on disk): a step's recordings are deleted when it is applied,
+all of them with **Apply all**, when leaving the tab, or after 15 minutes.
+The wake word test take isn't kept.
+
+## Home Assistant microphone entities
+
+Home Assistant creates *Mic volume*, *Auto gain* and *Noise suppression
+level* entities for each Wyoming satellite, but doesn't pass them to the
+pipeline (only ESPHome satellites get them): on their own, they have no
+effect on the audio. With **`microphone.follow_ha_entities: true`** (off by
+default), the app applies them itself, live, to its own clean-up:
+
+| HA entity | App setting |
+|---|---|
+| Mic volume (0.1–10) | `volume`, same value |
+| Noise suppression `off` / `low` / `medium` / `high` / `max` | `off` / `light` / `medium` / `strong` / `strong` |
+| Auto gain `0` | auto gain off |
+| Auto gain `1`–`31` | auto gain on, aiming at −N dBFS (bounded to −31…−3) |
+
+The entities are found through Home Assistant's registries (the Wyoming
+device named like the satellite, then its entities by `unique_id`), so
+renaming them doesn't matter. Unknown / unavailable states are ignored; if
+Home Assistant can't be reached, the last values stay (or the app's settings
+if none were ever read) and the app retries. The interface then shows the
+three settings read-only ("piloté par Home Assistant"), and the status tab
+shows where the settings come from and when they were last synchronized.
+
+If Home Assistant one day passes these settings to the pipeline of Wyoming
+satellites, the processing would be applied twice (by the app, then by Home
+Assistant): turn the option off then.
 
 ## Microphone from a camera (RTSP)
 

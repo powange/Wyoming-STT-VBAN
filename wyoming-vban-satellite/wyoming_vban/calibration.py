@@ -1,4 +1,5 @@
-"""Microphone calibration: live levels, noise/voice analysis, volume proposal.
+"""Microphone calibration: live levels, noise/voice analysis, then
+proposals for the volume, the noise suppression level and the auto gain.
 
 Everything works on copies of the audio (16 kHz mono 16-bit): the stream
 sent to Home Assistant is never interrupted. Recordings stay in memory.
@@ -12,8 +13,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .config import MIC_VOLUME_RANGE
+from .config import MIC_VOLUME_RANGE, NOISE_SUPPRESSION_LEVELS
 from .const import WYOMING_RATE, WYOMING_WIDTH
+from .mic_filter import AutoGain, MicFilter
 
 FULL_SCALE = 32768
 CLIP_THRESHOLD = 32700  # |sample| at or above: clipped
@@ -25,6 +27,17 @@ QUIET_VOICE_DB = -40.0  # under this, the device gain is too low
 CLIP_WARN_PCT = 0.1  # clipped samples (%) before the app gain: too loud
 LOW_SNR_DB = 15.0
 NOISY_AFTER_GAIN_DB = -45.0  # background this loud after gain: false wakes
+# Noise suppression: frames this close to the noise count as quiet passages
+QUIET_MARGIN_DB = 3.0
+QUIET_GUARD_FRAMES = 3  # and this far from speech (noise suppression delays the audio)
+QUIET_ENOUGH_DB = -55.0  # background under this: no need for more suppression
+SNR_GAIN_DB = 6.0  # a level gaining this much on voice/noise is worth it
+SNR_MIN_GAIN_DB = 3.0  # less than this on every level: off
+VOICE_LOSS_DB = 3.0  # a level lowering the voice this much eats it
+# Auto gain: near / far voice gap above this needs it
+AUTO_GAIN_GAP_DB = 10.0
+AUTO_GAIN_TARGET_BOUNDS = (-24.0, -14.0)  # target proposed: the near take, bounded
+FAR_TOO_QUIET_DB = -45.0  # far voice under this even with the auto gain
 
 
 def _db(value: float) -> float:
@@ -145,6 +158,145 @@ def propose(noise: dict[str, float], voice: dict[str, float]) -> dict[str, Any]:
     }
 
 
+def _frames(pcm: bytes) -> list[bytes]:
+    return [pcm[i:i + FRAME_BYTES] for i in range(0, len(pcm) - FRAME_BYTES + 1, FRAME_BYTES)]
+
+
+def _rms_db(pcm: bytes) -> Optional[float]:
+    return round(_db(audioop.rms(pcm, WYOMING_WIDTH)), 1) if pcm else None
+
+
+def frame_classes(raw: bytes, noise_db: float) -> tuple[list[int], list[int]]:
+    """Indexes of the spoken frames and of the quiet frames of a take, from
+    the received audio (the same frames are then measured after processing)."""
+    levels = [_db(audioop.rms(f, WYOMING_WIDTH)) for f in _frames(raw)]
+    speech = [i for i, db in enumerate(levels) if db >= noise_db + SPEECH_MARGIN_DB]
+    if not speech:  # nothing above the noise: the loudest third
+        loudest = sorted(range(len(levels)), key=lambda i: levels[i])
+        speech = sorted(loudest[-max(1, len(levels) // 3):])
+    loud = [db >= noise_db + QUIET_MARGIN_DB for db in levels]
+    quiet = [
+        i for i in range(len(levels))
+        if not any(loud[max(0, i - QUIET_GUARD_FRAMES):i + QUIET_GUARD_FRAMES + 1])
+    ]
+    return speech, quiet
+
+
+def _level_at(pcm: bytes, indexes: list[int]) -> Optional[float]:
+    frames = _frames(pcm)
+    return _rms_db(b"".join(frames[i] for i in indexes if i < len(frames)))
+
+
+def run_filter(mic_filter: MicFilter, pcm: bytes) -> bytes:
+    """Feed a recording in chunks like the live stream (the auto gain
+    follows the level chunk by chunk)."""
+    chunk = 1024  # 32 ms, about a VBAN packet pair
+    return b"".join(mic_filter.process(pcm[i:i + chunk]) for i in range(0, len(pcm), chunk))
+
+
+def process_take(
+    noise_pcm: bytes, raw: bytes, noise_suppression: str, volume: float,
+    auto_gain: bool = False, auto_gain_target_db: float = AutoGain.TARGET_DB,
+) -> bytes:
+    """A take processed offline like the satellite would, on a new filter:
+    it learns the background noise first, then (auto gain) the take once,
+    like a gain settled by earlier sentences."""
+    mic_filter = MicFilter(noise_suppression, auto_gain, volume, auto_gain_target_db)
+    run_filter(mic_filter, noise_pcm)
+    if auto_gain:
+        run_filter(mic_filter, raw)
+    return run_filter(mic_filter, raw)
+
+
+def compare_noise_levels(
+    noise_pcm: bytes, voice_pcm: bytes, noise_db: float, volume: float,
+) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+    """The voice take through each noise suppression level, with the volume:
+    background left (quiet passages), voice level, voice/noise ratio.
+    Returns (one row per level, processed voice per level)."""
+    speech, quiet = frame_classes(voice_pcm, noise_db)
+    rows, previews = [], {}
+    for level in NOISE_SUPPRESSION_LEVELS:
+        mic_filter = MicFilter(level, False, volume)
+        noise_out = run_filter(mic_filter, noise_pcm)
+        voice_out = run_filter(mic_filter, voice_pcm)
+        # Quiet passages: the noise take once learned (its second half), and
+        # the pauses of the voice take
+        frames = _frames(voice_out)
+        quiet_pcm = noise_out[len(noise_out) // 2:] + b"".join(
+            frames[i] for i in quiet if i < len(frames)
+        )
+        background = _rms_db(quiet_pcm)
+        voice = _level_at(voice_out, speech)
+        rows.append({
+            "level": level, "noise_db": background, "voice_db": voice,
+            "snr_db": round(voice - background, 1)
+            if voice is not None and background is not None else None,
+        })
+        previews[level] = voice_out
+    off_voice = rows[0]["voice_db"]
+    for row in rows:
+        loss = (off_voice - row["voice_db"]) if None not in (off_voice, row["voice_db"]) else 0
+        row["voice_loss_db"] = round(loss, 1)
+        row["eats_voice"] = loss > VOICE_LOSS_DB
+    return rows, previews
+
+
+def choose_noise_level(rows: list[dict[str, Any]]) -> str:
+    """The weakest level bringing the background under QUIET_ENOUGH_DB or
+    gaining SNR_GAIN_DB on voice/noise; off if none gains SNR_MIN_GAIN_DB.
+    Levels eating the voice are left out."""
+    off = rows[0]
+    usable = [r for r in rows if r["snr_db"] is not None and not r["eats_voice"]]
+    if off["snr_db"] is None or not usable:
+        return "off"
+    for row in usable:
+        if row["noise_db"] < QUIET_ENOUGH_DB or row["snr_db"] - off["snr_db"] >= SNR_GAIN_DB:
+            return row["level"]
+    best = max(usable, key=lambda r: r["snr_db"])
+    return best["level"] if best["snr_db"] - off["snr_db"] > SNR_MIN_GAIN_DB else "off"
+
+
+def noise_advice(rows: list[dict[str, Any]]) -> list[str]:
+    names = {"light": "Légère", "medium": "Moyenne", "strong": "Forte"}
+    eaten = [names[r["level"]] for r in rows if r["eats_voice"]]
+    if not eaten:
+        return []
+    return [
+        f"{', '.join(eaten)} : baisse la voix de plus de {VOICE_LOSS_DB:.0f} dB, la "
+        "réduction de bruit grignote la voix (niveau écarté de la recommandation)."
+    ]
+
+
+def take_level(noise_pcm: bytes, raw: bytes, noise_db: float, noise_suppression: str,
+               volume: float) -> Optional[float]:
+    """Voice level of a take after the volume and the noise suppression."""
+    speech, _ = frame_classes(raw, noise_db)
+    return _level_at(process_take(noise_pcm, raw, noise_suppression, volume), speech)
+
+
+def autogain_decision(near_db: float, far_db: float) -> dict[str, Any]:
+    """Auto gain on when the near and far voices differ by more than
+    AUTO_GAIN_GAP_DB, aiming at the near voice (bounded)."""
+    gap = round(near_db - far_db, 1)
+    low, high = AUTO_GAIN_TARGET_BOUNDS
+    target = round(max(low, min(high, near_db)))
+    far_max = round(far_db + AutoGain.MAX_GAIN_DB, 1)
+    advice = []
+    if far_max < FAR_TOO_QUIET_DB:
+        advice.append(
+            f"De loin, la voix resterait à {far_max:.0f} dBFS même avec le gain "
+            f"automatique (+{AutoGain.MAX_GAIN_DB:.0f} dB au plus) : le niveau de base "
+            "est trop bas, montez le gain dans ESPHome (mic_gain du codec ou gain du "
+            "vban_sender), puis recommencez le calibrage."
+        )
+    return {
+        "near_db": near_db, "far_db": far_db, "gap_db": gap,
+        "auto_gain": gap > AUTO_GAIN_GAP_DB, "target_db": target,
+        "far_max_db": far_max, "advice": advice,
+    }
+
+
 @dataclass
 class CalibrationSession:
     """One satellite's calibration recordings (in memory, short-lived)."""
@@ -158,6 +310,25 @@ class CalibrationSession:
     noise: Optional[dict[str, float]] = None
     voice: Optional[dict[str, float]] = None
     proposal: Optional[dict[str, Any]] = None
+    # Noise suppression: the voice take through each level
+    denoise: Optional[dict[str, Any]] = None
+    denoise_pcm: dict[str, bytes] = field(default_factory=dict)
+    # Auto gain: near and far takes, and before / after the auto gain
+    takes: dict[str, bytes] = field(default_factory=dict)  # "near", "far"
+    autogain: Optional[dict[str, Any]] = None
+    autogain_pcm: dict[str, bytes] = field(default_factory=dict)  # "near-after"…
+    wake: Optional[dict[str, Any]] = None  # wake word test result (no audio kept)
+
+    def audio(self, which: str) -> bytes:
+        """A recording to listen to: before, after, denoise-<level>,
+        near-before, near-after, far-before, far-after."""
+        if which == "before":
+            return self.voice_pcm
+        if which == "after":
+            return self.voice_after_pcm
+        if which.startswith("denoise-"):
+            return self.denoise_pcm.get(which[len("denoise-"):], b"")
+        return self.autogain_pcm.get(which, b"")
 
     @property
     def expired(self) -> bool:

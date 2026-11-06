@@ -120,6 +120,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--mic-auto-gain", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--mic-volume", type=float, default=1.0, help="Fixed gain, 0.1-10")
+    parser.add_argument("--mic-auto-gain-target-db", type=float, default=-18.0,
+                        help="Voice level aimed at by the auto gain, -31 to -3 dBFS")
+    parser.add_argument(
+        "--mic-follow-ha", action=argparse.BooleanOptionalAction, default=False,
+        help="Apply HA's Mic volume / Auto gain / Noise suppression entities",
+    )
     parser.add_argument("--mic-source", choices=["vban", "rtsp"], default="vban")
     parser.add_argument("--rtsp-url", default="", help="Camera stream (with --mic-source rtsp)")
     parser.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")

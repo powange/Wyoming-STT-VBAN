@@ -103,8 +103,21 @@ Microphone clean-up (any source), applied before the audio is sent to Home
 Assistant (and to the wake word):
 
 - **noise_suppression**: `off` (default), `light`, `medium` or `strong` (at most 6, 15 or 25 dB less noise). Learns the background noise during the quiet moments of the last seconds and attenuates it band by band: works on steady noise (computer fan, fridge, hiss), not on TV or other voices. Start with `light` or `medium`: too strong a setting makes the voice sound "metallic" and can hurt recognition.
-- **auto_gain**: brings the voice to a steady level (default off).
-- **volume**: fixed microphone gain, 0.1–10 (default 1.0), applied first. The **Calibrage** tab of the interface measures the background noise and your voice and proposes a value.
+- **auto_gain**: brings the voice to a steady level (default off), between −12 and +20 dB, only while someone speaks.
+- **auto_gain_target_db**: voice level aimed at by the automatic gain, −31 to −3 dBFS (default −18).
+- **volume**: fixed microphone gain, 0.1–10 (default 1.0), applied first.
+- **follow_ha_entities**: `true` to apply the satellite's *Mic volume*, *Auto gain* and *Noise suppression level* entities of Home Assistant instead of the three settings above (default `false`). Home Assistant creates these entities for Wyoming satellites but doesn't pass them to the pipeline, so on their own they do nothing. Mapping: volume as is; noise `low`/`medium`/`high`/`max` → `light`/`medium`/`strong`/`strong`; auto gain `0` = off, `N` = aim at −N dBFS. Applied live; the last values stay if Home Assistant is unreachable. The entities are found by their registry ids, so renaming them is fine. If Home Assistant ever passes these settings to Wyoming pipelines itself, the processing would be applied twice: turn this off then.
+
+The **Calibrage** tab of the interface measures the background noise and your
+voice and proposes, step by step, the volume, the noise suppression level (the
+sentence replayed through each level, with a listen button per level), the
+automatic gain and its target (a near and a far take), then tests the wake
+word: "Dis-moi Jarvis" said 5 times, sent with the current and the proposed
+settings to the openWakeWord app (`core-openwakeword:10400`) over its own
+connection, never through the pipeline. **Apply** (per step or **Apply all**)
+writes to these options, or to the Home Assistant entities when
+`follow_ha_entities` is on. Recordings stay in memory and are deleted once
+applied, when leaving the tab, or after 15 minutes.
 - The DC offset (a constant shift of ESP32 microphones, inaudible) is always removed.
 
 The status tab shows the background noise before and after clean-up; a

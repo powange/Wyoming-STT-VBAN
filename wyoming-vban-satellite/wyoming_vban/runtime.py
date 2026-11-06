@@ -22,7 +22,8 @@ from .config import (
     SatelliteConfig,
     validate_mirrors,
 )
-from .ha_ws import HaStateWatcher
+from .ha_audio import HaAudioSync, HaMicSettings, auto_gain_settings
+from .ha_ws import SUPERVISOR_WS_URL, HaStateWatcher, HaUnavailable
 from .calibration import LevelMeter
 from .mic_filter import MicFilter
 from .mirror import SatelliteMirrors
@@ -228,7 +229,9 @@ class SatelliteRunner:
             enabled=cfg.followup_enabled, beep=cfg.followup_beep,
             timeout_s=cfg.followup_timeout_s,
         )
-        self.mic_filter = MicFilter(cfg.mic_noise_suppression, cfg.mic_auto_gain, cfg.mic_volume)
+        # Last values of the satellite's HA microphone entities (if followed)
+        self.ha_mic: Optional[HaMicSettings] = None
+        self.mic_filter = MicFilter(*self.mic_settings())
         # Calibration: live levels before / after the app's processing, and
         # recordings (copies of the received audio, in memory)
         self.meter_in = LevelMeter()
@@ -411,6 +414,47 @@ class SatelliteRunner:
                 except Exception as err:
                     _LOGGER.debug("Zeroconf cleanup error: %s", err)
 
+    def mic_settings(self) -> tuple[str, bool, float, float]:
+        """(noise suppression, auto gain, volume, auto gain target dBFS): the
+        app's settings, or the HA entities' last valid values if followed."""
+        cfg = self.cfg
+        noise, auto_gain = cfg.mic_noise_suppression, cfg.mic_auto_gain
+        volume, target = cfg.mic_volume, cfg.mic_auto_gain_target_db
+        ha = self.ha_mic if cfg.mic_follow_ha else None
+        if ha is not None:
+            if ha.volume is not None:
+                volume = ha.volume
+            if ha.noise_suppression is not None:
+                noise = ha.noise_suppression
+            if ha.auto_gain is not None:
+                auto_gain, target = auto_gain_settings(ha.auto_gain)
+        return noise, auto_gain, volume, target
+
+    def set_ha_mic(self, settings: Optional[HaMicSettings]) -> None:
+        """New values of the HA entities: applied at once if followed."""
+        self.ha_mic = settings
+        if not self.cfg.mic_follow_ha or settings is None:
+            return
+        before = self.mic_settings_applied()
+        self.mic_filter.configure(*self.mic_settings())
+        if self.mic_settings_applied() == before:
+            return
+        token = _SATELLITE_NAME.set(self.cfg.name)
+        try:
+            _LOGGER.info("HA → microphone: %s", self._describe_mic())
+        finally:
+            _SATELLITE_NAME.reset(token)
+
+    def mic_settings_applied(self) -> tuple[str, bool, float, float]:
+        f = self.mic_filter
+        return f.noise_suppression, f.auto_gain, f.volume, f.auto_gain_target_db
+
+    def _describe_mic(self) -> str:
+        noise, auto_gain, volume, target = self.mic_settings_applied()
+        return "volume %.2f, auto gain %s, noise suppression %s" % (
+            volume, f"{target:.0f} dBFS" if auto_gain else "off", noise,
+        )
+
     def _log_settings(self) -> None:
         cfg = self.cfg
         _LOGGER.info(
@@ -420,8 +464,8 @@ class SatelliteRunner:
             cfg.search_mode, cfg.vision_mode,
         )
         _LOGGER.info(
-            "  Microphone: volume %.2f, noise suppression %s, auto gain %s",
-            cfg.mic_volume, cfg.mic_noise_suppression, "on" if cfg.mic_auto_gain else "off",
+            "  Microphone: %s%s", self._describe_mic(),
+            " (following the Home Assistant entities)" if cfg.mic_follow_ha else "",
         )
         _LOGGER.info(
             "  Follow-up without wake word: %s",
@@ -445,7 +489,9 @@ class SatelliteRunner:
             self.media_output.entity_id = cfg.tts_media_player
         if self.mic_mute is not None:
             self.mic_mute.tail_s = cfg.mic_mute_tail_ms / 1000
-        self.mic_filter.configure(cfg.mic_noise_suppression, cfg.mic_auto_gain, cfg.mic_volume)
+        if not cfg.mic_follow_ha:
+            self.ha_mic = None  # read again if followed later
+        self.mic_filter.configure(*self.mic_settings())
         self.followup.beep = cfg.followup_beep
         self.followup.timeout_s = cfg.followup_timeout_s
         # Handlers hold this object: change its content
@@ -513,6 +559,13 @@ class SatelliteRunner:
                 self.mic_filter.noise_floor_db() if self.mic_filter.active else None
             ),
             "filter_bypassed": self.mic_filter.bypassed,
+            # Microphone settings applied, and where they come from
+            "mic_settings": dict(zip(
+                ("noise_suppression", "auto_gain", "volume", "auto_gain_target_db"),
+                self.mic_settings_applied(),
+            )) | {
+                "source": "home_assistant" if self.cfg.mic_follow_ha else "app",
+            },
             "last_packet_s": round(now - self.last_packet_at, 1) if self.last_packet_at else None,
             "output": self.cfg.tts_output,
         }
@@ -596,6 +649,8 @@ class AppRuntime:
         self._phrase_tasks: dict[int, asyncio.Task] = {}  # id(phrase) -> task
         self._watcher: Optional[HaStateWatcher] = None
         self._watcher_task: Optional[asyncio.Task] = None
+        self._ha_audio: Optional[HaAudioSync] = None
+        self.ha_ws_url = SUPERVISOR_WS_URL
         self.publisher = ExchangePublisher(False, None)
 
     @property
@@ -618,6 +673,7 @@ class AppRuntime:
         return bool(
             options.publish_exchanges
             or any(s.tts_output == "media_player" for s in options.satellites)
+            or any(s.mic_follow_ha for s in options.satellites)
             or any(c.search or c.vision for c in cues.values())
         )
 
@@ -663,25 +719,51 @@ class AppRuntime:
         output, publishes voice exchanges, receives jarvis_* events.
         """
         if needed and self._watcher is None:
-            self._watcher = HaStateWatcher(self._media_players(options))
+            self._watcher = HaStateWatcher(self._media_players(options), self.ha_ws_url)
             # Internet search / camera look started (fired by the
             # demander_ia_externe / regarder_la_camera scripts)
             self._watcher.add_event_listener("jarvis_recherche", notify_search)
             self._watcher.add_event_listener("jarvis_vision", notify_vision)
+            self._ha_audio = HaAudioSync(self._watcher, self._on_ha_mic)
             self._watcher_task = asyncio.create_task(self._watcher.run())
         elif not needed and self._watcher is not None:
             assert self._watcher_task is not None
+            self._close_ha_audio()
             self._watcher_task.cancel()
             await asyncio.gather(self._watcher_task, return_exceptions=True)
             self._watcher = None
             self._watcher_task = None
         elif self._watcher is not None:
             await self._watcher.set_entity_ids(self._media_players(options))
+        if self._ha_audio is not None:
+            self._ha_audio.set_satellites(
+                [s.name for s in options.satellites if s.mic_follow_ha]
+            )
         self.publisher.watcher = self._watcher
         for runner in self._runners.values():
             runner.watcher = self._watcher
             if runner.media_output is not None:
                 runner.media_output.state_watcher = self._watcher
+
+    def _close_ha_audio(self) -> None:
+        if self._ha_audio is not None:
+            self._ha_audio.close()
+            self._ha_audio = None
+
+    def _on_ha_mic(self, name: str, settings: HaMicSettings) -> None:
+        if (runner := self._runners.get(name)) is not None:
+            runner.set_ha_mic(settings)
+
+    def ha_mic_status(self, name: str) -> Optional[dict[str, Any]]:
+        """Entities found and last synchronization of a satellite following HA."""
+        return self._ha_audio.status(name) if self._ha_audio is not None else None
+
+    async def write_ha_mic(self, name: str, values: dict[str, Any]) -> list[str]:
+        """Write the satellite's HA microphone entities (calibration, see
+        HaAudioSync.write); raises HaUnavailable or HaCommandError."""
+        if self._ha_audio is None:
+            raise HaUnavailable("not connected to Home Assistant")
+        return await self._ha_audio.write(name, values)
 
     def _start_receiver(self, port: int, sat: SatelliteConfig) -> None:
         receiver = VbanReceiver(
@@ -710,6 +792,8 @@ class AppRuntime:
             self._watcher, self.publisher, cues, mirrors,
         )
         self._runners[sat.name] = runner
+        if self._ha_audio is not None and sat.name in self._ha_audio.settings:
+            runner.set_ha_mic(self._ha_audio.settings[sat.name])
         runner.start().add_done_callback(
             lambda t, name=sat.name: self._on_task_done(t, f"satellite '{name}'")
         )
@@ -773,6 +857,7 @@ class AppRuntime:
             for task in self._phrase_tasks.values():
                 task.cancel()
             await asyncio.gather(*self._phrase_tasks.values(), return_exceptions=True)
+            self._close_ha_audio()
             if self._watcher_task is not None:
                 self._watcher_task.cancel()
                 await asyncio.gather(self._watcher_task, return_exceptions=True)
@@ -900,7 +985,11 @@ class AppRuntime:
 
     def status(self) -> dict[str, Any]:
         return {
-            "satellites": [runner.status() for runner in self._runners.values()],
+            "satellites": [
+                runner.status() | {"ha_mic": self.ha_mic_status(name)}
+                if runner.cfg.mic_follow_ha else runner.status()
+                for name, runner in self._runners.items()
+            ],
             "ha_websocket": self._watcher.connected if self._watcher else None,
             "phrases": [
                 {"text": p.text, "ready": p.cue is not None} for p in self.phrases

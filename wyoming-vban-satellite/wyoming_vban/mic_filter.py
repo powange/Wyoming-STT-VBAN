@@ -7,8 +7,9 @@
 - optional noise suppression (Speex): learns the background noise during
   the quiet moments of the last seconds and attenuates it, frequency band by
   frequency band (works on steady noise: computer fan, fridge, hiss);
-- optional automatic gain: brings the voice to a steady level. Our own:
-  pyspeex-noise 2.0.1's automatic gain outputs silence.
+- optional automatic gain: brings the voice to a steady level (-18 dBFS,
+  or the level set in Home Assistant). Our own: pyspeex-noise 2.0.1's
+  automatic gain outputs silence.
 """
 
 import audioop
@@ -36,7 +37,7 @@ def _db(pcm: bytes) -> float:
 
 
 class AutoGain:
-    """Brings speech to TARGET_DB; doesn't boost the background noise.
+    """Brings speech to target_db; doesn't boost the background noise.
 
     The gain only follows the voice: chunks louder than the background noise
     by SPEECH_MARGIN_DB. It rises slowly and drops fast (no clipping).
@@ -50,7 +51,8 @@ class AutoGain:
     DOWN_DB_PER_S = 40.0
     FLOOR_RISE_DB_PER_S = 3.0  # background estimate follows a rising noise
 
-    def __init__(self) -> None:
+    def __init__(self, target_db: float = TARGET_DB) -> None:
+        self.target_db = target_db
         self.gain_db = 0.0
         self._floor_db: Optional[float] = None
 
@@ -62,7 +64,7 @@ class AutoGain:
         else:
             self._floor_db += self.FLOOR_RISE_DB_PER_S * seconds
         if level > self._floor_db + self.SPEECH_MARGIN_DB:
-            target = min(self.MAX_GAIN_DB, max(self.MIN_GAIN_DB, self.TARGET_DB - level))
+            target = min(self.MAX_GAIN_DB, max(self.MIN_GAIN_DB, self.target_db - level))
             if target > self.gain_db:
                 self.gain_db = min(target, self.gain_db + self.UP_DB_PER_S * seconds)
             else:
@@ -84,10 +86,12 @@ class MicFilter:
 
     def __init__(
         self, noise_suppression: str = "off", auto_gain: bool = False, volume: float = 1.0,
+        auto_gain_target_db: float = AutoGain.TARGET_DB,
     ):
         self.noise_suppression = "off"
         self.auto_gain = False
         self.volume = 1.0
+        self.auto_gain_target_db = AutoGain.TARGET_DB
         self._speex: Optional[AudioProcessor] = None
         self._agc: Optional[AutoGain] = None
         self._pending = bytearray()  # < 10 ms waiting for the next call
@@ -98,7 +102,7 @@ class MicFilter:
         self._levels: collections.deque[tuple[float, float]] = collections.deque()
         # Optional live meter of what is sent to HA (calibration)
         self.output_meter: Optional[Any] = None
-        self.configure(noise_suppression, auto_gain, volume)
+        self.configure(noise_suppression, auto_gain, volume, auto_gain_target_db)
 
     @property
     def active(self) -> bool:
@@ -107,18 +111,20 @@ class MicFilter:
 
     def configure(
         self, noise_suppression: str, auto_gain: bool, volume: float = 1.0,
+        auto_gain_target_db: float = AutoGain.TARGET_DB,
     ) -> None:
-        if (noise_suppression, auto_gain, volume) == (
-            self.noise_suppression, self.auto_gain, self.volume
+        if (noise_suppression, auto_gain, volume, auto_gain_target_db) == (
+            self.noise_suppression, self.auto_gain, self.volume, self.auto_gain_target_db
         ):
             return
         self.noise_suppression = noise_suppression
         self.auto_gain = auto_gain
         self.volume = volume
+        self.auto_gain_target_db = auto_gain_target_db
         level = NOISE_LEVELS.get(noise_suppression, 0)
         # Speex for noise suppression only (its automatic gain is broken)
         self._speex = AudioProcessor(0, level) if level else None
-        self._agc = AutoGain() if auto_gain else None
+        self._agc = AutoGain(auto_gain_target_db) if auto_gain else None
         self._pending.clear()
         self._levels.clear()
         self._silent_s = 0.0

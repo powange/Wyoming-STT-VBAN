@@ -17,11 +17,11 @@ import aiohttp
 import yaml
 from aiohttp import web
 
-from . import calibration
+from . import calibration, wake_test
 from .calibration import CalibrationSession
 from .config import ConfigError, parse_options, validate
+from .ha_ws import HaCommandError, HaUnavailable
 from .media_player import build_wav
-from .mic_filter import MicFilter
 from .runtime import AppRuntime, SatelliteRunner
 
 _LOGGER = logging.getLogger(__name__)
@@ -99,6 +99,9 @@ class WebUI:
         app.router.add_post("/api/calibration/record", self._calibration_record)
         app.router.add_get("/api/calibration/audio", self._calibration_audio)
         app.router.add_post("/api/calibration/apply", self._calibration_apply)
+        app.router.add_post("/api/calibration/denoise", self._calibration_denoise)
+        app.router.add_post("/api/calibration/autogain", self._calibration_autogain)
+        app.router.add_get("/api/calibration/wake_models", self._wake_models)
         app.router.add_delete("/api/calibration", self._calibration_clear)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
@@ -217,7 +220,8 @@ class WebUI:
         return self._sessions.get(name)
 
     async def _calibration_record(self, request: web.Request) -> web.Response:
-        """Record and analyze a step: "noise" (silence) then "voice"."""
+        """Record and analyze a step: "noise" (silence), "voice" (the
+        sentence), "near" / "far" (auto gain), "wake" (wake word test)."""
         try:
             body = await request.json()
             step = body["step"]
@@ -225,14 +229,21 @@ class WebUI:
         except (ValueError, KeyError, TypeError):
             return web.json_response({"error": "Invalid request"}, status=400)
         runner = self._runner_of(request, name)
-        if step not in ("noise", "voice"):
+        if step not in self.STEP_SECONDS:
             return web.json_response({"error": "Unknown step"}, status=400)
         session = self._session(name, create=(step == "noise"))
-        if step == "voice" and (session is None or session.noise is None):
+        if step != "noise" and (session is None or session.noise is None):
             return web.json_response({"error": "Mesurez d'abord le bruit de fond"}, status=400)
+        if step in ("near", "far", "wake") and session.proposal is None:
+            return web.json_response({"error": "Faites d'abord la mesure de la voix"}, status=400)
         assert session is not None
-        seconds = 5.0 if step == "noise" else 8.0
-        pcm = await runner.record(seconds)
+        if step == "wake":
+            # Before asking for 20 s of speech: is the model there?
+            try:
+                await wake_test.check_model(*self._wake_target(body))
+            except wake_test.WakeTestError as err:
+                return web.json_response({"error": str(err)}, status=502)
+        pcm = await runner.record(self.STEP_SECONDS[step])
         if len(pcm) < calibration.FRAME_BYTES * 10:
             return web.json_response(
                 {"error": "Aucun audio reçu de ce micro pendant la mesure"}, status=409,
@@ -241,29 +252,184 @@ class WebUI:
             session.noise_pcm = pcm
             session.noise = calibration.analyze_noise(pcm)
             return web.json_response({"noise": session.noise})
+        if step == "voice":
+            return web.json_response(await asyncio.to_thread(self._voice_step, runner, session, pcm))
+        if step == "wake":
+            return await self._wake_step(runner, session, pcm, body)
+        session.takes[step] = pcm
+        level = await asyncio.to_thread(
+            calibration.take_level, session.noise_pcm, pcm, session.noise["rms_db"],
+            self._noise_choice(session, body), session.proposal["volume"],
+        )
+        return web.json_response({"take": step, "voice_db": level})
 
+    # Recording lengths (s) of the steps
+    STEP_SECONDS = {"noise": 5.0, "voice": 8.0, "near": 6.0, "far": 6.0, "wake": 20.0}
+    WAKE_REPEATS = 5  # times the wake word is said in the test
+    WAKE_PACE = 1.0  # real time (see wake_test)
+
+    @staticmethod
+    def _voice_step(
+        runner: SatelliteRunner, session: CalibrationSession, pcm: bytes,
+    ) -> dict[str, Any]:
         session.voice_pcm = pcm
         session.voice = calibration.analyze_voice(pcm, session.noise["rms_db"])
         session.proposal = calibration.propose(session.noise, session.voice)
-        # What HA would get with the proposed volume and the current clean-up:
-        # the filter learns the noise first, then processes the voice
-        current = runner.mic_filter
-        preview = MicFilter(current.noise_suppression, current.auto_gain,
-                            session.proposal["volume"])
-        preview.process(session.noise_pcm)
-        session.voice_after_pcm = preview.process(pcm)
-        return web.json_response({
-            "noise": session.noise, "voice": session.voice, "proposal": session.proposal,
-        })
+        # What HA would get with the proposed volume and the current clean-up
+        noise, auto_gain, _, target = runner.mic_settings_applied()
+        session.voice_after_pcm = calibration.process_take(
+            session.noise_pcm, pcm, noise, session.proposal["volume"], auto_gain, target,
+        )
+        # Later steps start again from this voice
+        session.denoise, session.denoise_pcm = None, {}
+        session.takes, session.autogain, session.autogain_pcm = {}, None, {}
+        return {"noise": session.noise, "voice": session.voice, "proposal": session.proposal}
+
+    @staticmethod
+    def _noise_choice(session: CalibrationSession, body: dict[str, Any]) -> str:
+        """The noise suppression level picked in step A (or recommended)."""
+        level = body.get("noise_suppression")
+        if level in calibration.NOISE_SUPPRESSION_LEVELS:
+            return level
+        return session.denoise["recommended"] if session.denoise else "off"
+
+    async def _calibration_denoise(self, request: web.Request) -> web.Response:
+        """Step A: the voice take through each noise suppression level."""
+        name = (await self._json(request)).get("satellite", "")
+        session = self._session(name)
+        if session is None or session.proposal is None:
+            return web.json_response({"error": "Faites d'abord la mesure de la voix"}, status=400)
+
+        def analyze() -> dict[str, Any]:
+            rows, previews = calibration.compare_noise_levels(
+                session.noise_pcm, session.voice_pcm, session.noise["rms_db"],
+                session.proposal["volume"],
+            )
+            session.denoise_pcm = previews
+            session.denoise = {
+                "rows": rows, "recommended": calibration.choose_noise_level(rows),
+                "advice": calibration.noise_advice(rows),
+            }
+            return session.denoise
+
+        return web.json_response(await asyncio.to_thread(analyze))
+
+    async def _calibration_autogain(self, request: web.Request) -> web.Response:
+        """Step B: near / far voice levels -> auto gain on or off."""
+        body = await self._json(request)
+        session = self._session(body.get("satellite", ""))
+        if session is None or not {"near", "far"} <= set(session.takes):
+            return web.json_response({"error": "Enregistrez d'abord les deux prises"}, status=400)
+        noise = self._noise_choice(session, body)
+
+        def analyze() -> dict[str, Any]:
+            volume, noise_db = session.proposal["volume"], session.noise["rms_db"]
+            levels = {
+                take: calibration.take_level(session.noise_pcm, raw, noise_db, noise, volume)
+                for take, raw in session.takes.items()
+            }
+            if None in levels.values():
+                raise ValueError("no voice")
+            decision = calibration.autogain_decision(levels["near"], levels["far"])
+            decision["noise_suppression"] = noise
+            session.autogain = decision
+            session.autogain_pcm = {}
+            for take, raw in session.takes.items():
+                session.autogain_pcm[f"{take}-before"] = calibration.process_take(
+                    session.noise_pcm, raw, noise, volume)
+                session.autogain_pcm[f"{take}-after"] = calibration.process_take(
+                    session.noise_pcm, raw, noise, volume, True, decision["target_db"])
+            return decision
+
+        try:
+            return web.json_response(await asyncio.to_thread(analyze))
+        except ValueError:
+            return web.json_response({"error": "Aucune voix dans les prises"}, status=409)
+
+    @staticmethod
+    def _wake_target(body: dict[str, Any]) -> tuple[str, int, str]:
+        return (
+            str(body.get("host") or wake_test.DEFAULT_HOST),
+            int(body.get("port") or wake_test.DEFAULT_PORT),
+            str(body.get("model") or wake_test.DEFAULT_MODEL),
+        )
+
+    async def _wake_step(
+        self, runner: SatelliteRunner, session: CalibrationSession, raw: bytes,
+        body: dict[str, Any],
+    ) -> web.Response:
+        """Step C: the take with the current and the proposed settings,
+        sent at the same time to openWakeWord (not stored)."""
+        current = dict(zip(("noise_suppression", "auto_gain", "volume", "auto_gain_target_db"),
+                           runner.mic_settings_applied()))
+        proposed = self._proposed_settings(session, body.get("proposed") or {}, current)
+        processed = await asyncio.gather(*(
+            asyncio.to_thread(
+                calibration.process_take, session.noise_pcm, raw, s["noise_suppression"],
+                s["volume"], s["auto_gain"], s["auto_gain_target_db"],
+            ) for s in (current, proposed)
+        ))
+        host, port, model = self._wake_target(body)
+        try:
+            counts = await asyncio.gather(*(
+                wake_test.count_detections(pcm, host, port, model, self.WAKE_PACE)
+                for pcm in processed
+            ))
+        except wake_test.WakeTestError as err:
+            return web.json_response({"error": str(err)}, status=502)
+        result = {
+            "model": model, "expected": self.WAKE_REPEATS,
+            "current": current | {"detections": len(counts[0])},
+            "proposed": proposed | {"detections": len(counts[1])},
+        }
+        session.wake = result
+        return web.json_response(result)
+
+    @staticmethod
+    def _proposed_settings(
+        session: CalibrationSession, chosen: dict[str, Any], current: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The settings proposed so far (choices of the page first)."""
+        settings = dict(current)
+        if session.proposal is not None:
+            settings["volume"] = session.proposal["volume"]
+        if session.denoise is not None:
+            settings["noise_suppression"] = session.denoise["recommended"]
+        if session.autogain is not None:
+            settings["auto_gain"] = session.autogain["auto_gain"]
+            if session.autogain["auto_gain"]:
+                settings["auto_gain_target_db"] = float(session.autogain["target_db"])
+        for key in settings:
+            if key in chosen and chosen[key] is not None:
+                settings[key] = type(settings[key])(chosen[key])
+        if settings["noise_suppression"] not in calibration.NOISE_SUPPRESSION_LEVELS:
+            settings["noise_suppression"] = current["noise_suppression"]
+        return settings
+
+    async def _wake_models(self, request: web.Request) -> web.Response:
+        host, port, _ = self._wake_target(dict(request.query))
+        try:
+            models = await wake_test.list_models(host, port)
+        except wake_test.WakeTestError as err:
+            return web.json_response({"error": str(err)}, status=502)
+        return web.json_response({"models": models, "default": wake_test.DEFAULT_MODEL})
+
+    @staticmethod
+    async def _json(request: web.Request) -> dict[str, Any]:
+        try:
+            body = await request.json()
+        except ValueError:
+            raise web.HTTPBadRequest(text="Invalid request") from None
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="Invalid request")
+        return body
 
     async def _calibration_audio(self, request: web.Request) -> web.Response:
-        """The voice recording, before or after the (proposed) processing."""
-        name = request.query.get("satellite", "")
-        session = self._session(name)
-        which = request.query.get("which")
-        pcm = None
-        if session is not None:
-            pcm = session.voice_pcm if which == "before" else session.voice_after_pcm
+        """A recording: the voice before / after the proposed volume, through
+        a noise suppression level, or a near / far take before / after the
+        auto gain."""
+        session = self._session(request.query.get("satellite", ""))
+        pcm = session.audio(request.query.get("which", "")) if session is not None else b""
         if not pcm:
             raise web.HTTPNotFound(text="No recording")
         return web.Response(
@@ -271,15 +437,40 @@ class WebUI:
             headers={"Cache-Control": "no-store"},
         )
 
+    # Settings the calibration applies -> microphone option
+    APPLY_KEYS = {
+        "volume": "volume", "noise_suppression": "noise_suppression",
+        "auto_gain": "auto_gain", "auto_gain_target_db": "auto_gain_target_db",
+    }
+
     async def _calibration_apply(self, request: web.Request) -> web.Response:
-        """Write the microphone volume of a satellite (saved and applied
-        like any change), then delete the recordings."""
+        """Write microphone settings of a satellite: any of volume,
+        noise_suppression, auto_gain (with auto_gain_target_db). Saved and
+        applied like any change; "finish" ends the calibration.
+
+        If the satellite follows its HA entities, they are written instead:
+        the app gets them back like any change made in HA. The recordings
+        no step needs any more are deleted."""
+        body = await self._json(request)
+        name = body.get("satellite", "")
         try:
-            body = await request.json()
-            name = body["satellite"]
-            volume = round(float(body["volume"]), 2)
-        except (ValueError, KeyError, TypeError):
+            values = self._apply_values(body)
+        except (ValueError, TypeError):
             return web.json_response({"error": "Invalid request"}, status=400)
+        if not values:
+            return web.json_response({"error": "Nothing to apply"}, status=400)
+        runner = self.runtime.runners.get(name)
+        if runner is not None and runner.cfg.mic_follow_ha:
+            ha_values = {k: v for k, v in values.items() if k in ("volume", "noise_suppression")}
+            if "auto_gain" in values:  # HA: 0 = off, N = aim at -N dBFS
+                target = values.get("auto_gain_target_db", runner.mic_settings_applied()[3])
+                ha_values["auto_gain"] = round(-target) if values["auto_gain"] else 0
+            try:
+                written = await self.runtime.write_ha_mic(name, ha_values)
+            except (HaUnavailable, HaCommandError) as err:
+                return web.json_response({"error": f"Home Assistant : {err}"}, status=502)
+            self._forget(name, values, body.get("finish"))
+            return web.json_response({"ok": True, "entities": written})
         try:
             options = await self.supervisor.get()
         except (SupervisorError, aiohttp.ClientError, OSError) as err:
@@ -289,11 +480,45 @@ class WebUI:
         )
         if satellite is None:
             return web.json_response({"error": "Unknown satellite"}, status=400)
-        satellite.setdefault("microphone", {})["volume"] = volume
+        microphone = satellite.setdefault("microphone", {})
+        for key, value in values.items():
+            microphone[self.APPLY_KEYS[key]] = value
         response = await self._store_and_apply(options)
         if response.status == 200:
-            self._sessions.pop(name, None)
+            self._forget(name, values, body.get("finish"))
         return response
+
+    @staticmethod
+    def _apply_values(body: dict[str, Any]) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        if body.get("volume") is not None:
+            values["volume"] = round(float(body["volume"]), 2)
+        if body.get("noise_suppression") is not None:
+            if body["noise_suppression"] not in calibration.NOISE_SUPPRESSION_LEVELS:
+                raise ValueError("noise_suppression")
+            values["noise_suppression"] = body["noise_suppression"]
+        if body.get("auto_gain") is not None:
+            values["auto_gain"] = bool(body["auto_gain"])
+            if values["auto_gain"] and body.get("auto_gain_target_db") is not None:
+                values["auto_gain_target_db"] = int(round(float(body["auto_gain_target_db"])))
+        return values
+
+    def _forget(self, name: str, applied: dict[str, Any], finish: Any) -> None:
+        """Delete the recordings of the steps applied; all of them at the end."""
+        session = self._sessions.get(name)
+        if session is None:
+            return
+        if finish:
+            del self._sessions[name]
+            return
+        if "volume" in applied:
+            session.voice_after_pcm = b""
+        if "noise_suppression" in applied:  # the voice take only served step A
+            session.voice_pcm = b""
+            session.denoise_pcm = {}
+        if "auto_gain" in applied:
+            session.takes = {}
+            session.autogain_pcm = {}
 
     async def _calibration_clear(self, request: web.Request) -> web.Response:
         self._sessions.pop(request.query.get("satellite", ""), None)

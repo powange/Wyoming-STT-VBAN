@@ -4,7 +4,9 @@ One connection (via the Supervisor proxy), reconnecting with a backoff:
 - subscribed to state changes of the media_players used for TTS output,
   so satellites can wait for the real start and end of playback;
 - subscribed to custom HA events (e.g. jarvis_recherche);
-- used to fire events on the HA event bus (voice exchanges).
+- used to fire events on the HA event bus (voice exchanges);
+- commands with their result and subscriptions made while connected
+  (microphone entities of the satellites, see ha_audio).
 """
 
 import asyncio
@@ -13,13 +15,21 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
 SUPERVISOR_WS_URL = "ws://supervisor/core/websocket"
+
+
+class HaUnavailable(Exception):
+    """Not connected to HA, connection lost or no answer."""
+
+
+class HaCommandError(Exception):
+    """HA answered a command with an error."""
 
 
 @dataclass
@@ -55,6 +65,12 @@ class HaStateWatcher:
         self._event_listeners: dict[str, list[Callable[[dict[str, Any]], None]]] = {}
         self._event_sub_ids: dict[int, str] = {}  # subscription id -> event type
         self._resubscribe = False  # reconnect at once (entities changed)
+        self._results: dict[int, asyncio.Future] = {}  # command id -> its result
+        # Subscriptions made with subscribe(): id -> callback(event), per connection
+        self._subscriptions: dict[int, Callable[[dict[str, Any]], None]] = {}
+        # Called (in a task) on each connection, e.g. to subscribe again
+        self._connect_listeners: list[Callable[[], Awaitable[None]]] = []
+        self._listener_tasks: set[asyncio.Task] = set()
 
     async def set_entity_ids(self, entity_ids: list[str]) -> None:
         """Watch other media_players: reconnects to subscribe to them."""
@@ -76,6 +92,27 @@ class HaStateWatcher:
     ) -> None:
         """Call callback(data) for each HA event of this type (before run())."""
         self._event_listeners.setdefault(event_type, []).append(callback)
+
+    def add_connect_listener(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Run callback() on each connection (and now, if connected)."""
+        self._connect_listeners.append(callback)
+        if self._connected:
+            self._spawn(callback())
+
+    def remove_connect_listener(self, callback: Callable[[], Awaitable[None]]) -> None:
+        if callback in self._connect_listeners:
+            self._connect_listeners.remove(callback)
+
+    def _spawn(self, coro: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(coro)
+        self._listener_tasks.add(task)
+        task.add_done_callback(self._listener_done)
+
+    def _listener_done(self, task: asyncio.Task) -> None:
+        self._listener_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            _LOGGER.error("Error in HA WebSocket connect listener",
+                          exc_info=task.exception())
 
     @property
     def connected(self) -> bool:
@@ -103,6 +140,8 @@ class HaStateWatcher:
                             f", watching {', '.join(self.entity_ids)}"
                             if self.entity_ids else "",
                         )
+                        for callback in self._connect_listeners:
+                            self._spawn(callback())
                         await self._receive(ws)
                     if not self._resubscribe:
                         _LOGGER.warning("HA WebSocket closed")
@@ -110,6 +149,11 @@ class HaStateWatcher:
                     _LOGGER.warning("HA WebSocket error: %s", err or type(err).__name__)
                 finally:
                     self._ws = None
+                    self._subscriptions = {}
+                    for future in self._results.values():
+                        if not future.done():
+                            future.set_exception(HaUnavailable("connection lost"))
+                    self._results = {}
                     if self._connected:
                         self._connected = False
                         await self._notify()
@@ -182,14 +226,81 @@ class HaStateWatcher:
             return False
         return True
 
+    async def call(self, command: dict[str, Any], timeout: float = 10.0) -> Any:
+        """Send a command and return its result.
+
+        Raises HaUnavailable (not connected, lost, no answer) or HaCommandError.
+        """
+        return (await self._command(command, timeout))[1]
+
+    async def subscribe(
+        self, command: dict[str, Any], on_event: Callable[[dict[str, Any]], None],
+    ) -> int:
+        """Subscribe (subscribe_trigger, subscribe_events…): on_event(event)
+        for each of its events, until unsubscribe() or the connection is
+        lost. Returns the subscription id."""
+        return (await self._command(command, 10.0, on_event))[0]
+
+    async def _command(
+        self, command: dict[str, Any], timeout: float,
+        on_event: Optional[Callable[[dict[str, Any]], None]] = None,
+    ) -> tuple[int, Any]:
+        ws = self._ws
+        if ws is None or not self._connected:
+            raise HaUnavailable("not connected to Home Assistant")
+        future = asyncio.get_running_loop().create_future()
+        async with self._send_lock:
+            msg_id = self._take_id()
+            self._results[msg_id] = future
+            if on_event is not None:  # events may come right after the result
+                self._subscriptions[msg_id] = on_event
+            try:
+                await ws.send_json({**command, "id": msg_id})
+            except (aiohttp.ClientError, ConnectionError, RuntimeError) as err:
+                self._results.pop(msg_id, None)
+                self._subscriptions.pop(msg_id, None)
+                raise HaUnavailable(str(err) or type(err).__name__) from err
+        try:
+            return msg_id, await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError:
+            self._subscriptions.pop(msg_id, None)
+            raise HaUnavailable(f"no answer to {command.get('type')}") from None
+        except HaCommandError:
+            self._subscriptions.pop(msg_id, None)
+            raise
+        finally:
+            self._results.pop(msg_id, None)
+
+    async def unsubscribe(self, sub_id: int) -> None:
+        if self._subscriptions.pop(sub_id, None) is None:
+            return  # lost with the connection
+        try:
+            await self.call({"type": "unsubscribe_events", "subscription": sub_id})
+        except (HaUnavailable, HaCommandError) as err:
+            _LOGGER.debug("unsubscribe %d: %s", sub_id, err)
+
     async def _receive(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         async for message in ws:
             if message.type != aiohttp.WSMsgType.TEXT:
                 break
             msg = message.json()
-            if msg.get("type") == "result" and not msg.get("success"):
-                _LOGGER.warning("HA WebSocket command failed: %s", msg.get("error", msg))
+            if msg.get("type") == "result":
+                future = self._results.get(msg.get("id"))
+                if future is not None and not future.done():
+                    if msg.get("success"):
+                        future.set_result(msg.get("result"))
+                    else:
+                        error = msg.get("error") or {}
+                        future.set_exception(HaCommandError(error.get("message") or str(error)))
+                elif not msg.get("success"):
+                    _LOGGER.warning("HA WebSocket command failed: %s", msg.get("error", msg))
             if msg.get("type") != "event":
+                continue
+            if (on_event := self._subscriptions.get(msg.get("id"))) is not None:
+                try:
+                    on_event(msg.get("event") or {})
+                except Exception:  # a listener bug must not drop the connection
+                    _LOGGER.exception("Error in HA subscription listener")
                 continue
             if (event_type := self._event_sub_ids.get(msg.get("id"))) is not None:
                 data = msg.get("event", {}).get("data") or {}

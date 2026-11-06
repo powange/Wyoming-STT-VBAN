@@ -19,6 +19,7 @@ DEFAULT_TTS_VOICE = "fr_FR-siwis-medium"
 MIC_SOURCES = ("vban", "rtsp")
 NOISE_SUPPRESSION_LEVELS = ("off", "light", "medium", "strong")
 MIC_VOLUME_RANGE = (0.1, 10.0)
+AUTO_GAIN_TARGET_RANGE = (-31.0, -3.0)  # dBFS
 
 # Announcement modes (waiting_sounds.*_mode, camera_phrase.mode)
 ANNOUNCEMENT_MODES = ("none", "sound", "phrase", "sound_then_phrase")
@@ -35,6 +36,8 @@ OPTION_BLOCKS: dict[str, dict[str, str]] = {
         "noise_suppression": "mic_noise_suppression",
         "auto_gain": "mic_auto_gain",
         "volume": "mic_volume",
+        "auto_gain_target_db": "mic_auto_gain_target_db",
+        "follow_ha_entities": "mic_follow_ha",
         "vban_port": "vban_receive_port",
         "vban_mode": "vban_receive_mode",
         "multicast_group": "vban_receive_multicast_group",
@@ -129,6 +132,10 @@ class SatelliteConfig:
     mic_noise_suppression: str = "off"
     mic_auto_gain: bool = False
     mic_volume: float = 1.0  # fixed gain, 0.1 to 10 (calibration)
+    mic_auto_gain_target_db: float = -18.0  # voice level aimed at by the auto gain
+    # HA's Mic volume / Auto gain / Noise suppression entities replace
+    # mic_volume, mic_auto_gain and mic_noise_suppression
+    mic_follow_ha: bool = False
     tts_vban_enabled: bool = False
     tts_vban_mode: str = "unicast"
     tts_vban_address: str = ""
@@ -198,6 +205,14 @@ class SatelliteConfig:
                 self.name, self.mic_volume, volume, *MIC_VOLUME_RANGE,
             )
             self.mic_volume = volume
+        target = max(AUTO_GAIN_TARGET_RANGE[0],
+                     min(AUTO_GAIN_TARGET_RANGE[1], float(self.mic_auto_gain_target_db)))
+        if target != self.mic_auto_gain_target_db:
+            _LOGGER.warning(
+                "[%s] microphone.auto_gain_target_db %s clamped to %s (valid range %s-%s)",
+                self.name, self.mic_auto_gain_target_db, target, *AUTO_GAIN_TARGET_RANGE,
+            )
+        self.mic_auto_gain_target_db = target
         if self.mic_noise_suppression not in NOISE_SUPPRESSION_LEVELS:
             _LOGGER.warning(
                 "[%s] microphone.noise_suppression '%s' unknown (%s): using off",

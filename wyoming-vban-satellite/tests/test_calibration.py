@@ -16,14 +16,24 @@ import struct
 import tempfile
 import unittest
 import wave
+from typing import Optional
 
 import aiohttp
 
+from wyoming.event import Event
+from wyoming.info import Attribution, Info, WakeModel, WakeProgram
+from wyoming.server import AsyncEventHandler, AsyncServer
+from wyoming.wake import Detect, Detection, NotDetected
+
 from test_webui import FakeSupervisor, _free_port
+from wyoming_vban import wake_test
 from wyoming_vban.calibration import (
     LevelMeter,
     analyze_noise,
     analyze_voice,
+    autogain_decision,
+    choose_noise_level,
+    compare_noise_levels,
     propose,
 )
 from wyoming_vban.config import parse_options, validate
@@ -119,6 +129,146 @@ class AnalysisTest(unittest.TestCase):
         self.assertAlmostEqual(gain, 6.0, delta=0.2)
 
 
+class NoiseSuppressionChoiceTest(unittest.TestCase):
+    def choose(self, background: float, voice: float) -> str:
+        noise_pcm = noise(5, background, seed=7)
+        voice_pcm = speech(8, voice, background) if voice else noise(8, background, seed=9)
+        rows, previews = compare_noise_levels(
+            noise_pcm, voice_pcm, analyze_noise(noise_pcm)["rms_db"], 1.0)
+        self.assertEqual([r["level"] for r in rows], ["off", "light", "medium", "strong"])
+        self.assertEqual(set(previews), {"off", "light", "medium", "strong"})
+        return choose_noise_level(rows)
+
+    def test_quiet_room_needs_none(self) -> None:
+        self.assertEqual(self.choose(20, 3000), "off")  # background about -65 dBFS
+
+    def test_noise_only_needs_none(self) -> None:
+        self.assertEqual(self.choose(300, 0), "off")  # nothing to gain on a voice
+
+    def test_steady_noise_and_voice(self) -> None:
+        # Fan about -40 dBFS: the weakest level gaining 6 dB on voice/noise
+        self.assertEqual(self.choose(300, 3000), "medium")  # voice/noise about 17 dB
+        self.assertEqual(self.choose(300, 600), "medium")  # about 5 dB
+
+    def row(self, level, noise_db, voice_db, eats=False):
+        return {"level": level, "noise_db": noise_db, "voice_db": voice_db,
+                "snr_db": voice_db - noise_db, "eats_voice": eats}
+
+    def test_rules(self) -> None:
+        off = self.row("off", -45, -20)
+        # Under -55 dBFS: the weakest level doing it
+        self.assertEqual(choose_noise_level([
+            off, self.row("light", -50, -20), self.row("medium", -56, -20),
+            self.row("strong", -60, -20)]), "medium")
+        # +4 dB at best: that level; +2 dB at best: off
+        self.assertEqual(choose_noise_level([
+            off, self.row("light", -47, -20), self.row("medium", -49, -20)]), "medium")
+        self.assertEqual(choose_noise_level([off, self.row("light", -47, -20)]), "off")
+        # A level eating the voice isn't recommended
+        self.assertEqual(choose_noise_level([
+            off, self.row("light", -47, -20), self.row("medium", -60, -25, eats=True)]), "off")
+        # Already quiet: off
+        self.assertEqual(choose_noise_level([self.row("off", -60, -20)]), "off")
+
+
+class AutoGainDecisionTest(unittest.TestCase):
+    def test_small_gap_off(self) -> None:
+        decision = autogain_decision(-20.0, -26.0)
+        self.assertFalse(decision["auto_gain"])
+        self.assertEqual(decision["gap_db"], 6.0)
+        self.assertEqual(decision["advice"], [])
+
+    def test_large_gap_on_with_bounded_target(self) -> None:
+        decision = autogain_decision(-18.0, -32.0)
+        self.assertTrue(decision["auto_gain"])
+        self.assertEqual(decision["target_db"], -18)
+        self.assertEqual(autogain_decision(-8.0, -22.0)["target_db"], -14)
+        self.assertEqual(autogain_decision(-30.0, -44.0)["target_db"], -24)
+
+    def test_far_too_quiet(self) -> None:
+        decision = autogain_decision(-50.0, -68.0)
+        self.assertTrue(any("montez le gain dans ESPHome" in a for a in decision["advice"]))
+
+
+class FakeOpenWakeWord:
+    """Wyoming wake word server: one detection per audio chunk, up to
+    `detections`, then nothing (like a wake word said that many times)."""
+
+    MODELS = ["dis_moi_jarvis-6", "ok_nabu"]
+
+    def __init__(self) -> None:
+        self.detections = 0
+        self.port = _free_port()
+        self.names: list = []
+        self.server = AsyncServer.from_uri(f"tcp://127.0.0.1:{self.port}")
+        self.task: asyncio.Task
+
+    async def start(self) -> None:
+        fake = self
+
+        class Handler(AsyncEventHandler):
+            sent = 0
+
+            async def handle_event(self, event: Event) -> bool:
+                if event.type == "describe":
+                    await self.write_event(Info(wake=[WakeProgram(
+                        name="openwakeword", description="", installed=True, version="1",
+                        attribution=Attribution(name="", url=""),
+                        models=[WakeModel(name=m, description=m, installed=True,
+                                          attribution=Attribution(name="", url=""),
+                                          languages=[], version="1", phrase=m)
+                                for m in fake.MODELS])]).event())
+                elif Detect.is_type(event.type):
+                    fake.names.append(Detect.from_event(event).names)
+                elif event.type == "audio-chunk" and self.sent < fake.detections:
+                    self.sent += 1
+                    await self.write_event(
+                        Detection(name="dis_moi_jarvis-6", timestamp=self.sent).event())
+                elif event.type == "audio-stop" and not self.sent:
+                    await self.write_event(NotDetected().event())
+                return True
+
+        self.task = asyncio.create_task(self.server.run(Handler))
+        await asyncio.sleep(0.1)
+
+    async def stop(self) -> None:
+        await self.server.stop()
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+
+
+class WakeWordTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.oww = FakeOpenWakeWord()
+        await self.oww.start()
+
+    async def asyncTearDown(self) -> None:
+        await self.oww.stop()
+
+    async def test_counts_detections(self) -> None:
+        pcm = noise(3, 300)
+        for count in range(6):
+            self.oww.detections = count
+            found = await wake_test.count_detections(
+                pcm, "127.0.0.1", self.oww.port, "dis_moi_jarvis-6", pace=0)
+            self.assertEqual(len(found), count)
+        self.assertEqual(self.oww.names[-1], ["dis_moi_jarvis-6"])
+
+    async def test_models(self) -> None:
+        self.assertEqual(await wake_test.list_models("127.0.0.1", self.oww.port),
+                         ["dis_moi_jarvis-6", "ok_nabu"])
+        await wake_test.check_model("127.0.0.1", self.oww.port, "dis_moi_jarvis-6")
+        with self.assertRaises(wake_test.WakeTestError):
+            await wake_test.check_model("127.0.0.1", self.oww.port, "hey_jarvis")
+
+    async def test_unreachable(self) -> None:
+        with self.assertRaises(wake_test.WakeTestError):
+            await wake_test.list_models("127.0.0.1", _free_port())
+        with self.assertRaises(wake_test.WakeTestError):
+            await wake_test.count_detections(b"\0" * 3200, "127.0.0.1", _free_port(),
+                                             "dis_moi_jarvis-6", pace=0)
+
+
 class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
     """The whole flow through the UI API, with a fake VBAN microphone."""
 
@@ -171,9 +321,10 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
             self.counter += 1
             await asyncio.sleep(0.016)
 
-    async def record(self, step: str, pcm: bytes) -> tuple[int, dict]:
+    async def record(self, step: str, pcm: bytes, extra: Optional[dict] = None) -> tuple[int, dict]:
         request = asyncio.create_task(self.http.post(
-            self.url("/api/calibration/record"), json={"satellite": "Bureau", "step": step}))
+            self.url("/api/calibration/record"),
+            json={"satellite": "Bureau", "step": step, **(extra or {})}))
         await self.mic(pcm)
         resp = await request
         return resp.status, await resp.json()
@@ -214,11 +365,79 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.supervisor.options["satellites"][0]["microphone"]["volume"],
                          proposal["volume"])
         self.assertEqual(self.runtime.runners["Bureau"].mic_filter.volume, proposal["volume"])
-        # Recordings deleted once applied
+        # The preview is deleted once applied; the voice take serves step A
+        self.assertEqual(await self.audio_status("after"), 404)
+        self.assertEqual(await self.audio_status("before"), 200)
+
+        # Step A: the voice through each noise suppression level
+        async with self.http.post(self.url("/api/calibration/denoise"),
+                                  json={"satellite": "Bureau"}) as resp:
+            self.assertEqual(resp.status, 200)
+            denoise = await resp.json()
+        self.assertEqual(len(denoise["rows"]), 4)
+        self.assertIn(denoise["recommended"], ("off", "light", "medium", "strong"))
+        self.assertEqual(await self.audio_status("denoise-strong"), 200)
+
+        # Step B: near and far takes
+        status, body = await self.record("near", speech(6.3, 6000))
+        self.assertEqual(status, 200, body)
+        status, body = await self.record("far", speech(6.3, 800))
+        self.assertEqual(status, 200, body)
+        async with self.http.post(self.url("/api/calibration/autogain"), json={
+            "satellite": "Bureau", "noise_suppression": "off",
+        }) as resp:
+            self.assertEqual(resp.status, 200)
+            autogain = await resp.json()
+        self.assertGreater(autogain["gap_db"], 10)
+        self.assertTrue(autogain["auto_gain"])
+        self.assertTrue(-24 <= autogain["target_db"] <= -14)
+        for which in ("near-before", "near-after", "far-before", "far-after"):
+            self.assertEqual(await self.audio_status(which), 200)
+
+        # Step C: wake word test, current and proposed settings side by side
+        oww = FakeOpenWakeWord()
+        await oww.start()
+        self.ui.STEP_SECONDS = dict(self.ui.STEP_SECONDS, wake=2.0)
+        self.ui.WAKE_PACE = 0
+        try:
+            oww.detections = 3
+            status, wake = await self.record("wake", speech(2.3, 3000), {
+                "host": "127.0.0.1", "port": oww.port, "model": "dis_moi_jarvis-6",
+                "proposed": {"noise_suppression": "medium"},
+            })
+            self.assertEqual(status, 200, wake)
+            self.assertEqual((wake["current"]["detections"], wake["proposed"]["detections"],
+                              wake["expected"]), (3, 3, 5))
+            self.assertEqual(wake["proposed"]["noise_suppression"], "medium")
+            self.assertTrue(wake["proposed"]["auto_gain"])
+            # Unknown model: refused before recording
+            status, body = await self.record("wake", b"", {
+                "host": "127.0.0.1", "port": oww.port, "model": "hey_jarvis"})
+            self.assertEqual(status, 502)
+            self.assertIn("hey_jarvis", body["error"])
+        finally:
+            await oww.stop()
+
+        # Apply all: in the app's options, then everything is deleted
+        async with self.http.post(self.url("/api/calibration/apply"), json={
+            "satellite": "Bureau", "volume": proposal["volume"], "noise_suppression": "light",
+            "auto_gain": True, "auto_gain_target_db": autogain["target_db"], "finish": True,
+        }) as resp:
+            self.assertEqual(resp.status, 200, await resp.text())
+        mic = self.supervisor.options["satellites"][0]["microphone"]
+        self.assertEqual((mic["noise_suppression"], mic["auto_gain"], mic["auto_gain_target_db"]),
+                         ("light", True, autogain["target_db"]))
+        mic_filter = self.runtime.runners["Bureau"].mic_filter
+        self.assertEqual((mic_filter.noise_suppression, mic_filter.auto_gain,
+                          mic_filter.auto_gain_target_db),
+                         ("light", True, float(autogain["target_db"])))
+        self.assertEqual(self.ui._sessions, {})
+
+    async def audio_status(self, which: str) -> int:
         async with self.http.get(
-            self.url("/api/calibration/audio?satellite=Bureau&which=before")
+            self.url(f"/api/calibration/audio?satellite=Bureau&which={which}")
         ) as resp:
-            self.assertEqual(resp.status, 404)
+            return resp.status
 
     async def test_voice_needs_noise_first_and_clear(self) -> None:
         status, body = await self.record("voice", speech(1, 1500))

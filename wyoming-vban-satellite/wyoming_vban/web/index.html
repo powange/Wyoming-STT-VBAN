@@ -232,6 +232,18 @@
   .advice li { margin: 4px 0; }
   .countdown { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent); }
   .row-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .levels { width: 100%; border-collapse: collapse; margin: 8px 0; font-variant-numeric: tabular-nums; }
+  .levels th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 4px 6px 4px 0; }
+  .levels td { padding: 4px 6px 4px 0; border-top: 1px solid var(--border); }
+  .levels tr.recommended td { font-weight: 600; }
+  .levels .warn { color: var(--danger); }
+  .levels button { padding: 2px 8px; }
+  .levels-wrap { overflow-x: auto; }
+  label.inline { display: inline-flex; flex-direction: row; align-items: center; gap: 4px; margin: 0; }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--accent); color: #fff; margin-left: 6px; font-weight: 500; }
+  .ha-driven { display: grid; gap: 4px; padding: 8px 10px; border-radius: 6px; background: var(--section); }
+  .ha-driven .vals { font-variant-numeric: tabular-nums; }
+  .wake-score { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -496,7 +508,38 @@ function outputSection(sat, index) {
       "Sans sortie, le satellite ne parle pas : les réponses ne sont jouées nulle part."));
 }
 
-function microphoneSection(mic) {
+const NOISE_NAMES = { off: "Aucune", light: "Légère", medium: "Moyenne", strong: "Forte" };
+let lastStatus = null; // last api/status answer (HA values of the satellites)
+
+/* Microphone settings applied to a satellite, as the status reports them. */
+function micSettingsText(settings) {
+  if (!settings) return "—";
+  const gain = settings.auto_gain ? `gain auto ${settings.auto_gain_target_db.toFixed(0)} dBFS`
+                                  : "gain auto désactivé";
+  return `volume ${settings.volume.toFixed(2)} · ${gain} · réduction de bruit ` +
+         `${(NOISE_NAMES[settings.noise_suppression] || settings.noise_suppression).toLowerCase()}`;
+}
+
+function haSyncText(sat) {
+  const ha = sat?.ha_mic;
+  if (!ha) return "en attente de Home Assistant";
+  if (!Object.keys(ha.entities || {}).length) return "entités introuvables dans Home Assistant (réglages de l'app utilisés)";
+  if (!ha.synced_at) return "valeurs pas encore lues (réglages de l'app utilisés)";
+  return `dernière synchronisation ${new Date(ha.synced_at * 1000).toLocaleTimeString("fr-FR")}`;
+}
+
+/* Fill the "driven by Home Assistant" boxes without re-rendering the form. */
+function fillHaDriven() {
+  for (const box of document.querySelectorAll("[data-ha-mic]")) {
+    const sat = lastStatus?.satellites.find((s) => s.name === box.dataset.haMic);
+    const following = sat?.mic_settings?.source === "home_assistant";
+    box.querySelector(".vals").textContent = following ? micSettingsText(sat.mic_settings) : "—";
+    box.querySelector(".help").textContent = !sat ? "satellite pas encore démarré"
+      : following ? haSyncText(sat) : "enregistrez pour suivre les entités Home Assistant";
+  }
+}
+
+function microphoneSection(mic, satName) {
   const source = mic.source || "vban";
   return section("Micro", null,
     segmented(null, source, [["vban", "Flux VBAN"], ["rtsp", "Caméra (RTSP)"]],
@@ -517,15 +560,26 @@ function microphoneSection(mic) {
           mic.vban_mode === "multicast" && field(mic, "multicast_group", {
                 label: "Groupe multicast", placeholder: "239.0.0.1", required: true })),
     group("Nettoyage du son", null,
-      segmented("Réduction de bruit", mic.noise_suppression || "off",
-        [["off", "Aucune"], ["light", "Légère"], ["medium", "Moyenne"], ["strong", "Forte"]],
-        (value) => { mic.noise_suppression = value; changed(true); },
-        "atténue le bruit de fond stable (PC, frigo), appris pendant les moments calmes"),
-      grid(
-        field(mic, "volume", { label: "Volume du micro", type: "number", min: 0.1, max: 10,
-              step: 0.05, placeholder: "1.0", help: "gain fixe, 0,1 à 10 (voir l'onglet Calibrage)" }),
-        field(mic, "auto_gain", { label: "Gain automatique", type: "switch", wide: true,
-              help: "ramène la voix à un niveau régulier" }))));
+      field(mic, "follow_ha_entities", { label: "Suivre les entités Home Assistant", type: "switch",
+            wide: true, rerender: true,
+            help: "les entités Volume du micro, Gain automatique et Niveau de suppression du bruit du satellite remplacent les réglages ci-dessous" }),
+      mic.follow_ha_entities
+        ? el("div", { class: "ha-driven", "data-ha-mic": satName },
+            el("span", {}, el("span", { class: "pill" }, "piloté par Home Assistant"), " ",
+               el("span", { class: "vals" }, "—")),
+            el("span", { class: "help" }, ""))
+        : [
+          segmented("Réduction de bruit", mic.noise_suppression || "off", Object.entries(NOISE_NAMES),
+            (value) => { mic.noise_suppression = value; changed(true); },
+            "atténue le bruit de fond stable (PC, frigo), appris pendant les moments calmes"),
+          grid(
+            field(mic, "volume", { label: "Volume du micro", type: "number", min: 0.1, max: 10,
+                  step: 0.05, placeholder: "1.0", help: "gain fixe, 0,1 à 10 (voir l'onglet Calibrage)" }),
+            field(mic, "auto_gain", { label: "Gain automatique", type: "switch", wide: true, rerender: true,
+                  help: "ramène la voix à un niveau régulier" }),
+            mic.auto_gain && field(mic, "auto_gain_target_db", { label: "Cible du gain automatique (dBFS)",
+                  type: "number", min: -31, max: -3, step: 1, placeholder: "-18",
+                  help: "niveau de voix visé, −31 à −3 (voir l'onglet Calibrage)" }))]));
 }
 
 function followupSection(sat, output) {
@@ -615,7 +669,7 @@ function satelliteCard(sat, index) {
           field(sat, "name", { label: "Nom", required: true }),
           field(sat, "wyoming_port", { label: "Port Wyoming", type: "number", required: true,
                 help: "Unique par satellite (10700, 10701…)" }))),
-        microphoneSection(sat.microphone),
+        microphoneSection(sat.microphone, sat.name),
         outputSection(sat, index),
         followupSection(sat, output)),
       announcementsSection(sat, output),
@@ -669,6 +723,8 @@ function renderSatellites() {
         openSatellites.add(i);
         changed(true);
       } }, "Ajouter un satellite")));
+  fillHaDriven();
+  if (!lastStatus && document.querySelector("[data-ha-mic]")) refreshStatus();
 }
 
 function renderGeneral() {
@@ -776,6 +832,10 @@ function renderStatus(status) {
         meterRow(cleaned ? "Brut" : "Micro", receiving ? sat.mic_level_db : null),
         cleaned && meterRow("Nettoyé", receiving ? sat.filtered_level_db : null, true)),
       el("div", { class: "help" }, `${audio}sortie ${out}`),
+      sat.mic_settings && el("div", { class: "help" },
+        `Réglages micro (${sat.mic_settings.source === "home_assistant" ? "Home Assistant" : "app"}) : ` +
+        micSettingsText(sat.mic_settings),
+        sat.mic_settings.source === "home_assistant" ? ` — ${haSyncText(sat)}` : ""),
       sat.filter_bypassed && el("div", { class: "status-line" }, dot(false),
         "Nettoyage contourné : il rendait le micro muet (son brut envoyé, voir le journal)"),
       levelStats(sat));
@@ -806,12 +866,16 @@ function renderStatus(status) {
 }
 
 async function refreshStatus() {
-  if (currentTab !== "status") return;
+  const haDriven = currentTab === "satellites" && document.querySelector("[data-ha-mic]");
+  if (currentTab !== "status" && !haDriven) return;
   try {
     const resp = await fetch("api/status");
-    if (resp.ok) renderStatus(await resp.json());
+    if (!resp.ok) return;
+    lastStatus = await resp.json();
+    if (currentTab === "status") renderStatus(lastStatus);
+    fillHaDriven();
   } catch (err) {
-    panels.status.textContent = `État indisponible : ${err}`;
+    if (currentTab === "status") panels.status.textContent = `État indisponible : ${err}`;
   }
 }
 
@@ -819,8 +883,44 @@ async function refreshStatus() {
 
 const CALIB_PHRASE = "Dis-moi Jarvis, allume la lumière du salon, règle le chauffage à vingt " +
                      "degrés, puis dis-moi quel temps il fera demain matin.";
-const calib = { satellite: null, source: null, poll: null, result: null, noise: null,
-                busy: false, audio: null };
+const WAKE_PHRASE = "Dis-moi Jarvis";
+const STEP_SECONDS = { noise: 5, voice: 8, near: 6, far: 6, wake: 20 };
+const STEP_LABELS = {
+  noise: "Silence, mesure en cours…", voice: "Lisez la phrase…",
+  near: "Près du micro (≈ 50 cm), lisez la phrase…",
+  far: "À votre place habituelle ou loin (≈ 3 m), lisez la phrase…",
+  wake: `Dites « ${WAKE_PHRASE} » 5 fois, en marquant une pause entre chaque…`,
+};
+const calib = { satellite: null, source: null, poll: null, busy: false, audio: null };
+
+/* Forget the results (steps from `from` on: noise, voice, denoise, autogain, wake). */
+function resetCalib(from = "noise") {
+  const order = ["noise", "voice", "denoise", "autogain", "wake"];
+  const i = order.indexOf(from);
+  if (i <= 0) { calib.noise = null; calib.applied = {}; }
+  if (i <= 1) calib.result = null;
+  if (i <= 2) { calib.denoise = null; calib.noiseChoice = null; }
+  if (i <= 3) { calib.takes = {}; calib.autogain = null; }
+  calib.wake = null;
+}
+resetCalib();
+
+function calibSat() {
+  return (saved?.satellites || []).find((s) => s.name === calib.satellite);
+}
+
+const followsHa = () => !!calibSat()?.microphone?.follow_ha_entities;
+
+async function postJson(url, body) {
+  const resp = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ satellite: calib.satellite, ...body }),
+  });
+  let data = {};
+  try { data = await resp.json(); } catch (err) { /* empty answer */ }
+  if (!resp.ok) throw new Error(data.error || `Erreur ${resp.status}`);
+  return data;
+}
 
 function vuRow(label, stats, after) {
   const pos = (db) => Math.max(0, Math.min(100, (db + 70) / 70 * 100));
@@ -883,8 +983,7 @@ async function clearRecordings() {
                   { method: "DELETE" });
     } catch (err) { /* expires anyway */ }
   }
-  calib.noise = null;
-  calib.result = null;
+  resetCalib();
 }
 
 function closeCalibration() {
@@ -908,32 +1007,92 @@ async function countdown(seconds, label) {
   if (box) box.textContent = "Analyse…";
 }
 
-async function recordStep(step) {
+/* The settings proposed so far (volume, then steps A and B). */
+function proposedSettings() {
+  const settings = {};
+  if (calib.result) settings.volume = calib.result.proposal.volume;
+  if (calib.noiseChoice) settings.noise_suppression = calib.noiseChoice;
+  if (calib.autogain) {
+    settings.auto_gain = calib.autogain.auto_gain;
+    if (calib.autogain.auto_gain) settings.auto_gain_target_db = calib.autogain.target_db;
+  }
+  return settings;
+}
+
+async function busy(task) {
   calib.busy = true;
   renderCalibration();
-  const seconds = step === "noise" ? 5 : 8;
-  const request = fetch("api/calibration/record", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ satellite: calib.satellite, step }),
-  });
-  await countdown(seconds, step === "noise" ? "Silence, mesure en cours…" : "Lisez la phrase…");
   try {
-    const resp = await request;
-    const body = await resp.json();
-    if (!resp.ok) {
-      say(body.error || `Erreur ${resp.status}`, "error");
-    } else if (step === "noise") {
-      calib.noise = body.noise;
-      calib.result = null;
-      say("");
-    } else {
-      calib.result = body;
-      say("");
-    }
+    await task();
   } catch (err) {
-    say(`Erreur : ${err}`, "error");
+    say(err.message || `Erreur : ${err}`, "error");
   }
   calib.busy = false;
+  renderCalibration();
+}
+
+function recordStep(step) {
+  return busy(async () => {
+    const extra = {};
+    if (step === "near" || step === "far") extra.noise_suppression = calib.noiseChoice;
+    if (step === "wake") Object.assign(extra, { model: calib.model, proposed: proposedSettings() });
+    const request = postJson("api/calibration/record", { step, ...extra });
+    request.catch(() => {}); // handled below, after the countdown
+    await countdown(STEP_SECONDS[step], STEP_LABELS[step]);
+    if (step === "wake") document.getElementById("calib-progress").textContent =
+      "Envoi à openWakeWord (en temps réel)…";
+    const body = await request;
+    say("");
+    if (step === "noise") {
+      resetCalib("voice");
+      calib.noise = body.noise;
+    } else if (step === "voice") {
+      resetCalib("denoise");
+      calib.result = body;
+      await runDenoise();
+      loadWakeModels();
+    } else if (step === "wake") {
+      calib.wake = body;
+    } else {
+      calib.takes[step] = body.voice_db;
+      calib.autogain = null;
+      if (calib.takes.near !== undefined && calib.takes.far !== undefined) await runAutogain();
+    }
+  });
+}
+
+/* Step A: the voice take through each noise suppression level. */
+async function runDenoise() {
+  calib.denoise = await postJson("api/calibration/denoise", {});
+  calib.noiseChoice = calib.denoise.recommended;
+}
+
+/* Step B: decision from the near and far takes (with the level of step A). */
+async function runAutogain() {
+  calib.autogain = await postJson("api/calibration/autogain",
+                                  { noise_suppression: calib.noiseChoice });
+}
+
+async function pickNoise(level) {
+  calib.noiseChoice = level;
+  if (calib.autogain) await busy(runAutogain);
+  else renderCalibration();
+}
+
+async function loadWakeModels() {
+  calib.models = null;
+  calib.modelsError = null;
+  try {
+    const resp = await fetch("api/calibration/wake_models");
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
+    calib.models = body.models;
+    if (!calib.model || !body.models.includes(calib.model)) {
+      calib.model = body.models.includes(body.default) ? body.default : body.models[0] || body.default;
+    }
+  } catch (err) {
+    calib.modelsError = err.message;
+  }
   renderCalibration();
 }
 
@@ -944,53 +1103,175 @@ function play(which) {
   calib.audio.play().catch((err) => say(`Lecture impossible : ${err}`, "error"));
 }
 
-async function applyVolume() {
-  const volume = calib.result.proposal.volume;
-  say("Application du volume…");
-  const resp = await fetch("api/calibration/apply", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ satellite: calib.satellite, volume }),
+const playButton = (which, text) =>
+  el("button", { type: "button", onclick: () => play(which) }, `▶ ${text}`);
+
+/* Apply settings (one step, or all with finish): written to the HA
+   entities if the satellite follows them, otherwise to the app's options. */
+function applySettings(values, finish = false) {
+  return busy(async () => {
+    const ha = followsHa();
+    say(ha ? "Écriture dans Home Assistant…" : "Enregistrement et application…");
+    await postJson("api/calibration/apply", { ...values, finish });
+    for (const key of Object.keys(values)) calib.applied[key] = true;
+    if (finish) resetCalib();
+    if (!ha) await load(); // the saved options hold the new values
+    say((ha ? "Écrit dans les entités Home Assistant du satellite ; l'app l'applique dès que Home Assistant le confirme."
+            : "Enregistré et appliqué sans redémarrage.") +
+        (finish ? " Enregistrements effacés." : ""), "ok");
   });
-  const body = await resp.json();
-  if (!resp.ok) { say(body.error || `Erreur ${resp.status}`, "error"); return; }
-  calib.noise = null;
-  calib.result = null;
-  await load(); // the saved options now hold the new volume
-  say(`Volume du micro réglé à ${volume.toFixed(2)} et appliqué. Enregistrements effacés.`, "ok");
-  renderCalibration();
 }
+
+const dbfs = (value) => (value === null || value === undefined ? "—" : `${value.toFixed(0)} dBFS`);
+const gainText = (on, target) => (on ? `activé, cible ${target.toFixed(0)} dBFS` : "désactivé");
 
 function resultsCard() {
   const r = calib.result;
   if (!r) return null;
   const p = r.proposal;
-  const db = (value) => `${value.toFixed(0)} dBFS`;
   const row = (label, value) => el("tr", {}, el("td", {}, label), el("td", {}, value));
   return el("div", { class: "card panel" },
-    el("h2", {}, "Résultat"),
+    el("h2", {}, "Volume du micro"),
     el("table", { class: "results" },
-      row("Bruit de fond", db(r.noise.rms_db)),
-      row("Voix (passages parlés)", db(r.voice.rms_db)),
-      row("Crête de la voix", db(r.voice.peak_db)),
+      row("Bruit de fond", dbfs(r.noise.rms_db)),
+      row("Voix (passages parlés)", dbfs(r.voice.rms_db)),
+      row("Crête de la voix", dbfs(r.voice.peak_db)),
       row("Écrêtage à l'arrivée", `${r.voice.clip_pct.toFixed(2)} %`),
       row("Rapport signal/bruit", `${p.snr_db.toFixed(0)} dB`),
       row("Volume du micro proposé", `${p.volume.toFixed(2)} (${p.gain_db >= 0 ? "+" : ""}${p.gain_db.toFixed(1)} dB)`),
-      row("Voix après", db(p.voice_after_db)),
-      row("Crête après", db(p.peak_after_db)),
-      row("Bruit de fond après", db(p.noise_after_db))),
+      row("Voix après", dbfs(p.voice_after_db)),
+      row("Crête après", dbfs(p.peak_after_db)),
+      row("Bruit de fond après", dbfs(p.noise_after_db))),
     p.advice.length
       ? el("ul", { class: "advice" }, p.advice.map((text) => el("li", {}, text)))
       : el("p", { class: "help" }, "Niveaux corrects : aucun réglage à faire côté appareil."),
     el("div", { class: "row-buttons" },
-      el("button", { type: "button", onclick: () => play("before") }, "▶ Écouter avant"),
-      el("button", { type: "button", onclick: () => play("after") }, "▶ Écouter après (volume proposé)"),
-      el("button", { type: "button", class: "primary", onclick: applyVolume },
-         `Appliquer le volume ${p.volume.toFixed(2)}`),
-      el("button", { type: "button", onclick: async () => {
-        await clearRecordings();
-        say("Enregistrements effacés.", "ok");
-        renderCalibration();
-      } }, "Effacer les enregistrements")));
+      !calib.applied.noise_suppression && playButton("before", "Écouter avant"),
+      !calib.applied.volume && playButton("after", "Écouter après (volume proposé)"),
+      el("button", { type: "button", class: "primary", disabled: calib.busy || null,
+                     onclick: () => applySettings({ volume: p.volume }) },
+         calib.applied.volume ? `Volume ${p.volume.toFixed(2)} appliqué ✓` : `Appliquer le volume ${p.volume.toFixed(2)}`)));
+}
+
+function denoiseStep() {
+  const d = calib.denoise;
+  if (!d) return el("p", { class: "help" }, "Après la mesure de la voix : la phrase est rejouée à travers chaque niveau, avec le volume proposé.");
+  const rows = d.rows.map((r) => el("tr", { class: r.level === d.recommended ? "recommended" : "" },
+    el("td", {}, el("label", { class: "inline" },
+      el("input", { type: "radio", name: "noise-level", checked: r.level === calib.noiseChoice || null,
+                    disabled: calib.busy || null, onchange: () => pickNoise(r.level) }),
+      " ", NOISE_NAMES[r.level],
+      r.level === d.recommended ? el("span", { class: "pill" }, "recommandé") : null)),
+    el("td", {}, dbfs(r.noise_db)),
+    el("td", { class: r.eats_voice ? "warn" : "" }, dbfs(r.voice_db),
+       r.voice_loss_db > 0.5 ? ` (−${r.voice_loss_db.toFixed(0)} dB)` : ""),
+    el("td", {}, r.snr_db === null ? "—" : `${r.snr_db.toFixed(0)} dB`),
+    el("td", {}, calib.applied.noise_suppression ? "" : el("button", { type: "button",
+       title: `Écouter : ${NOISE_NAMES[r.level]}`, onclick: () => play(`denoise-${r.level}`) }, "▶"))));
+  return [
+    el("div", { class: "levels-wrap" }, el("table", { class: "levels" },
+      el("tr", {}, ["Niveau", "Bruit restant", "Voix", "Voix/bruit", ""].map((h) => el("th", {}, h))),
+      rows)),
+    d.advice.length ? el("ul", { class: "advice" }, d.advice.map((t) => el("li", {}, t))) : null,
+    el("div", { class: "row-buttons" },
+      el("button", { type: "button", class: "primary", disabled: calib.busy || null,
+                     onclick: () => applySettings({ noise_suppression: calib.noiseChoice }) },
+         calib.applied.noise_suppression ? "Réduction de bruit appliquée ✓"
+           : `Appliquer : ${NOISE_NAMES[calib.noiseChoice]}`)),
+  ];
+}
+
+function autogainStep() {
+  const disabled = calib.busy || !calib.result;
+  const take = (step, label) => el("button", { type: "button", disabled: disabled || null,
+    onclick: () => recordStep(step) },
+    calib.takes[step] !== undefined ? `${label} : ${dbfs(calib.takes[step])} (refaire)` : `${label} (6 s)`);
+  const g = calib.autogain;
+  return [
+    el("p", { class: "help" }, "Deux prises de la même phrase, d'une voix normale : près du micro (≈ 50 cm), puis à votre place habituelle ou loin (≈ 3 m)."),
+    el("div", { class: "row-buttons" }, take("near", "Prise proche"), take("far", "Prise lointaine")),
+    g && [
+      el("table", { class: "results" },
+        el("tr", {}, el("td", {}, "Voix proche"), el("td", {}, dbfs(g.near_db))),
+        el("tr", {}, el("td", {}, "Voix lointaine"), el("td", {}, dbfs(g.far_db))),
+        el("tr", {}, el("td", {}, "Écart"), el("td", {}, `${g.gap_db.toFixed(0)} dB`)),
+        el("tr", {}, el("td", {}, "Gain automatique proposé"), el("td", {}, gainText(g.auto_gain, g.target_db)))),
+      el("p", { class: "help" }, g.auto_gain
+        ? "La voix varie beaucoup avec la distance : le gain automatique la ramène au niveau de la prise proche."
+        : "La voix varie peu avec la distance : le volume fixe suffit."),
+      g.advice.length ? el("ul", { class: "advice" }, g.advice.map((t) => el("li", {}, t))) : null,
+      !calib.applied.auto_gain && el("div", { class: "row-buttons" },
+        playButton("near-before", "Proche, avant"), playButton("near-after", "Proche, avec gain auto"),
+        playButton("far-before", "Loin, avant"), playButton("far-after", "Loin, avec gain auto")),
+      el("div", { class: "row-buttons" },
+        el("button", { type: "button", class: "primary", disabled: calib.busy || null,
+                       onclick: () => applySettings({ auto_gain: g.auto_gain,
+                         auto_gain_target_db: g.auto_gain ? g.target_db : null }) },
+           calib.applied.auto_gain ? "Gain automatique appliqué ✓"
+             : `Appliquer : gain auto ${gainText(g.auto_gain, g.target_db)}`))],
+  ];
+}
+
+function wakeStep() {
+  const w = calib.wake;
+  const disabled = calib.busy || !calib.result || !calib.models;
+  const score = (label, part) => el("div", {},
+    el("div", { class: "help" }, label),
+    el("div", { class: "wake-score" }, `${part.detections}/${w.expected}`),
+    el("div", { class: "help" }, micSettingsText(part)));
+  const models = calib.models
+    ? el("label", {}, el("span", { class: "name" }, "Modèle"), (() => {
+        const select = el("select", { disabled: calib.busy || null },
+          calib.models.map((m) => el("option", { value: m }, m)));
+        select.value = calib.model;
+        select.addEventListener("change", () => { calib.model = select.value; });
+        return select;
+      })())
+    : el("p", { class: "help" }, calib.modelsError
+        ? `openWakeWord : ${calib.modelsError}`
+        : calib.result ? "Recherche d'openWakeWord…" : "Après la mesure de la voix.");
+  return [
+    el("p", { class: "help" },
+      `À votre place habituelle, dites « ${WAKE_PHRASE} » 5 fois en 20 secondes. Le son, traité avec ` +
+      "les réglages actuels puis avec les réglages proposés, est envoyé directement à openWakeWord, " +
+      "sans passer par Home Assistant : Jarvis ne se déclenche pas."),
+    models,
+    el("div", { class: "row-buttons" },
+      el("button", { type: "button", disabled: disabled || null, onclick: () => recordStep("wake") },
+         w ? "Refaire le test (20 s)" : "Tester le mot-clé (20 s)")),
+    w && [
+      el("div", { class: "grid" }, score("Réglages actuels", w.current), score("Réglages proposés", w.proposed)),
+      el("p", { class: "help" }, "openWakeWord ne donne pas de score de confiance : seul le nombre de détections est indiqué."),
+    ],
+  ];
+}
+
+function summaryCard() {
+  if (!calib.result) return null;
+  const p = proposedSettings();
+  const w = calib.wake;
+  const row = (label, value) => el("tr", {}, el("td", {}, label), el("td", {}, value));
+  const values = { volume: p.volume };
+  if (p.noise_suppression) values.noise_suppression = p.noise_suppression;
+  if (p.auto_gain !== undefined) {
+    values.auto_gain = p.auto_gain;
+    values.auto_gain_target_db = p.auto_gain_target_db ?? null;
+  }
+  return el("div", { class: "card panel" },
+    el("h2", {}, "Récapitulatif"),
+    el("table", { class: "results" },
+      row("Volume du micro", p.volume.toFixed(2)),
+      row("Réduction de bruit", p.noise_suppression ? NOISE_NAMES[p.noise_suppression] : "étape A à faire"),
+      row("Gain automatique", p.auto_gain === undefined ? "étape B à faire"
+                                : gainText(p.auto_gain, p.auto_gain_target_db ?? 0)),
+      row("Mot-clé", w ? `actuel ${w.current.detections}/${w.expected}, proposé ${w.proposed.detections}/${w.expected}`
+                       : "étape C à faire")),
+    el("p", { class: "help" }, followsHa()
+      ? "Appliquer écrit dans les entités Home Assistant du satellite (Volume du micro, Niveau de suppression du bruit, Gain automatique)."
+      : "Appliquer enregistre dans la configuration de l'app (sans redémarrage)."),
+    el("div", { class: "row-buttons" },
+      el("button", { type: "button", class: "primary", disabled: calib.busy || null,
+                     onclick: () => applySettings(values, true) }, "Tout appliquer")));
 }
 
 function renderCalibration() {
@@ -1005,38 +1286,45 @@ function renderCalibration() {
     renderCalibration();
     startMeter();
   });
+  const step = (title, ...content) =>
+    el("div", { class: "sub" }, el("div", { class: "sub-title" }, title), ...content);
   panels.calibration.replaceChildren(el("div", { class: "calib" },
     el("div", {},
       el("div", { class: "card panel" },
         el("h2", {}, "Satellite"),
         el("label", {}, select),
         el("p", { class: "help", id: "calib-volume" }, ""),
+        followsHa() && el("p", { class: "help" },
+          el("span", { class: "pill" }, "piloté par Home Assistant"),
+          " Les réglages proposés sont écrits dans les entités Home Assistant du satellite."),
         el("h2", { style: "margin-top: 12px" }, "Niveaux en direct"),
         el("div", { class: "vu", id: "calib-vu" }, ...vuRow("Avant traitement", null, false),
            ...vuRow("Après (envoyé à HA)", null, true)),
         el("p", { class: "help" },
           "Barre : niveau RMS · trait : crête · repère : cible de la voix (−20 dBFS) · " +
           "contour rouge : écrêtage. Le calibrage ne coupe jamais le son envoyé à Home Assistant.")),
-      resultsCard()),
+      resultsCard(),
+      summaryCard()),
     el("div", { class: "card panel steps" },
       el("h2", {}, "Assistant de calibrage"),
-      el("div", { class: "sub" },
-        el("div", { class: "sub-title" }, "1. Bruit de fond"),
+      step("1. Bruit de fond",
         el("p", { class: "help" }, "Restez silencieux pendant 5 secondes, dans les conditions habituelles (PC, frigo…)."),
-        calib.noise && el("p", {}, `Bruit de fond mesuré : ${calib.noise.rms_db.toFixed(0)} dBFS`),
+        calib.noise && el("p", {}, `Bruit de fond mesuré : ${dbfs(calib.noise.rms_db)}`),
         el("button", { type: "button", disabled: disabled || null,
                        onclick: () => recordStep("noise") },
            calib.noise ? "Mesurer à nouveau" : "Mesurer le bruit (5 s)")),
-      el("div", { class: "sub" },
-        el("div", { class: "sub-title" }, "2. Voix"),
+      step("2. Voix et volume",
         el("p", { class: "help" }, "À votre distance habituelle du micro, d'une voix normale, lisez pendant 8 secondes :"),
         el("p", { class: "phrase" }, CALIB_PHRASE),
         el("button", { type: "button", disabled: disabled || !calib.noise || null,
                        onclick: () => recordStep("voice") }, "Lire la phrase (8 s)")),
+      step("A. Réduction de bruit", denoiseStep()),
+      step("B. Gain automatique", autogainStep()),
+      step("C. Test du mot-clé", wakeStep()),
       el("p", { id: "calib-progress", class: "help" }, ""),
       el("p", { class: "help" },
-        "Les enregistrements restent en mémoire, jamais sur disque, et sont effacés " +
-        "à l'application du volume, en quittant l'onglet, ou au bout de 15 minutes."))));
+        "Les enregistrements restent en mémoire, jamais sur disque. Ceux d'une étape sont effacés " +
+        "quand on l'applique, tous le sont avec « Tout appliquer », en quittant l'onglet, ou au bout de 15 minutes."))));
 }
 
 /* Tabs */

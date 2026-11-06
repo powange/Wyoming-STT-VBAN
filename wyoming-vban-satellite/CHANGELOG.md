@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.8.0
+
+- **New**: `microphone.follow_ha_entities` (off by default): the satellite's *Mic volume*, *Auto gain* and *Noise suppression level* entities in Home Assistant, which Home Assistant doesn't pass to Wyoming pipelines, are applied by the app to its own clean-up, live:
+  - volume as is; noise `off`/`low`/`medium`/`high`/`max` → `off`/`light`/`medium`/`strong`/`strong`; auto gain `0` = off, `N` = aim at −N dBFS (bounded to −31…−3);
+  - entities found through the device and entity registries (the Wyoming device named like the satellite, then the entities by `unique_id`): renaming them is fine; found again when the registries change and on each reconnection;
+  - `unknown` / `unavailable` ignored; Home Assistant unreachable: the last values stay (or the app's settings), retried with a growing delay; the audio is never interrupted;
+  - log `HA → microphone: volume …, auto gain … dBFS, noise suppression …` on each change; warning when the entities aren't found;
+  - interface: the three settings read-only, "piloté par Home Assistant", with the values read; status tab: source of the microphone settings and time of the last synchronization.
+- **New**: `microphone.auto_gain_target_db` (−31 to −3, default −18): the voice level aimed at by the automatic gain.
+- **Calibration**, new steps after the volume, each with a proposal, listening and its own **Apply**:
+  - **A. Noise suppression**: the sentence replayed offline through each level with the proposed volume; table of background left, voice and voice/noise ratio, listen per level; weakest level bringing the background under −55 dBFS or gaining 6 dB (off if none gains more than 3 dB); levels lowering the voice by more than 3 dB flagged and left out;
+  - **B. Automatic gain**: near (≈ 50 cm) and far (≈ 3 m) takes of 6 s; gap over 10 dB → auto gain on, aiming at the near voice (bounded to −24…−14 dBFS), otherwise off; warning when the far voice stays under −45 dBFS even with +20 dB; listen before / after for both takes;
+  - **C. Wake word test**: "Dis-moi Jarvis" 5 times in 20 s, processed with the current and the proposed settings, sent at the same time and in real time to openWakeWord (`core-openwakeword:10400`, model chosen from the ones it offers, `dis_moi_jarvis-6` by default) over its own Wyoming connection, never through the pipeline; detections side by side ("actuel 3/5, proposé 5/5"). openWakeWord's detection event has no confidence score: only the count is shown;
+  - **Summary** card with **Apply all**;
+  - **Apply** writes to the app's options, or to the satellite's Home Assistant entities when it follows them;
+  - offline processing in a thread, fed in chunks like the live stream: the stream to Home Assistant isn't delayed; recordings in memory, a step's ones deleted when it is applied, all of them with **Apply all**, when leaving the tab, or after 15 minutes.
+- Fix: the calibration's "after" preview processed the 8 s at once, which made the automatic gain see a single level.
+
 ## 3.7.0
 
 - **New**: **Calibrage** tab in the interface, to set each microphone's level:
