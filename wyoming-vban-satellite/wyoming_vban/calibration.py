@@ -5,7 +5,6 @@ Everything works on copies of the audio (16 kHz mono 16-bit): the stream
 sent to Home Assistant is never interrupted. Recordings stay in memory.
 """
 
-import array
 import audioop
 import collections
 import math
@@ -18,7 +17,9 @@ from .const import WYOMING_RATE, WYOMING_WIDTH
 from .mic_filter import AutoGain, MicFilter
 
 FULL_SCALE = 32768
-CLIP_THRESHOLD = 32700  # |sample| at or above: clipped
+# |sample| at or above: clipped (0x7F00, -0.07 dBFS: the samples whose high
+# byte is 0x7F or 0x80, counted without a Python loop)
+CLIP_THRESHOLD = 32512
 FRAME_BYTES = int(WYOMING_RATE * 0.03) * WYOMING_WIDTH  # 30 ms analysis frames
 TARGET_RMS_DB = -20.0  # voice level aimed at
 MAX_PEAK_DB = -3.0  # voice peaks must stay under this
@@ -45,9 +46,10 @@ def _db(value: float) -> float:
 
 
 def _clipped(pcm: bytes) -> int:
-    """Number of samples at full scale (positive or negative)."""
-    samples = array.array("h", pcm[: len(pcm) // WYOMING_WIDTH * WYOMING_WIDTH])
-    return sum(1 for s in samples if s >= CLIP_THRESHOLD or s <= -CLIP_THRESHOLD)
+    """Number of samples at full scale (positive or negative): 16-bit little
+    endian, so the high bytes are every second byte."""
+    high = pcm[1: len(pcm) // WYOMING_WIDTH * WYOMING_WIDTH: WYOMING_WIDTH]
+    return high.count(0x7F) + high.count(0x80)
 
 
 class LevelMeter:

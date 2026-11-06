@@ -398,10 +398,11 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
         oww = FakeOpenWakeWord()
         await oww.start()
         self.ui.STEP_SECONDS = dict(self.ui.STEP_SECONDS, wake=2.0)
+        self.ui.WAKE_HOST, self.ui.WAKE_PORT = "127.0.0.1", oww.port
         try:
             oww.detections = 3
             status, wake = await self.record("wake", speech(2.3, 3000), {
-                "host": "127.0.0.1", "port": oww.port, "model": "dis_moi_jarvis-6",
+                "host": "192.0.2.1", "port": 1, "model": "dis_moi_jarvis-6",  # ignored
                 "proposed": {"noise_suppression": "medium"},
             })
             self.assertEqual(status, 200, wake)
@@ -411,7 +412,7 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(wake["proposed"]["auto_gain"])
             # Unknown model: refused (openWakeWord would use another one)
             status, body = await self.record("wake", speech(2.3, 3000), {
-                "host": "127.0.0.1", "port": oww.port, "model": "hey_jarvis"})
+                "model": "hey_jarvis"})
             self.assertEqual(status, 502)
             self.assertIn("hey_jarvis", body["error"])
         finally:
@@ -471,8 +472,11 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
                      {"satellite": "Bureau", "step": 3}):
             async with self.http.post(self.url("/api/calibration/record"), json=body) as resp:
                 self.assertEqual(resp.status, 400, body)
-        async with self.http.get(self.url("/api/calibration/wake_models?port=abc")) as resp:
-            self.assertEqual(resp.status, 400)
+        with self.assertRaises(ValueError):
+            self.ui._wake_target({"model": ["x"]})
+        # The openWakeWord address comes from the app, never from the request
+        self.assertEqual(self.ui._wake_target({"host": "192.0.2.1", "port": 1})[:2],
+                         (self.ui.WAKE_HOST, self.ui.WAKE_PORT))
         async with self.http.get(self.url("/api/meter/once?satellite=Nope")) as resp:
             self.assertEqual(resp.status, 404)
             self.assertIn("pas démarré", (await resp.json())["error"])

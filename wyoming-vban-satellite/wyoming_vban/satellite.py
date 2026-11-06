@@ -349,6 +349,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._playback_seq: Optional[int] = None
         self._was_paused = False  # resumed by RunSatellite (maybe no Describe)
         self._resume_task: Optional[asyncio.Task] = None
+        self._switch_task: Optional[asyncio.Task] = None  # follow-up turned on
         self._transcript_expiry: Optional[asyncio.Task] = None
 
         # Debug copies of the audio sent to HA and of the responses
@@ -1020,6 +1021,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         Without follow-up, HA restarts the wake run itself (restart_on_end).
         """
+        if self._driven and not self._followup.enabled and start_stage == PipelineStage.WAKE:
+            # Follow-up turned off: from this wake run on, HA restarts the runs
+            self._driven = False
+            _LOGGER.info("Follow-up off: Home Assistant restarts the runs again")
         restart = not self._driven
         await self.write_event(
             RunPipeline(
@@ -1058,6 +1063,33 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if self._watchdog_task and not self._watchdog_task.done():
             self._watchdog_task.cancel()
         self._watchdog_task = None
+
+    def followup_changed(self) -> None:
+        """followup.enabled changed (applied without restarting the satellite).
+
+        Off: the next wake run is left to HA (see _send_run_pipeline). On: HA
+        restarts the runs itself and a run sent while one is active loses its
+        audio, so this connection is closed once idle; HA reconnects and the
+        new connection drives the runs.
+        """
+        if not self._followup.enabled or self._driven:
+            return
+        if self._switch_task and not self._switch_task.done():
+            return
+        self._switch_task = asyncio.create_task(self._reconnect_when_idle())
+
+    async def _reconnect_when_idle(self) -> None:
+        for _ in range(240):  # up to 2 minutes for an exchange to end
+            busy = (
+                self._awaiting_response or self._tts_receiving or self._cue_playing()
+                or (self._playback_task is not None and not self._playback_task.done())
+            )
+            if not busy:
+                break
+            await asyncio.sleep(0.5)
+        if self._followup.enabled and not self._driven and self._is_running:
+            _LOGGER.info("Follow-up on: reconnecting to Home Assistant to drive the runs")
+            self.writer.close()
 
     def on_assist_state(self, state: str) -> None:
         """State of this satellite's assist_satellite entity in HA (follow-up
@@ -1128,6 +1160,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 self._followup_timed_out = False
 
             expect, self._expect_followup = self._expect_followup, False
+            # (follow-up turned off meanwhile: back to the wake word)
+            expect = expect and self._followup.enabled
             if expect and self._followup_count < self.MAX_FOLLOWUPS:
                 self._followup_count += 1
                 _LOGGER.info(
@@ -1555,7 +1589,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if self._subscribed:
             self._vban_receiver.unsubscribe(self._on_vban_audio)
             self._subscribed = False
-        for task in (self._resume_task, self._transcript_expiry):
+        for task in (self._resume_task, self._transcript_expiry, self._switch_task):
             if task and not task.done():
                 task.cancel()
         # HA closed its side: close ours (the socket would stay half open)

@@ -402,17 +402,17 @@ class WebUI:
         except ValueError:
             return web.json_response({"error": "Aucune voix dans les prises"}, status=409)
 
-    @staticmethod
-    def _wake_target(body: dict[str, Any]) -> tuple[str, int, str]:
-        """(host, port, model); ValueError / TypeError if invalid."""
-        port = int(body.get("port") or wake_test.DEFAULT_PORT)
-        if not 0 < port < 65536:
-            raise ValueError("port")
-        return (
-            str(body.get("host") or wake_test.DEFAULT_HOST),
-            port,
-            str(body.get("model") or wake_test.DEFAULT_MODEL),
-        )
+    # openWakeWord app: fixed here, not taken from the request (the page
+    # can't make the app open connections elsewhere)
+    WAKE_HOST = wake_test.DEFAULT_HOST
+    WAKE_PORT = wake_test.DEFAULT_PORT
+
+    def _wake_target(self, body: dict[str, Any]) -> tuple[str, int, str]:
+        """(host, port, model); ValueError / TypeError if the model is invalid."""
+        model = body.get("model") or wake_test.DEFAULT_MODEL
+        if not isinstance(model, str) or len(model) > 100:
+            raise ValueError("model")
+        return self.WAKE_HOST, self.WAKE_PORT, model
 
     async def _wake_step(
         self, runner: SatelliteRunner, session: CalibrationSession,

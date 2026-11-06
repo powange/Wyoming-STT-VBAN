@@ -27,8 +27,8 @@ mode). **Save and apply** stores the options (the Configuration tab shows
 the same ones, validated by Home Assistant) and applies them **without
 restarting the app**, touching only what changed:
 
-- applied at once, the satellite keeps running: announcements (modes, texts, sounds, delay), follow-up beep and timeout, VBAN output address/port/stream/volume, media player entity, mic mute tail, debug copies, exchange publishing, TTS engine/voice, debug logging;
-- restart of that satellite only (a second or two, Home Assistant reconnects): name, Wyoming port, microphone settings, response output, VBAN output on/off/mode/packets, HTTP port/host, follow-up on/off; a satellite added or removed starts or stops alone.
+- applied at once, the satellite keeps running: announcements (modes, texts, sounds, delay), follow-up on/off (between two exchanges; turning it on reconnects Home Assistant to the satellite once idle), beep, latency and timeout, microphone stream name, VBAN output address/port/stream/volume, media player entity, mic mute tail, debug copies, exchange publishing, TTS engine/voice, debug logging;
+- restart of that satellite only (a second or two, Home Assistant reconnects): name, Wyoming port, microphone settings, response output, VBAN output on/off/mode/packets, HTTP port/host (media player output); a satellite added or removed starts or stops alone.
 
 The message after saving says what was done. If the new configuration can't
 start (e.g. a port already in use), the previous one is restored and the

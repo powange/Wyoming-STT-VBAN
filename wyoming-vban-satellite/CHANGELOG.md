@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.9.3
+
+The last points of the review.
+
+- **Follow-up on/off without restarting the satellite.** Off: from the next wake word run, Home Assistant restarts the runs again (a question just asked no longer opens a follow-up). On: once no exchange is in progress, the connection to Home Assistant is closed; Home Assistant reconnects and the new connection drives the runs (a run sent while Home Assistant's own is active would lose its audio).
+- The microphone mute during a response on a media player is lifted by force after 330 s instead of 300 s (exactly the longest response): a response near 5 minutes no longer reopens the microphone just before its end.
+- **Wake word test**: the openWakeWord address is fixed by the app (`core-openwakeword:10400`), no longer taken from the request.
+- Calibration: clipped samples are counted without a Python loop (threshold −0.07 dBFS instead of −0.01).
+
 ## 3.9.2
 
 - **Fix (follow-up without wake word)**: the listening opened while the speaker was still playing the beep. With an Atom on VBAN (no microphone audio while it plays, playback buffered), Whisper transcribed the beep ("*bip*") and the no-speech timeout started before the microphone was even back, leaving about 1 s to answer. Now:

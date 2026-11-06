@@ -187,6 +187,17 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         run = await self.next_run()
         self.assertEqual(run.start_stage, "wake")
 
+    async def test_follow_up_turned_off_live(self) -> None:
+        await self.next_run()
+        self.followup.enabled = False
+        try:
+            self.handlers[-1].followup_changed()
+            await self.respond("Quelle lumière ?")  # a question, but follow-up is off
+            run = await self.next_run()
+            self.assertEqual((run.start_stage, run.restart_on_end), ("wake", True))
+        finally:
+            self.followup.enabled = True  # shared by the class's tests
+
     async def test_empty_response_ends_the_run_from_the_ha_state(self) -> None:
         await self.next_run()
         await self.ha.write_event(Transcript(text="Allume").event())
@@ -587,6 +598,19 @@ class FollowupDisabledTest(FollowupTest):
 
     async def test_empty_response_ends_the_run_from_the_ha_state(self) -> None:
         pass
+
+    async def test_follow_up_turned_off_live(self) -> None:
+        pass
+
+    async def test_follow_up_turned_on_live_reconnects(self) -> None:
+        await self.next_run()
+        self.followup.enabled = True
+        try:
+            self.handlers[-1].followup_changed()  # idle: closed at once
+            await asyncio.sleep(1.0)
+            self.assertFalse(self.handlers[-1]._is_running)
+        finally:
+            self.followup.enabled = False
 
     async def test_question_with_closing_quote(self) -> None:
         pass

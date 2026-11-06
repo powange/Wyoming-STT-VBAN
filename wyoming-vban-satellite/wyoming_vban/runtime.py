@@ -181,7 +181,7 @@ RESTART_FIELDS = (
     "name", "wyoming_port", "vban_receive_port", "vban_receive_mode",
     "vban_receive_multicast_group", "vban_receive_multicast_interface", "tts_output",
     "tts_vban_enabled", "tts_vban_mode", "tts_vban_batch_packets",
-    "tts_http_port", "tts_http_host", "followup_enabled",
+    "tts_http_port", "tts_http_host",
     "mic_source", "rtsp_url", "rtsp_transport",
 )
 
@@ -400,7 +400,8 @@ class SatelliteRunner:
             # Shared by all connections of this satellite
             self.mic_mute = MicMute(
                 tail_s=cfg.mic_mute_tail_ms / 1000,
-                max_muted_s=VbanSatelliteHandler.MAX_TTS_BUFFER_S,
+                # The longest response, plus the Cast start delay and the tail
+                max_muted_s=VbanSatelliteHandler.MAX_TTS_BUFFER_S + 30.0,
             )
             _LOGGER.info(
                 "  TTS output: media_player %s (HTTP %s:%d)%s, mic muted during "
@@ -570,6 +571,11 @@ class SatelliteRunner:
         self.mic_filter.configure(*self.mic_settings())
         self.followup.beep = cfg.followup_beep
         self.followup.timeout_s = cfg.followup_timeout_s
+        if self.followup.enabled != cfg.followup_enabled:
+            # Each connection switches at a safe moment (between exchanges)
+            self.followup.enabled = cfg.followup_enabled
+            for handler in list(self.handlers):
+                handler.followup_changed()
         self.followup.beep_latency_s = _ms_to_s(cfg.followup_beep_latency_ms)
         self.followup.mic_tail_s = cfg.mic_mute_tail_ms / 1000
         # Handlers hold this object: change its content
