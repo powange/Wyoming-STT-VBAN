@@ -7,8 +7,12 @@ good wake word, false trigger, or ignored. The sorted clips are copied to
 WakeForge's inbox (/share/wakeforge/inbox/<wake word>/positifs|negatifs),
 listed in its manifest.json, for training.
 
-The app never classifies by itself: it only suggests ("suggestion").
+The app never classifies by itself, in either direction: every clip is
+listened to and validated by hand; only validated clips (good or false)
+reach the inbox. It only suggests ("suggestion", with its reason).
 """
+
+from __future__ import annotations
 
 import audioop
 import collections
@@ -33,7 +37,14 @@ AFTER_S = 0.5  # and after it
 STATUSES = ("non_classe", "bon", "faux", "ignore")
 INBOX_FOLDERS = {"bon": "positifs", "faux": "negatifs"}
 # Transcripts of a wake word that wasn't one (nothing said after it)
-EMPTY_TRANSCRIPTS = {"", "...", "…", "*bip*", "bip", "[blank_audio]"}
+EMPTY_TRANSCRIPTS = {"", "...", "…", "[blank_audio]"}
+BEEP_TRANSCRIPTS = {"*bip*", "bip", "(bip)", "[bip]"}
+# Answers of an assistant that didn't understand: overheard conversation
+NOT_UNDERSTOOD = re.compile(
+    r"pas compris|je ne (comprends|sais) pas|désolé|desole|pardon \?|sorry|didn't understand",
+    re.IGNORECASE,
+)
+LONG_TRANSCRIPT_WORDS = 16  # a command is short; a sentence this long is talk
 
 
 def wake_word_folder(wake_word: str) -> str:
@@ -43,14 +54,30 @@ def wake_word_folder(wake_word: str) -> str:
     return re.sub(r"[^\w-]+", "_", name) or "inconnu"
 
 
-def suggestion(meta: dict[str, Any]) -> str:
-    """probablement_faux when nothing was said after the wake word."""
+def suggest(meta: dict[str, Any]) -> tuple[str, str]:
+    """(suggestion, reason shown in the review). Never a decision."""
+    if meta.get("reported_false"):
+        return "probablement_faux", "signalé faux depuis Home Assistant"
     if meta.get("stt_error") == "stt-no-text-recognized":
-        return "probablement_faux"
+        return "probablement_faux", "silence ensuite"
     transcript = meta.get("transcript")
-    if transcript is not None and transcript.strip().lower() in EMPTY_TRANSCRIPTS:
-        return "probablement_faux"
-    return "a_verifier"
+    if transcript is None:
+        return "a_verifier", "rien reçu ensuite" if meta.get("stt_error") else "en attente de la suite"
+    text = transcript.strip().lower()
+    if text in EMPTY_TRANSCRIPTS:
+        return "probablement_faux", "silence ensuite"
+    if text in BEEP_TRANSCRIPTS:
+        return "probablement_faux", "bip capté"
+    response = meta.get("response") or ""
+    if NOT_UNDERSTOOD.search(response) or len(text.split()) >= LONG_TRANSCRIPT_WORDS:
+        return "probablement_faux", "conversation captée"
+    if response:
+        return "probablement_bon", "phrase normale"
+    return "a_verifier", "pas de réponse"
+
+
+def suggestion(meta: dict[str, Any]) -> str:
+    return suggest(meta)[0]
 
 
 def _db(value: float) -> float:
@@ -72,7 +99,9 @@ class ClipStore:
     def __init__(
         self, root: str = "/data/wake_clips", inbox: str = "/share/wakeforge/inbox",
         retention_days: int = 30, max_clips: int = 2000,
+        on_change: Optional[Any] = None,
     ):
+        self.on_change = on_change  # called after a clip is added or sorted
         self.root = Path(root)
         self.inbox = Path(inbox)
         self.retention_days = retention_days
@@ -119,13 +148,21 @@ class ClipStore:
             "transcript": None, "response": None, "stt_error": None,
             "peaks": peaks(pcm),
         } | meta
-        info["suggestion"] = suggestion(info)
+        info["suggestion"], info["suggestion_reason"] = suggest(info)
         self.root.mkdir(parents=True, exist_ok=True)
         self.wav_path(clip_id).write_bytes(build_wav(pcm, WYOMING_RATE, WYOMING_WIDTH, 1))
         self._write_meta(info)
         self._clips[clip_id] = info
         self.purge()
+        self._changed()
         return clip_id
+
+    def _changed(self) -> None:
+        if self.on_change is not None:
+            try:
+                self.on_change(self)
+            except Exception:  # noqa: BLE001 - a notification must not lose the clip
+                _LOGGER.exception("Wake word clips: change callback failed")
 
     def update(self, clip_id: str, **fields: Any) -> None:
         """What followed the detection (transcript, response, STT error)."""
@@ -133,7 +170,7 @@ class ClipStore:
         if info is None:
             return
         info.update(fields)
-        info["suggestion"] = suggestion(info)
+        info["suggestion"], info["suggestion_reason"] = suggest(info)
         self._write_meta(info)
         if info["status"] in INBOX_FOLDERS:
             self._write_manifest(wake_word_folder(info["wake_word"]))
@@ -148,6 +185,7 @@ class ClipStore:
         info["classified_at"] = time.time() if status != "non_classe" else None
         self._write_meta(info)
         self._sync_inbox(info)
+        self._changed()
         return info
 
     def last(self, satellite: str) -> Optional[dict[str, Any]]:
@@ -161,6 +199,27 @@ class ClipStore:
             and (not status or c["status"] == status)
         ]
         return sorted(clips, key=lambda c: c["time"], reverse=True)
+
+    def review_queue(self, satellite: str = "") -> list[dict[str, Any]]:
+        """Unsorted clips to validate by hand: the "probablement faux" first,
+        then the oldest first."""
+        clips = self.list(satellite, "non_classe")
+        return sorted(clips, key=lambda c: (c["suggestion"] != "probablement_faux", c["time"]))
+
+    def done_today(self) -> int:
+        start = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+        return sum(1 for c in self._clips.values()
+                   if c["status"] != "non_classe" and (c.get("classified_at") or 0) >= start)
+
+    def report_false(self, satellite: str = "") -> Optional[dict[str, Any]]:
+        """"That wasn't for you" from Home Assistant: the satellite's last
+        clip is flagged for the review (not classified: it is still to be
+        listened to)."""
+        clips = self.list(satellite)
+        if not clips:
+            return None
+        self.update(clips[0]["id"], reported_false=True)
+        return clips[0]
 
     def counts(self) -> dict[str, dict[str, dict[str, int]]]:
         """day -> satellite -> {bon, faux, non_classe, ignore}."""

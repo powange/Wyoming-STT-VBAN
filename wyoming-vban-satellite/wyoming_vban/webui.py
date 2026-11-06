@@ -118,7 +118,7 @@ class WebUI:
         app.router.add_get("/api/wake_clips", self._clips_list)
         app.router.add_get("/api/wake_clips/audio", self._clips_audio)
         app.router.add_post("/api/wake_clips/classify", self._clips_classify)
-        app.router.add_post("/api/wake_clips/last_false", self._clips_last_false)
+        app.router.add_get("/api/wake_clips/review", self._clips_review)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         await web.TCPSite(self._runner, "0.0.0.0", self.port).start()
@@ -675,6 +675,18 @@ class WebUI:
             "enabled": True, "clips": clips[:500], "total": len(clips), "counts": store.counts(),
         })
 
+    async def _clips_review(self, request: web.Request) -> web.Response:
+        """The review queue: unsorted clips, "probablement faux" first, then
+        the oldest first; with the counts shown above it."""
+        store = self.runtime.clip_store
+        if store is None:
+            return web.json_response({"enabled": False, "queue": []})
+        queue = store.review_queue(request.query.get("satellite", ""))
+        return web.json_response({
+            "enabled": True, "queue": queue[:500], "to_review": len(queue),
+            "done_today": store.done_today(),
+        })
+
     async def _clips_audio(self, request: web.Request) -> web.Response:
         store = self._clip_store()
         clip_id = request.query.get("id", "")
@@ -692,15 +704,6 @@ class WebUI:
             return web.json_response({"error": "Extrait inconnu"}, status=404)
         except ValueError:
             return web.json_response({"error": "Statut inconnu"}, status=400)
-        return web.json_response({"clip": clip})
-
-    async def _clips_last_false(self, request: web.Request) -> web.Response:
-        """The satellite's last clip (or the last one at all) is false."""
-        self._clip_store()
-        body = await self._json(request)
-        clip = self.runtime.mark_last_false(str(body.get("satellite") or ""))
-        if clip is None:
-            return web.json_response({"error": "Aucun déclenchement enregistré"}, status=404)
         return web.json_response({"clip": clip})
 
     async def _status(self, request: web.Request) -> web.Response:

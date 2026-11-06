@@ -187,6 +187,9 @@ configuration:
       max_clips:
         name: Nombre maximal
         description: Au-dela, les non classes partent en premier, puis les ignores, puis les plus anciens tries, 10-20000 (defaut 2000)
+      notify_review:
+        name: Notification de revue
+        description: Notification Home Assistant "X extraits du mot-cle a revoir" quand plus de 20 attendent (desactivee par defaut)
   publish_exchanges:
     name: Publier les echanges
     description: Envoyer un evenement Home Assistant jarvis_echange pour chaque demande et reponse (satellite, transcript, reponse, relance)

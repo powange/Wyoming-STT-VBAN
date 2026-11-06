@@ -406,7 +406,7 @@ class AppOptions:
     wake_clips_enabled: bool = False
     wake_clips_retention_days: int = 30
     wake_clips_max: int = 2000
-
+    wake_clips_notify: bool = False  # HA notification when the review queue grows
 
 def load_options(path: str) -> AppOptions:
     """Read the app options file."""
@@ -435,6 +435,7 @@ def parse_options(options: dict[str, Any]) -> AppOptions:
         wake_clips_enabled=bool(clips.get("enabled")),
         wake_clips_retention_days=max(1, min(365, int(clips.get("retention_days") or 30))),
         wake_clips_max=max(10, min(20000, int(clips.get("max_clips") or 2000))),
+        wake_clips_notify=bool(clips.get("notify_review")),
         satellites=satellites,
         debug_logging=bool(options.get("debug_logging")),
         publish_exchanges=True if publish is None else bool(publish),

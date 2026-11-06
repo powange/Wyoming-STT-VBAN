@@ -187,6 +187,9 @@ configuration:
       max_clips:
         name: Maximum clips
         description: Beyond this, unsorted clips go first, then ignored, then the oldest sorted ones, 10-20000 (default 2000)
+      notify_review:
+        name: Review notification
+        description: Home Assistant notification "X wake word clips to review" when more than 20 wait (default off)
   publish_exchanges:
     name: Publish exchanges
     description: Fire a jarvis_echange Home Assistant event with each request and response (satellite, transcript, response, follow-up)

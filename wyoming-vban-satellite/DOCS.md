@@ -327,14 +327,35 @@ started the run (follow-up mode), otherwise from when the detection arrived
 minus the measured delay. Follow-up runs (started at the transcription) have
 no wake word: no clip. Each clip has a JSON file: satellite, time, wake
 word, RMS and peak level, the transcript and response that followed, and a
-**suggestion** (`probablement_faux` when nothing was said after the wake
-word: empty transcript, `...`, `*bip*`, or `stt-no-text-recognized`;
-otherwise `a_verifier`). The app never sorts for you.
+**suggestion** with its reason: `probablement_faux` (silence after the wake
+word, a captured `*bip*`, an overheard conversation: a long sentence or an
+answer saying it didn't understand, or reported from Home Assistant),
+`probablement_bon` (a normal sentence and an answer), otherwise
+`a_verifier`.
 
-The **Mot-clé** tab lists the clips, the latest first, by room and status,
-with a waveform, a play button and **Bon mot-clé** / **Faux déclenchement**
-/ **Ignorer** (keys B, F, I; arrows to move; Space to play), and the count of
-good and false triggers per room and day.
+**Every clip is listened to and validated by hand, one by one, whatever
+the suggestion: nothing is classified automatically, in either direction,
+and only validated clips (good or false) go to WakeForge.**
+
+The **Mot-clé** tab opens in **Revue** mode: the unsorted clips, the
+"probablement faux" first, then the oldest first. Each one plays when it
+shows (or with the replay button), with its room, time, transcript, Jarvis's
+response and the suggestion with its reason; the validation buttons only
+work once it has been heard:
+
+- **OK, c'était le mot-clé** (key O), **Pas OK, faux déclenchement** (N),
+  **Ignorer** (I: unusable, cut, saturated), **Passer** (→: decide later),
+  Space to listen again; after a choice the next clip plays;
+- **Annuler le dernier choix** puts it back in the queue (and out of the
+  inbox);
+- above: "12 à revoir · 3 faits aujourd'hui".
+
+The **Liste** mode shows all clips by room and status (keys B, F, I, arrows)
+and the count of good and false triggers per room and day.
+
+- **notify_review** (default `false`): a Home Assistant notification "X
+  extraits du mot-clé à revoir" while more than 20 wait, with a link to the
+  app.
 
 Sorted clips are copied for WakeForge to
 `/share/wakeforge/inbox/<wake word>/positifs/` (good) or `negatifs/` (false),
@@ -344,10 +365,10 @@ lists them (path, status, sha256, satellite, date, transcript) and is
 rewritten at each change. Sorting again moves the file; **Ignorer** removes
 it from the inbox. The clips themselves are in `/data/wake_clips`.
 
-"That wasn't for you": the button **Marquer le dernier déclenchement comme
-faux** in the tab, or the Home Assistant event `jarvis_faux_declenchement`
-(data `satellite: Salon`; without it, the last clip of any satellite), e.g.
-from a sentence:
+"That wasn't for you": the Home Assistant event `jarvis_faux_declenchement`
+(data `satellite: Salon`; without it, the last clip of any satellite) flags
+that clip "probablement faux" and puts it first in the review; it still has
+to be listened to and validated. E.g. from a sentence:
 
 ```yaml
 automation:

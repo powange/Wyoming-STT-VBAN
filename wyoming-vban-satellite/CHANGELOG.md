@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.11.0
+
+- **Wake word clips are validated by hand, one by one.** Nothing is classified automatically, in either direction; only validated clips (good or false) go to WakeForge's inbox.
+  - New suggestion `probablement_bon` (a normal sentence and an answer); every suggestion has its reason (silence ensuite, bip capté, conversation captée, phrase normale…). A suggestion is never a validation.
+  - **Revue mode** (default in the Mot-clé tab): the unsorted clips, "probablement faux" first, then the oldest first; each one plays when it shows; room, time, transcript, Jarvis's response, suggestion and reason; big buttons **OK, c'était le mot-clé** / **Pas OK, faux déclenchement**, plus **Ignorer** and **Passer**; keys O, N, I, Space (listen again), → (skip); next clip played after each choice; **Annuler le dernier choix**; "12 à revoir · 3 faits aujourd'hui"; full-width buttons on a phone.
+  - The validation buttons only work once the clip has been heard (in the list too).
+  - The "Marquer le dernier déclenchement comme faux" button is removed; the `jarvis_faux_declenchement` event now flags the clip for the review instead of classifying it.
+  - `wake_clips.notify_review` (off by default): a Home Assistant notification while more than 20 clips wait, with a link to the app.
+
 ## 3.10.0
 
 - **New: wake word clips**, to retrain the wake word model on what really triggers it (`wake_clips` block, off by default):

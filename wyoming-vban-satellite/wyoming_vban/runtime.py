@@ -7,11 +7,13 @@ import contextvars
 import dataclasses
 import logging
 import math
+import os
 import time
 import wave
 import weakref
 from typing import Any, Callable, Optional
 
+import aiohttp
 from wyoming.server import AsyncServer
 
 from .config import (
@@ -24,7 +26,7 @@ from .config import (
 from .discovery import Discovery
 from .wake_clips import ClipRecorder, ClipStore
 from .ha_audio import HaAudioSync, HaMicSettings, auto_gain_settings
-from .ha_ws import SUPERVISOR_WS_URL, HaStateWatcher, HaUnavailable
+from .ha_ws import SUPERVISOR_WS_URL, HaCommandError, HaStateWatcher, HaUnavailable
 from .calibration import LevelMeter
 from .mic_filter import MicFilter
 from .mirror import SatelliteMirrors
@@ -744,6 +746,9 @@ class AppRuntime:
         self.clips_root = clips_root
         self.clips_inbox = clips_inbox
         self.clip_store: Optional[ClipStore] = None
+        self._review_notified = 0  # queue size last notified (0: none shown)
+        self._ingress_path: Optional[str] = None
+        self.supervisor_url = "http://supervisor"
         self.options: Optional[AppOptions] = None
         # A satellite or receiver stopped on its own (outside a change)
         self.fatal = asyncio.Event()
@@ -878,6 +883,9 @@ class AppRuntime:
                 self.clip_store = ClipStore(
                     self.clips_root, self.clips_inbox,
                     options.wake_clips_retention_days, options.wake_clips_max,
+                    # (called from the thread writing a clip, too)
+                    on_change=lambda store, loop=asyncio.get_running_loop():
+                        loop.call_soon_threadsafe(self._clips_changed, store),
                 )
             except OSError as err:
                 _LOGGER.error("Wake word clips not kept: %s", err)
@@ -895,26 +903,80 @@ class AppRuntime:
         elif runner.clip_recorder is None or runner.clip_recorder.store is not self.clip_store:
             runner.clip_recorder = ClipRecorder(self.clip_store, runner.cfg.name)
 
-    def mark_last_false(self, satellite: str = "") -> Optional[dict[str, Any]]:
-        """The satellite's last clip (or the last one at all) is a false
-        trigger. Returns it, None if there is none."""
-        if self.clip_store is None:
-            return None
-        clips = self.clip_store.list(satellite)
-        if not clips:
-            return None
-        return self.clip_store.classify(clips[0]["id"], "faux")
-
     def _on_false_wake(self, data: dict[str, Any]) -> None:
-        satellite = str(data.get("satellite") or "")
+        """"That wasn't for you": the satellite's last clip is flagged for
+        the review; it is still to be listened to and validated by hand."""
+        if self.clip_store is None:
+            return
         try:
-            clip = self.mark_last_false(satellite)
+            clip = self.clip_store.report_false(str(data.get("satellite") or ""))
         except OSError as err:
-            _LOGGER.error("Last wake word clip not marked: %s", err)
+            _LOGGER.error("Last wake word clip not flagged: %s", err)
             return
         if clip is not None:
-            _LOGGER.info("Wake word clip %s (%s) marked as a false trigger from Home Assistant",
-                         clip["id"], clip["satellite"])
+            _LOGGER.info("Wake word clip %s (%s) reported false from Home Assistant: "
+                         "to validate in the review", clip["id"], clip["satellite"])
+
+    REVIEW_NOTIFY_ABOVE = 20
+    REVIEW_NOTIFICATION_ID = "vban_satellite_wake_clips_review"
+
+    def _clips_changed(self, store: ClipStore) -> None:
+        """Optional HA notification while more than REVIEW_NOTIFY_ABOVE clips
+        wait for their review (removed once back under it)."""
+        if self.options is None or not self.options.wake_clips_notify:
+            return
+        count = len(store.review_queue())
+        if count > self.REVIEW_NOTIFY_ABOVE:
+            if count != self._review_notified:
+                self._review_notified = count
+                asyncio.create_task(self._notify_review(count))
+        elif self._review_notified:
+            self._review_notified = 0
+            asyncio.create_task(self._notify_review(0))
+
+    async def _notify_review(self, count: int) -> None:
+        watcher = self._watcher
+        if watcher is None:
+            return
+        try:
+            if count:
+                link = await self._ingress_link()
+                message = f"{count} extraits du mot-clé à revoir (onglet Mot-clé, mode Revue)."
+                if link:
+                    message += f" [Ouvrir VBAN Satellite]({link})"
+                await watcher.call({
+                    "type": "call_service", "domain": "persistent_notification",
+                    "service": "create", "service_data": {
+                        "notification_id": self.REVIEW_NOTIFICATION_ID,
+                        "title": "Mot-clé : extraits à revoir", "message": message,
+                    },
+                })
+            else:
+                await watcher.call({
+                    "type": "call_service", "domain": "persistent_notification",
+                    "service": "dismiss",
+                    "service_data": {"notification_id": self.REVIEW_NOTIFICATION_ID},
+                })
+        except (HaUnavailable, HaCommandError) as err:
+            _LOGGER.debug("Review notification not sent: %s", err)
+
+    async def _ingress_link(self) -> str:
+        """The app's page in Home Assistant (/hassio/ingress/<slug>)."""
+        if self._ingress_path is None:
+            self._ingress_path = ""
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{self.supervisor_url}/addons/self/info",
+                        headers={"Authorization": f"Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}"},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        slug = ((await resp.json(content_type=None)).get("data") or {}).get("slug")
+                if slug:
+                    self._ingress_path = f"/hassio/ingress/{slug}"
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, AttributeError) as err:
+                _LOGGER.debug("App slug unknown: %s", err)
+        return self._ingress_path
 
     def _close_ha_audio(self) -> None:
         if self._ha_audio is not None:

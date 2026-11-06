@@ -16,7 +16,7 @@ from wyoming.wake import Detection
 
 from test_followup import FollowupTest
 from wyoming_vban.satellite import FollowupSettings, VbanSatelliteHandler
-from wyoming_vban.wake_clips import ClipRecorder, ClipStore, suggestion, wake_word_folder
+from wyoming_vban.wake_clips import ClipRecorder, ClipStore, suggest, suggestion, wake_word_folder
 
 RATE = 16000
 CHUNK = 1024  # samples, like the satellite's chunks to HA
@@ -88,8 +88,48 @@ class StoreTest(StoreCase):
         self.assertEqual(suggestion({"transcript": "..."}), "probablement_faux")
         self.assertEqual(suggestion({"stt_error": "stt-no-text-recognized"}),
                          "probablement_faux")
-        self.assertEqual(suggestion({"transcript": "allume la lumière"}), "a_verifier")
+        self.assertEqual(suggest({"transcript": "allume la lumière", "response": "C'est fait."}),
+                         ("probablement_bon", "phrase normale"))
+        self.assertEqual(suggest({"transcript": "et après il m'a dit qu'il viendrait demain "
+                                                "soir pour manger avec nous à la maison si "
+                                                "tout va bien", "response": "D'accord."})[1],
+                         "conversation captée")
+        self.assertEqual(suggest({"transcript": "le chien", "response": "Désolé, je n'ai pas compris."}),
+                         ("probablement_faux", "conversation captée"))
+        self.assertEqual(suggest({"transcript": "*bip*"})[1], "bip capté")
+        self.assertEqual(suggestion({"transcript": "allume la lumière"}), "a_verifier")  # no response
         self.assertEqual(suggestion({"transcript": None}), "a_verifier")
+        self.assertEqual(suggest({"transcript": "allume", "response": "Ok.", "reported_false": True}),
+                         ("probablement_faux", "signalé faux depuis Home Assistant"))
+
+    def test_unvalidated_clips_never_reach_the_inbox(self) -> None:
+        good = self.add(transcript="allume la lumière", response="C'est fait.")
+        false = self.add(transcript="")
+        self.assertEqual(self.store.list()[0]["suggestion"], "probablement_faux")
+        self.assertEqual({c["id"]: c["suggestion"] for c in self.store.list()}[good],
+                         "probablement_bon")
+        self.assertEqual(list(self.inbox.rglob("*.wav")), [])  # neither one
+        self.assertFalse((self.inbox / "dis_moi_jarvis" / "manifest.json").exists())
+        del false
+
+    def test_review_queue_order(self) -> None:
+        older = self.add(transcript="allume", response="Ok.")
+        newer = self.add(transcript="allume", response="Ok.")
+        false = self.add(transcript="")
+        sorted_one = self.add(transcript="allume", response="Ok.")
+        self.store.classify(sorted_one, "bon")
+        self.assertEqual([c["id"] for c in self.store.review_queue()], [false, older, newer])
+
+    def test_undo_puts_it_back_in_the_queue_and_out_of_the_inbox(self) -> None:
+        clip_id = self.add(transcript="allume", response="Ok.")
+        self.store.classify(clip_id, "bon")
+        self.assertEqual(len(list(self.inbox.rglob("*.wav"))), 1)
+        self.assertEqual(self.store.review_queue(), [])
+        self.store.classify(clip_id, "non_classe")  # "Annuler le dernier choix"
+        self.assertEqual([c["id"] for c in self.store.review_queue()], [clip_id])
+        self.assertEqual(list(self.inbox.rglob("*.wav")), [])
+        manifest = json.loads((self.inbox / "dis_moi_jarvis" / "manifest.json").read_text())
+        self.assertEqual(manifest["clips"], [])
 
     def test_folder_without_version(self) -> None:
         self.assertEqual(wake_word_folder("dis_moi_jarvis-6"), "dis_moi_jarvis")
@@ -271,7 +311,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
     def url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.port}{path}"
 
-    async def test_list_classify_and_last_false(self) -> None:
+    async def test_list_classify_and_report(self) -> None:
         self.assertIsNotNone(self.runtime.runners["Salon"].clip_recorder)
         store = self.runtime.clip_store
         first = store.add("Salon", "dis_moi_jarvis-6", chunk(500) * 47)
@@ -287,9 +327,27 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         async with self.http.post(self.url("/api/wake_clips/classify"),
                                   json={"id": first, "status": "peut-être"}) as resp:
             self.assertEqual(resp.status, 400)
-        # "Ce n'était pas pour toi": the last one, from HA or the page
+        # "Ce n'était pas pour toi" from HA: flagged for the review, not sorted
         self.runtime._on_false_wake({"satellite": "Salon"})
-        self.assertEqual(store.list(status="faux")[0]["id"], second)
-        async with self.http.post(self.url("/api/wake_clips/last_false"),
-                                  json={"satellite": "Cuisine"}) as resp:
-            self.assertEqual(resp.status, 404)
+        clip = next(c for c in store.list() if c["id"] == second)
+        self.assertEqual((clip["status"], clip["suggestion"]), ("non_classe", "probablement_faux"))
+        async with self.http.get(self.url("/api/wake_clips/review")) as resp:
+            body = await resp.json()
+        self.assertEqual(([c["id"] for c in body["queue"]], body["to_review"], body["done_today"]),
+                         ([second], 1, 1))
+
+    async def test_review_notification_over_20(self) -> None:
+        sent = []
+
+        async def notify(count: int) -> None:
+            sent.append(count)
+
+        self.runtime._notify_review = notify
+        self.runtime.options.wake_clips_notify = True
+        store = self.runtime.clip_store
+        ids = [store.add("Salon", "dis_moi_jarvis-6", chunk(500)) for _ in range(21)]
+        await asyncio.sleep(0.1)
+        self.assertEqual(sent, [21])  # only once it exceeds 20
+        store.classify(ids[0], "faux")
+        await asyncio.sleep(0.1)
+        self.assertEqual(sent, [21, 0])  # back to 20: removed

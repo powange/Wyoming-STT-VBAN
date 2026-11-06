@@ -244,6 +244,18 @@
   .ha-driven { display: grid; gap: 4px; padding: 8px 10px; border-radius: 6px; background: var(--section); }
   .ha-driven .vals { font-variant-numeric: tabular-nums; }
   .clips-head { display: grid; gap: 10px; }
+  .review { display: grid; gap: 8px; }
+  .review-count { font-weight: 600; margin: 0; }
+  .review .transcript { margin: 0; overflow-wrap: anywhere; }
+  .review .wave { height: 48px; width: 100%; display: block; }
+  .review .wave rect { fill: var(--accent); }
+  .review-buttons { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 8px; }
+  .review-buttons .big { padding: 14px; font-size: 16px; font-weight: 600; }
+  .review-buttons .big.ok:not(:disabled) { background: var(--ok); color: #fff; border-color: var(--ok); }
+  .review-buttons .big.nok:not(:disabled) { background: var(--danger); color: #fff; border-color: var(--danger); }
+  .pill.probablement_bon { background: var(--ok); }
+  .pill.probablement_faux { background: var(--danger); }
+  .pill.a_verifier { background: var(--muted); }
   .clip { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
   .clip.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .clip .info { display: grid; gap: 2px; min-width: 0; }
@@ -801,7 +813,9 @@ function renderGeneral() {
                   help: "extraits non classés ou ignorés" }),
             field(options.wake_clips, "max_clips", { label: "Nombre maximal", type: "number",
                   min: 10, max: 20000, placeholder: "2000",
-                  help: "au-delà, les non classés partent en premier" }))))),
+                  help: "au-delà, les non classés partent en premier" }),
+            field(options.wake_clips, "notify_review", { label: "Notifier quand plus de 20 extraits sont à revoir",
+                  type: "switch", wide: true, help: "notification Home Assistant" }))))),
     el("div", { class: "card panel" },
       section("Copies audio de debug (VBAN)", null,
         el("p", { class: "help" }, "Envoie une copie d'un flux audio vers un ordinateur (VBAN Receptor, VoiceMeeter)."),
@@ -1477,7 +1491,118 @@ function renderCalibration() {
 
 const CLIP_STATUS = { non_classe: "Non classés", bon: "Bons", faux: "Faux", ignore: "Ignorés" };
 const wake = { satellite: "", status: "non_classe", clips: [], counts: {}, enabled: true,
-               index: 0, audio: null, total: 0 };
+               index: 0, audio: null, total: 0, mode: "review",
+               listened: new Set() }; // clips heard: only those can be validated
+const review = { queue: [], toReview: 0, doneToday: 0, skipped: [], undo: [], blocked: false };
+const SUGGESTION_TEXT = { probablement_faux: "probablement faux", probablement_bon: "probablement bon",
+                          a_verifier: "à vérifier" };
+
+function openWake() {
+  if (wake.mode === "review") loadReview();
+  else loadClips();
+}
+
+async function loadReview(first) {
+  const query = new URLSearchParams({ satellite: wake.satellite });
+  try {
+    const resp = await fetch(`api/wake_clips/review?${query}`);
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
+    wake.enabled = body.enabled;
+    // Skipped ones go to the end (decided later); an undone one comes first
+    const skipped = new Set(review.skipped);
+    let queue = body.queue.filter((c) => !skipped.has(c.id))
+      .concat(review.skipped.map((id) => body.queue.find((c) => c.id === id)).filter(Boolean));
+    if (first) queue = [queue.find((c) => c.id === first), ...queue.filter((c) => c.id !== first)].filter(Boolean);
+    const before = review.queue[0]?.id;
+    Object.assign(review, { queue, toReview: body.to_review || 0, doneToday: body.done_today || 0 });
+    renderWake();
+    if (review.queue[0] && review.queue[0].id !== before) playClip(review.queue[0], true);
+  } catch (err) {
+    say(`Extraits indisponibles : ${err.message || err}`, "error");
+    renderWake();
+  }
+}
+
+async function postClassify(id, status) {
+  const resp = await fetch("api/wake_clips/classify", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, status }),
+  });
+  const body = await resp.json();
+  if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
+  return body.clip;
+}
+
+async function decide(status) {
+  const clip = review.queue[0];
+  if (!clip || !wake.listened.has(clip.id)) return;
+  try {
+    await postClassify(clip.id, status);
+    review.undo.push(clip.id);
+    review.skipped = review.skipped.filter((id) => id !== clip.id);
+    say("");
+    await loadReview();
+  } catch (err) {
+    say(`Classement impossible : ${err.message || err}`, "error");
+  }
+}
+
+function skipClip() {
+  const clip = review.queue[0];
+  if (!clip) return;
+  review.skipped = review.skipped.filter((id) => id !== clip.id).concat(clip.id);
+  loadReview();
+}
+
+async function undoLast() {
+  const id = review.undo.pop();
+  if (!id) return;
+  try {
+    await postClassify(id, "non_classe"); // back in the queue, out of the inbox
+    say("Dernier choix annulé : l'extrait est de nouveau à revoir.", "ok");
+    await loadReview(id);
+  } catch (err) {
+    review.undo.push(id);
+    say(`Annulation impossible : ${err.message || err}`, "error");
+  }
+}
+
+function reviewCard() {
+  const clip = review.queue[0];
+  const counter = el("p", { class: "review-count" },
+    `${review.toReview} à revoir · ${review.doneToday} fait${review.doneToday > 1 ? "s" : ""} aujourd'hui`);
+  const undo = review.undo.length
+    ? el("button", { type: "button", onclick: undoLast }, "Annuler le dernier choix") : null;
+  if (!clip) {
+    return el("div", { class: "card panel review" }, counter,
+      el("p", {}, "Rien à revoir pour l'instant."), undo);
+  }
+  const heard = wake.listened.has(clip.id);
+  const when = new Date(clip.time * 1000).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "medium" });
+  const big = (cls, text, key, onclick, enabled = heard) => el("button", {
+    type: "button", class: `big ${cls}`, disabled: enabled ? null : "", onclick,
+  }, text, " ", el("kbd", {}, key));
+  return el("div", { class: "card panel review" }, counter,
+    el("div", { class: "meta" }, `${clip.satellite} · ${when}`),
+    el("div", {}, el("span", { class: `pill ${clip.suggestion}` }, SUGGESTION_TEXT[clip.suggestion] || clip.suggestion),
+       " ", el("span", { class: "help" }, clip.suggestion_reason || "")),
+    el("p", { class: "transcript" }, "Transcrit ensuite : ",
+       clip.transcript === null || clip.transcript === undefined
+         ? el("em", {}, clip.stt_error ? `(${clip.stt_error})` : "(rien)") : `« ${clip.transcript} »`),
+    clip.response ? el("p", { class: "transcript" }, "Réponse de Jarvis : ", `« ${clip.response} »`) : null,
+    waveform(clip.peaks || []),
+    el("button", { type: "button", onclick: () => playClip(clip, true) }, "▶ Réécouter ", el("kbd", {}, "Espace")),
+    !heard ? el("p", { class: "help" }, review.blocked
+      ? "Le navigateur a bloqué la lecture automatique : touchez « Réécouter »."
+      : "Écoutez l'extrait avant de décider.") : null,
+    el("div", { class: "review-buttons" },
+      big("ok", "OK, c'était le mot-clé", "O", () => decide("bon")),
+      big("nok", "Pas OK, faux déclenchement", "N", () => decide("faux")),
+      big("", "Ignorer (inutilisable)", "I", () => decide("ignore")),
+      big("", "Passer (plus tard)", "→", skipClip, true)),
+    undo);
+}
 
 async function loadClips() {
   const query = new URLSearchParams({ satellite: wake.satellite, status: wake.status });
@@ -1494,10 +1619,17 @@ async function loadClips() {
   renderWake();
 }
 
-function playClip(clip) {
+function playClip(clip, inReview = false) {
   if (wake.audio) wake.audio.pause();
   wake.audio = new Audio(`api/wake_clips/audio?id=${encodeURIComponent(clip.id)}`);
-  wake.audio.play().catch((err) => say(`Lecture impossible : ${err}`, "error"));
+  // Heard once it plays: the validation buttons wake up
+  wake.audio.addEventListener("playing", () => {
+    if (!wake.listened.has(clip.id)) { wake.listened.add(clip.id); review.blocked = false; renderWake(); }
+  });
+  wake.audio.play().catch((err) => {
+    if (inReview && err.name === "NotAllowedError") { review.blocked = true; renderWake(); }
+    else say(`Lecture impossible : ${err}`, "error");
+  });
 }
 
 async function classifyClip(clip, status) {
@@ -1515,21 +1647,6 @@ async function classifyClip(clip, status) {
     await loadClips();
   } catch (err) {
     say(`Classement impossible : ${err.message || err}`, "error");
-  }
-}
-
-async function markLastFalse() {
-  try {
-    const resp = await fetch("api/wake_clips/last_false", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ satellite: wake.satellite }),
-    });
-    const body = await resp.json();
-    if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
-    say(`Dernier déclenchement (${body.clip.satellite}) marqué comme faux.`, "ok");
-    await loadClips();
-  } catch (err) {
-    say(err.message || `Erreur : ${err}`, "error");
   }
 }
 
@@ -1556,14 +1673,15 @@ function clipRow(clip, index) {
     : `« ${clip.transcript} »`;
   const button = (status, text, key) => el("button", {
     type: "button", "aria-pressed": String(clip.status === status),
+    disabled: wake.listened.has(clip.id) ? null : "", title: "Écoutez-le d'abord",
     onclick: () => { wake.index = index; classifyClip(clip, status); },
   }, text, " ", el("kbd", {}, key));
   const row = el("div", { class: `clip${index === wake.index ? " selected" : ""}` },
     el("button", { type: "button", title: "Écouter", onclick: () => { wake.index = index; playClip(clip); renderWake(); } }, "▶"),
     el("div", { class: "info" },
       el("span", { class: "meta" }, `${when} · ${clip.satellite} · ${clip.wake_word || "?"}`,
-         clip.status === "non_classe" && clip.suggestion === "probablement_faux"
-           ? el("span", { class: "pill" }, "probablement faux") : null),
+         clip.status === "non_classe" && clip.suggestion !== "a_verifier"
+           ? el("span", { class: `pill ${clip.suggestion}` }, SUGGESTION_TEXT[clip.suggestion]) : null),
       el("span", { class: "transcript" }, transcript,
          clip.response ? el("span", { class: "meta" }, ` → « ${clip.response} »`) : null)),
     waveform(clip.peaks || []),
@@ -1599,14 +1717,27 @@ function renderWake() {
   const select = el("select", {}, el("option", { value: "" }, "Toutes les pièces"),
     names.map((n) => el("option", { value: n }, n)));
   select.value = wake.satellite;
-  select.addEventListener("change", () => { wake.satellite = select.value; wake.index = 0; loadClips(); });
+  select.addEventListener("change", () => { wake.satellite = select.value; wake.index = 0; openWake(); });
+  const modes = segmented(null, wake.mode, [["review", "Revue"], ["list", "Liste"]],
+    (value) => { wake.mode = value; openWake(); });
+  if (wake.mode === "review") {
+    panels.wake.replaceChildren(el("div", { class: "clips-head" },
+      el("div", { class: "card panel" },
+        el("div", { class: "row-buttons", style: "margin-top: 0; align-items: center" }, modes, el("label", {}, select)),
+        el("p", { class: "help" }, "Chaque extrait s'écoute et se valide à la main ; seuls les extraits validés partent vers WakeForge. Raccourcis : ",
+           el("kbd", {}, "O"), " OK, ", el("kbd", {}, "N"), " pas OK, ", el("kbd", {}, "I"), " ignorer, ",
+           el("kbd", {}, "Espace"), " réécouter, ", el("kbd", {}, "→"), " passer.")),
+      reviewCard()));
+    return;
+  }
   panels.wake.replaceChildren(el("div", { class: "clips-head" },
     el("div", { class: "card panel" },
+      el("div", { class: "row-buttons", style: "margin-top: 0" }, modes),
       el("div", { class: "row-buttons", style: "margin-top: 0; align-items: center" },
         el("label", {}, select),
         segmented(null, wake.status, [...Object.entries(CLIP_STATUS), ["", "Tous"]],
           (value) => { wake.status = value; wake.index = 0; loadClips(); }),
-        el("button", { type: "button", onclick: markLastFalse }, "Marquer le dernier déclenchement comme faux")),
+),
       el("p", { class: "help" }, "Raccourcis : ", el("kbd", {}, "B"), " bon, ", el("kbd", {}, "F"), " faux, ",
          el("kbd", {}, "I"), " ignorer, ", el("kbd", {}, "↑"), el("kbd", {}, "↓"), " extrait précédent / suivant, ",
          el("kbd", {}, "Espace"), " écouter.")),
@@ -1620,8 +1751,20 @@ function renderWake() {
 document.addEventListener("keydown", (event) => {
   if (currentTab !== "wake" || event.target.closest("input, select, textarea") ||
       event.ctrlKey || event.metaKey || event.altKey) return;
-  const clip = wake.clips[wake.index];
   const key = event.key.toLowerCase();
+  if (wake.mode === "review") {
+    const current = review.queue[0];
+    if (!current) return;
+    if (key === "o") decide("bon");
+    else if (key === "n") decide("faux");
+    else if (key === "i") decide("ignore");
+    else if (key === " ") playClip(current, true);
+    else if (key === "arrowright") skipClip();
+    else return;
+    event.preventDefault();
+    return;
+  }
+  const clip = wake.clips[wake.index];
   if (key === "arrowdown" || key === "arrowright") {
     wake.index = Math.min(wake.index + 1, wake.clips.length - 1);
   } else if (key === "arrowup" || key === "arrowleft") {
@@ -1651,7 +1794,7 @@ function showTab(name) {
   if (name === "status") refreshStatus();
   if (name === "calibration") openCalibration();
   else closeCalibration();
-  if (name === "wake") loadClips();
+  if (name === "wake") openWake();
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
