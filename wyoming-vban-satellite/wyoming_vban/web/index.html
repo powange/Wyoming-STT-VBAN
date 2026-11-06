@@ -602,7 +602,10 @@ function followupSection(sat, output) {
                 wide: true, help: "écouter la réponse quand Jarvis pose une question" })),
     on && el("div", { class: "sub" }, grid(
       field(fu, "timeout_s", { label: "Délai sans parole (s)", type: "number",
-            min: 3, max: 30, placeholder: "8" }),
+            min: 3, max: 30, placeholder: "8", help: "compté à l'ouverture réelle de l'écoute" }),
+      field(fu, "beep_latency_ms", { label: "Latence du bip (ms)", type: "number",
+            min: 0, max: 3000, placeholder: output === "media_player" ? "1500" : "400",
+            help: "temps que met le haut-parleur à jouer le bip" }),
       el("div", { class: "wide group-title" },
         field(fu, "beep", { label: "Bip avant l'écoute", type: "switch", def: true }),
         output !== "none" && testButton(sat, "followup_beep")))));

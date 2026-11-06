@@ -65,6 +65,7 @@ OPTION_BLOCKS: dict[str, dict[str, str]] = {
         "enabled": "followup_enabled",
         "beep": "followup_beep",
         "timeout_s": "followup_timeout_s",
+        "beep_latency_ms": "followup_beep_latency_ms",
     },
     "waiting_sounds": {
         "listen_end_mode": "listen_end_mode",
@@ -157,6 +158,9 @@ class SatelliteConfig:
     followup_enabled: bool = True
     followup_beep: bool = True
     followup_timeout_s: int = 8
+    # Speaker latency of the follow-up beep, 0-3000 ms (None: the output's
+    # default, 400 ms on VBAN, 1500 ms on a media player without its state)
+    followup_beep_latency_ms: Optional[int] = None
     # Announcements while the response is prepared. Modes: ANNOUNCEMENT_MODES
     # ("" = not set: default, or from the pre-3.2 booleans below)
     listen_end_mode: str = "none"
@@ -274,6 +278,15 @@ class SatelliteConfig:
                 self.name, self.followup_timeout_s, timeout,
             )
             self.followup_timeout_s = timeout
+
+        if self.followup_beep_latency_ms is not None:
+            latency = max(0, min(3000, int(self.followup_beep_latency_ms)))
+            if latency != self.followup_beep_latency_ms:
+                _LOGGER.warning(
+                    "[%s] followup.beep_latency_ms %s clamped to %d (valid range 0-3000)",
+                    self.name, self.followup_beep_latency_ms, latency,
+                )
+            self.followup_beep_latency_ms = latency
 
         delay = max(300, min(5000, self.thinking_delay_ms))
         if delay != self.thinking_delay_ms:

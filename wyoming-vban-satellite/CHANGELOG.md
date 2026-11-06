@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.9.2
+
+- **Fix (follow-up without wake word)**: the listening opened while the speaker was still playing the beep. With an Atom on VBAN (no microphone audio while it plays, playback buffered), Whisper transcribed the beep ("*bip*") and the no-speech timeout started before the microphone was even back, leaving about 1 s to answer. Now:
+  - the listening opens when the beep has really played: VBAN, once sent plus the speaker latency; media player, from its state (playing, then no longer playing the beep), or else the beep's length plus the latency;
+  - if the satellite cut its microphone stream, the listening waits for it to come back, plus `media_player.mic_mute_tail_ms`; at most 4 s after the beep (then a warning, and it listens anyway);
+  - every microphone sample received before the opening is replaced by silence (the pre-roll of the beep guard is gone): no beep, no end of the response in the transcription;
+  - `followup.timeout_s` counts from the opening;
+  - log: `Follow-up: beep played, mic back after X.XX s, listening for N s`.
+- **New** `followup.beep_latency_ms` (0–3000): speaker latency of the beep, per satellite (default 400 ms on VBAN, 1500 ms on a media player whose state can't be followed).
+
 ## 3.9.1
 
 Friction points from the review.

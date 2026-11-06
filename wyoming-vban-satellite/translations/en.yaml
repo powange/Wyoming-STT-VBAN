@@ -108,7 +108,10 @@ configuration:
             description: Beep when listening (default on)
           timeout_s:
             name: Timeout (s)
-            description: Back to the wake word without speech (3-30, default 8)
+            description: Back to the wake word without speech (3-30, default 8), counted from when the listening really opens
+          beep_latency_ms:
+            name: Beep latency (ms)
+            description: How long the speaker takes to play the beep, 0-3000 (default empty, 400 on VBAN, 1500 on a media player whose state can't be followed). The listening opens after the beep, once the microphone stream is back, plus media_player.mic_mute_tail_ms
       waiting_sounds:
         name: Announcements while waiting
         description: What the satellite plays between your request and the response (empty = defaults)

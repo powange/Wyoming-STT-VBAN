@@ -9,6 +9,7 @@ import asyncio
 import socket
 import time
 import unittest
+import unittest.mock
 from typing import Optional
 
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
@@ -275,8 +276,9 @@ class FollowupBeepTest(FollowupTest):
         # The response, then the 150 ms beep (16 kHz, 16-bit), sent with the run
         self.assertEqual(self.sender.sent, [4410, int(16000 * 0.15) * 2])
 
-    async def _mic(self, seconds: float) -> None:
-        """Loud microphone audio, in real time."""
+    async def _mic(self, seconds: float, delay: float = 0.0) -> None:
+        """Loud microphone audio, in real time (after delay)."""
+        await asyncio.sleep(delay)
         for i in range(int(seconds / 0.016)):
             self.receiver.callback(VbanPacket(
                 sample_rate=16000, samples_per_frame=256, channels=1,
@@ -285,14 +287,15 @@ class FollowupBeepTest(FollowupTest):
             ))
             await asyncio.sleep(0.016)
 
-    async def _chunks_after_run(self, seconds: float) -> tuple[float, list]:
-        """(time of the ASR run, [(time, loud?) of audio chunks / audio-stop])."""
+    async def _events_after_asr_run(self, seconds: float, mic=None) -> list:
+        """[(time from the ASR run, True/False loud chunk, or "audio-stop")];
+        mic(t_run) starts the microphone feed."""
         await self.next_run()
         await self.respond("Quelle lumière ?")
         run = await self.next_run()
         self.assertEqual(run.start_stage, "asr")
         t_run = time.monotonic()
-        mic = asyncio.create_task(self._mic(seconds))
+        feed = asyncio.create_task(mic()) if mic else None
         events = []
         while (left := t_run + seconds - time.monotonic()) > 0:
             try:
@@ -303,33 +306,54 @@ class FollowupBeepTest(FollowupTest):
                 events.append((time.monotonic() - t_run, any(event.payload)))
             elif event.type == "audio-stop":
                 events.append((time.monotonic() - t_run, "audio-stop"))
-        await mic
-        return t_run, events
+        if feed:
+            feed.cancel()
+            await asyncio.gather(feed, return_exceptions=True)
+        return events
 
-    async def test_mic_silent_during_beep_guard_then_preroll(self) -> None:
-        _, events = await self._chunks_after_run(1.5)
-        chunks = [(t, loud) for t, loud in events if loud != "audio-stop"]
-        # Only silence during the guard
-        self.assertTrue(all(not loud for t, loud in chunks if t < self.GUARD - 0.05))
-        # Then the kept audio arrives at once, ahead of real time
-        loud = [t for t, is_loud in chunks if is_loud]
+    def _cut_mic_feed(self):
+        """The mic flows during the response, then the satellite cuts it
+        (like an Atom while it plays)."""
+        self.feed = asyncio.create_task(self._mic(0.3))
+
+    async def test_mic_cut_then_back_2_4_s_after_the_beep(self) -> None:
+        self._cut_mic_feed()
+        await self.feed
+        events = await self._events_after_asr_run(4.5, lambda: self._mic(3.0, delay=2.4))
+        opened = 2.4 + self.followup.mic_tail_s
+        loud = [t for t, kind in events if kind is True]
+        # Nothing heard before the mic came back (+ tail): no beep, no response end
         self.assertTrue(loud)
-        first = loud[0]
-        self.assertGreaterEqual(first, self.GUARD - 0.05)
-        # The kept audio (the last 0.3 s of the guard, after the beep)
-        burst = [t for t in loud if t < first + 0.1]
-        self.assertGreaterEqual(len(burst), 4)
+        self.assertGreaterEqual(min(loud), opened - 0.05)
+        self.assertTrue(all(kind is not True for t, kind in events if t < opened - 0.05))
+        # The no-speech timeout counts from the opening, not from the run
+        stop = [t for t, kind in events if kind == "audio-stop"]
+        self.assertTrue(stop)
+        self.assertGreaterEqual(stop[0], opened + self.followup.timeout_s - 0.1)
 
-    async def test_no_speech_timeout_starts_after_guard(self) -> None:
-        # The mic is silent here: no voice-started, so the timeout fires
-        await self.next_run()
-        await self.respond("Quelle pièce ?")
-        await self.next_run()
-        t_run = time.monotonic()
-        self.assertIsNotNone(await self.next_event("audio-stop", timeout=3))
-        self.assertGreaterEqual(
-            time.monotonic() - t_run, self.GUARD + self.followup.timeout_s - 0.05,
-        )
+    async def test_mic_never_cut(self) -> None:
+        mic = asyncio.create_task(self._mic(6.0))  # flows all along
+        try:
+            events = await self._events_after_asr_run(1.5)
+        finally:
+            mic.cancel()
+            await asyncio.gather(mic, return_exceptions=True)
+        opened = VbanSatelliteHandler.BEEP_LATENCY_VBAN_S + self.followup.mic_tail_s
+        loud = [t for t, kind in events if kind is True]
+        self.assertTrue(loud)
+        self.assertGreaterEqual(min(loud), opened - 0.05)
+        self.assertLess(min(loud), opened + 0.3)
+
+    async def test_mic_never_back_opens_at_the_limit(self) -> None:
+        self._cut_mic_feed()
+        await self.feed
+        with unittest.mock.patch.object(VbanSatelliteHandler, "FOLLOWUP_OPEN_MAX_S", 1.5):
+            with self.assertLogs("wyoming_vban.satellite", "WARNING") as logs:
+                events = await self._events_after_asr_run(2.5)
+        self.assertTrue(any("listening anyway" in line for line in logs.output))
+        stop = [t for t, kind in events if kind == "audio-stop"]
+        self.assertTrue(stop)
+        self.assertGreaterEqual(stop[0], 1.5 + self.followup.timeout_s - 0.1)
 
 
 THINKING = Cue.tones(THINKING_NOTES, 0.15)

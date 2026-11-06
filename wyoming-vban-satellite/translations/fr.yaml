@@ -108,7 +108,10 @@ configuration:
             description: Bip quand le satellite ecoute (active par defaut)
           timeout_s:
             name: Delai (s)
-            description: Retour au mot-cle sans parole (3-30, defaut 8)
+            description: Retour au mot-cle sans parole (3-30, defaut 8), compte a partir de l'ouverture reelle de l'ecoute
+          beep_latency_ms:
+            name: Latence du bip (ms)
+            description: Temps que met le haut-parleur a jouer le bip, 0-3000 (vide par defaut, 400 en VBAN, 1500 sur un media player dont l'etat n'est pas suivi). L'ecoute s'ouvre apres le bip, au retour du flux micro, plus media_player.mic_mute_tail_ms
       waiting_sounds:
         name: Annonces d'attente
         description: Ce que le satellite joue entre votre demande et la reponse (vide = valeurs par defaut)

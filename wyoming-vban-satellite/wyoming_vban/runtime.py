@@ -235,6 +235,10 @@ def report_problem(text: str) -> None:
     PROBLEMS.append({"time": time.time(), "text": text})
 
 
+def _ms_to_s(value: Optional[int]) -> Optional[float]:
+    return None if value is None else value / 1000
+
+
 def _log_task_failure(what: str) -> Callable[[asyncio.Task], None]:
     """Done-callback logging an unexpected end of a background task."""
 
@@ -286,6 +290,8 @@ class SatelliteRunner:
         self.followup = FollowupSettings(
             enabled=cfg.followup_enabled, beep=cfg.followup_beep,
             timeout_s=cfg.followup_timeout_s,
+            beep_latency_s=_ms_to_s(cfg.followup_beep_latency_ms),
+            mic_tail_s=cfg.mic_mute_tail_ms / 1000,
         )
         # Last values of the satellite's HA microphone entities (if followed)
         self.ha_mic: Optional[HaMicSettings] = None
@@ -564,6 +570,8 @@ class SatelliteRunner:
         self.mic_filter.configure(*self.mic_settings())
         self.followup.beep = cfg.followup_beep
         self.followup.timeout_s = cfg.followup_timeout_s
+        self.followup.beep_latency_s = _ms_to_s(cfg.followup_beep_latency_ms)
+        self.followup.mic_tail_s = cfg.mic_mute_tail_ms / 1000
         # Handlers hold this object: change its content
         for field in dataclasses.fields(WaitingCues):
             setattr(self.cues, field.name, getattr(cues, field.name))

@@ -222,7 +222,8 @@ needed as usual.
 
 - **enabled**: Enable follow-ups (default: `true`)
 - **beep**: Play a short beep (150 ms, 880 Hz) on the satellite's output (VBAN or media player) when it starts listening for the answer (default: `true`)
-- **timeout_s**: If no speech is detected within this time, go back to wake word listening, 3–30 s (default: 8)
+- **timeout_s**: If no speech is detected within this time, go back to wake word listening, 3–30 s (default: 8). Counted from when the listening really opens (see below).
+- **beep_latency_ms**: how long the speaker takes to play the beep, 0–3000 ms. Empty (default): 400 ms on VBAN, 1500 ms on a media player whose state can't be followed.
 
 At most 3 follow-ups in a row; then the wake word is required again.
 
@@ -230,11 +231,22 @@ When Home Assistant gives no spoken response (an empty answer), the app sees
 the satellite's state go back to idle in Home Assistant and listens for the
 wake word again at once (after 60 s if Home Assistant can't be reached).
 
-The follow-up run starts together with the beep. The microphone is replaced
-by silence while the beep plays (0.45 s on a media player, 0.55 s on VBAN),
-so the beep isn't captured; if you already started answering by then, the
-audio recorded during that time is sent first. The no-speech timeout starts
-once the microphone is open.
+The follow-up run starts together with the beep, but the listening only
+opens once the beep has really played:
+
+- VBAN output: when the beep has been sent, plus `beep_latency_ms`;
+- media player: when Home Assistant shows it playing then no longer playing
+  the beep (without its state: the beep's length plus `beep_latency_ms`);
+- then, if the satellite cut its microphone stream while playing (an Atom
+  sends no microphone audio while its speaker plays), when the stream comes
+  back; plus `media_player.mic_mute_tail_ms` (250 ms by default);
+- at most 4 s after the beep: if the microphone doesn't come back, the
+  listening opens anyway (warning in the log).
+
+Until then, the microphone audio is replaced by silence: neither the beep
+nor the end of the response reaches the transcription. The no-speech
+timeout starts at that opening. Log: `Follow-up: beep played, mic back after
+2.65 s, listening for 3 s`.
 
 How it works: Home Assistant does not tell Wyoming satellites to continue
 the conversation, and its automatic restart (`restart_on_end`) always

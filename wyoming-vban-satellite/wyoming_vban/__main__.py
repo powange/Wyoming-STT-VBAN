@@ -115,6 +115,10 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Back to the wake word if no speech within this time (3-30)",
     )
+    parser.add_argument(
+        "--followup-beep-latency-ms", type=int, default=None,
+        help="Speaker latency of the follow-up beep, 0-3000 (default: per output)",
+    )
 
     # Microphone clean-up
     parser.add_argument(
