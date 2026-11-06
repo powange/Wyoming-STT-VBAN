@@ -86,6 +86,11 @@ class SatelliteMirrors:
         self._tts: list[VbanSender] = []
         self._build(mirrors)
 
+    def __bool__(self) -> bool:
+        """Copies of the sent microphone or of the responses configured
+        (lets the satellite skip that work per chunk when there are none)."""
+        return bool(self._mic_sent or self._tts)
+
     async def reconfigure(self, mirrors: list[DebugMirror]) -> None:
         """Replace the mirrors (the satellite keeps running)."""
         await self.close()

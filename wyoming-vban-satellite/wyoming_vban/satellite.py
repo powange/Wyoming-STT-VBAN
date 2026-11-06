@@ -3,6 +3,7 @@
 import asyncio
 import audioop
 import collections
+import functools
 import logging
 import math
 import re
@@ -83,9 +84,15 @@ def make_tones(rate: int, notes: list[tuple[float, float]], volume: float) -> by
     return struct.pack(f"<{len(samples)}h", *samples)
 
 
+@functools.lru_cache(maxsize=4)
 def make_beep(rate: int, seconds: float = 0.15, freq: float = 880.0) -> bytes:
-    """Follow-up beep: one 880 Hz note."""
+    """Follow-up beep: one 880 Hz note (computed once per rate)."""
     return make_tones(rate, [(freq, seconds)], 0.3)
+
+
+@functools.lru_cache(maxsize=2)
+def _beep_wav(rate: int, seconds: float) -> bytes:
+    return build_wav(make_beep(rate, seconds), rate, 2, 1)
 
 
 @dataclass
@@ -526,15 +533,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return True
 
         if AudioChunk.is_type(event.type):
+            chunk = AudioChunk.from_event(event)  # parsed once
             if self._mirrors:
-                chunk = AudioChunk.from_event(event)
                 self._mirrors.tts(chunk.audio, chunk.rate, chunk.width, chunk.channels)
             if self._media_output:
-                self._buffer_tts_chunk(AudioChunk.from_event(event).audio)
+                self._buffer_tts_chunk(chunk.audio)
                 return True
             if self._vban_sender:
                 try:
-                    chunk = AudioChunk.from_event(event)
                     self._vban_sender.send(
                         chunk.audio,
                         sample_rate=chunk.rate,
@@ -1115,8 +1121,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         guard = 0.0
         if self._media_output:
             rate = 22050
-            beep = make_beep(rate, self.BEEP_SECONDS)
-            url = self._media_output.publish(build_wav(beep, rate, 2, 1))
+            url = self._media_output.publish(_beep_wav(rate, self.BEEP_SECONDS))
             if await self._media_output.play(url):
                 guard = self.BEEP_GUARD_S
         if not guard and self._vban_sender:
@@ -1230,11 +1235,19 @@ class VbanSatelliteHandler(AsyncEventHandler):
         audio_buffer = bytearray()
         mic_muted = False
         filter_error_logged = False
+        silence = bytes(target_bytes)  # sent instead of the mic when needed
+        debug = _LOGGER.isEnabledFor(logging.DEBUG)
 
         try:
             while self._streaming and self._is_running:
                 try:
                     pcm = await asyncio.wait_for(self._audio_queue.get(), timeout=2.0)
+                    # Take what else is waiting in one go (fewer wake-ups)
+                    if not self._audio_queue.empty():
+                        parts = [pcm]
+                        while not self._audio_queue.empty():
+                            parts.append(self._audio_queue.get_nowait())
+                        pcm = b"".join(parts)
                 except asyncio.TimeoutError:
                     timeouts += 1
                     had_timeout = True
@@ -1261,7 +1274,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
                 # Send when we have enough data
                 while len(audio_buffer) >= target_bytes:
-                    send_pcm = bytes(audio_buffer[:target_bytes])
+                    with memoryview(audio_buffer) as view:  # one copy
+                        send_pcm = view[:target_bytes].tobytes()
                     del audio_buffer[:target_bytes]
 
                     # Between runs: don't send
@@ -1280,21 +1294,23 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
                     # During the guard, HA gets silence instead of the mic
                     if in_guard:
-                        send_pcm = bytes(len(send_pcm))
+                        send_pcm = silence
                     elif self._preroll:
                         await self._flush_preroll()
 
                     # A waiting sound is playing: don't capture it
                     if now < self._mic_silence_until:
-                        send_pcm = bytes(len(send_pcm))
+                        send_pcm = silence
 
                     chunks_sent += 1
 
-                    # Track peak audio level over reporting window
-                    rms = audioop.rms(send_pcm, WYOMING_WIDTH)
-                    db = 20 * math.log10(max(rms, 1) / 32768)
-                    if db > peak_db:
-                        peak_db = db
+                    # Level: only computed for the logs that show it
+                    db = 0.0
+                    if debug or chunks_sent == 1 or had_timeout:
+                        rms = audioop.rms(send_pcm, WYOMING_WIDTH)
+                        db = 20 * math.log10(max(rms, 1) / 32768)
+                        if db > peak_db:
+                            peak_db = db
 
                     # Log first chunk, and first chunk after any silence
                     if chunks_sent == 1:
@@ -1308,7 +1324,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                             self._mic_label, chunks_sent, db,
                         )
                         had_timeout = False
-                    elif chunks_sent % 50 == 0:
+                    elif debug and chunks_sent % 50 == 0:
                         _LOGGER.debug(
                             "Audio chunks: %d (peak: %.1f dB, current: %.1f dB)",
                             chunks_sent, peak_db, db,
@@ -1327,7 +1343,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                             )
                             mic_muted = muted
                         if muted:
-                            send_pcm = bytes(len(send_pcm))
+                            send_pcm = silence
 
                     chunk = AudioChunk(
                         rate=WYOMING_RATE,

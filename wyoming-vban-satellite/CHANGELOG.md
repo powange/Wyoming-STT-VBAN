@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.8.2
+
+Optimisations from the review.
+
+- **Wake word test** about twice as fast (about 22 s instead of 42): the audio goes to openWakeWord while the wake words are said, processed live with the current and the proposed settings, instead of being replayed in real time afterwards.
+- **One Zeroconf responder** for all the satellites (one per satellite before, each with its own sockets).
+- **Microphone audio loop** (every 64 ms per satellite): packets waiting in the queue taken in one go, one copy per chunk, silence prepared once, level computed only when a log shows it. TTS chunks parsed once; debug copies skipped when none is configured.
+- **VBAN**: subscribers kept as tuples (no list copy per packet); the sender's header built once per stream name.
+- **HA microphone entities**: entity registry events (fired for any entity in HA) only trigger a new lookup when they can concern a followed entity; the followed entities are read with `subscribe_entities` (their states only) instead of every state of HA.
+- **HA WebSocket**: changing the media player of a satellite replaces its subscription instead of reconnecting (the other subscriptions no longer drop for a moment).
+- The follow-up beep is computed once.
+- `microphone.stream_name` now applies without restarting the satellite.
+- **Interface**: the live meter pauses while the browser tab is hidden; its fallback polling waits for each answer instead of piling requests up; expired calibrations are deleted every minute even when the page isn't used again.
+
 ## 3.8.1
 
 Fixes from a full review of the app.

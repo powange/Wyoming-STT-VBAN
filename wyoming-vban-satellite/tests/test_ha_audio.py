@@ -143,12 +143,17 @@ class FakeHomeAssistant:
                 result = ENTITIES
             elif data["type"] == "get_states":
                 result = [{"entity_id": e, "state": s} for e, s in self.states.items()]
-            elif data["type"] == "subscribe_trigger":
+            elif data["type"] == "subscribe_entities":
                 self.trigger_ids.append(data["id"])
+                self.subscribed_entities = data["entity_ids"]
             elif data["type"] == "call_service":
                 self.services.append(data)
             await ws.send_json({"id": data["id"], "type": "result", "success": True,
                                 "result": result})
+            if data["type"] == "subscribe_entities":  # current states first
+                await ws.send_json({"id": data["id"], "type": "event", "event": {"a": {
+                    e: {"s": s, "a": {}} for e, s in self.states.items()
+                    if e in data["entity_ids"]}}})
             if data["type"] == "call_service":  # the entity changes, like in HA
                 value = data["service_data"].get("value", data["service_data"].get("option"))
                 await self.set_state(data["target"]["entity_id"], str(value))
@@ -159,8 +164,7 @@ class FakeHomeAssistant:
         for ws in self.sockets:
             if self.trigger_ids and not ws.closed:
                 await ws.send_json({"id": self.trigger_ids[-1], "type": "event", "event": {
-                    "variables": {"trigger": {"entity_id": entity_id, "to_state": {
-                        "entity_id": entity_id, "state": state}}}}})
+                    "c": {entity_id: {"+": {"s": state}}}}})
 
 
 def satellite_options(port: int, mic_port: int, follow: bool) -> dict:

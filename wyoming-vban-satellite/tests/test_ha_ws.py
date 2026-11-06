@@ -70,6 +70,7 @@ class FakeHomeAssistant:
                 self.subscribed.set()
             else:
                 self.received.append(data)
+                await ws.send_json({"id": data["id"], "type": "result", "success": True})
         return ws
 
     def _subscription_id(self, msg_type: str, event_type: str = "") -> int:
@@ -132,6 +133,16 @@ class HaStateWatcherTest(unittest.IsolatedAsyncioTestCase):
             self.ha.subscriptions[0]["trigger"],
             {"platform": "state", "entity_id": [ENTITY]},
         )
+
+    async def test_other_media_player_without_reconnecting(self) -> None:
+        ws = self.ha.sockets[-1]
+        await self.watcher.set_entity_ids(["media_player.salon"])
+        await asyncio.sleep(0.2)
+        self.assertIs(self.ha.sockets[-1], ws)  # same connection
+        self.assertTrue(self.watcher.connected)
+        self.assertEqual(self.ha.subscriptions[-1]["trigger"]["entity_id"],
+                         ["media_player.salon"])
+        self.assertTrue(any(m.get("type") == "unsubscribe_events" for m in self.ha.received))
 
     async def test_wait_for_playing_then_end(self) -> None:
         since = time.monotonic()

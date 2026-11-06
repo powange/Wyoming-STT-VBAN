@@ -197,15 +197,29 @@ class HaAudioSync:
     async def _on_connect(self) -> None:
         self._state_sub = None  # subscriptions are lost with the connection
         try:
-            for event_type in ("entity_registry_updated", "device_registry_updated"):
-                await self.watcher.subscribe(
-                    {"type": "subscribe_events", "event_type": event_type},
-                    lambda _event: self._schedule_resolve(self.RESOLVE_DELAY_S),
-                )
+            await self.watcher.subscribe(
+                {"type": "subscribe_events", "event_type": "entity_registry_updated"},
+                self._on_entity_registry,
+            )
+            # Devices change rarely: any change is looked at
+            await self.watcher.subscribe(
+                {"type": "subscribe_events", "event_type": "device_registry_updated"},
+                lambda _event: self._schedule_resolve(self.RESOLVE_DELAY_S),
+            )
         except (HaUnavailable, HaCommandError) as err:
             _LOGGER.warning("Home Assistant microphone entities: %s", err)
             return
         await self._resolve()
+
+    def _on_entity_registry(self, event: dict[str, Any]) -> None:
+        """HA fires this for any entity anywhere: only a followed entity, or
+        a number / select that could be one, is worth reading the registries."""
+        data = event.get("data") or {}
+        ids = {data.get("entity_id") or "", data.get("old_entity_id") or ""}
+        if ids & set(self._owners) or any(
+            i.split(".", 1)[0] in ("number", "select") for i in ids if i
+        ):
+            self._schedule_resolve(self.RESOLVE_DELAY_S)
 
     def _schedule_resolve(self, delay: float, retry: bool = False) -> None:
         # The running resolution schedules its own retry (it's still
@@ -265,25 +279,23 @@ class HaAudioSync:
             self._missing_logged[name] = missing
         if not self._owners:
             return
-        # Subscribe first: no change is missed between reading and subscribing
+        # Only these entities: their current states come first ("a"), then
+        # their changes ("c"); no reading of every state of HA
         self._state_sub = await self.watcher.subscribe(
-            {"type": "subscribe_trigger",
-             "trigger": {"platform": "state", "entity_id": sorted(self._owners)}},
-            self._on_trigger,
+            {"type": "subscribe_entities", "entity_ids": sorted(self._owners)},
+            self._on_entities,
         )
-        states = await self.watcher.call({"type": "get_states"})
+
+    def _on_entities(self, event: dict[str, Any]) -> None:
         changed = set()
-        for state in states or []:
-            if (name := self._update(state.get("entity_id"), state.get("state"))) is not None:
+        for entity_id, state in (event.get("a") or {}).items():
+            if (name := self._update(entity_id, (state or {}).get("s"))) is not None:
+                changed.add(name)
+        for entity_id, diff in (event.get("c") or {}).items():
+            added = (diff or {}).get("+") or {}
+            if "s" in added and (name := self._update(entity_id, added["s"])) is not None:
                 changed.add(name)
         for name in sorted(changed):
-            self.on_change(name, self.settings[name])
-
-    def _on_trigger(self, event: dict[str, Any]) -> None:
-        trigger = (event.get("variables") or {}).get("trigger") or {}
-        to_state = trigger.get("to_state") or {}
-        entity_id = to_state.get("entity_id") or trigger.get("entity_id")
-        if (name := self._update(entity_id, to_state.get("state"))) is not None:
             self.on_change(name, self.settings[name])
 
     def _update(self, entity_id: Optional[str], state: Any) -> Optional[str]:

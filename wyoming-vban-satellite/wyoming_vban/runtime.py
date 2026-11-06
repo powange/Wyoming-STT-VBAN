@@ -13,7 +13,6 @@ import weakref
 from typing import Any, Callable, Optional
 
 from wyoming.server import AsyncServer
-from wyoming.zeroconf import HomeAssistantZeroconf
 
 from .config import (
     AppOptions,
@@ -22,6 +21,7 @@ from .config import (
     SatelliteConfig,
     validate_mirrors,
 )
+from .discovery import Discovery
 from .ha_audio import HaAudioSync, HaMicSettings, auto_gain_settings
 from .ha_ws import SUPERVISOR_WS_URL, HaStateWatcher, HaUnavailable
 from .calibration import LevelMeter
@@ -179,7 +179,7 @@ class ExchangePublisher:
 # applied while it runs
 RESTART_FIELDS = (
     "name", "wyoming_port", "vban_receive_port", "vban_receive_mode",
-    "vban_receive_multicast_group", "vban_receive_stream_name", "tts_output",
+    "vban_receive_multicast_group", "tts_output",
     "tts_vban_enabled", "tts_vban_mode", "tts_vban_batch_packets",
     "tts_http_port", "tts_http_host", "followup_enabled",
     "mic_source", "rtsp_url", "rtsp_transport",
@@ -254,8 +254,10 @@ class SatelliteRunner:
         publisher: ExchangePublisher,
         cues: WaitingCues,
         mirrors: list[DebugMirror],
+        discovery: Optional[Discovery] = None,
     ):
         self.cfg = cfg
+        self.discovery = discovery or Discovery()
         # Microphone: the shared VBAN receiver of the port, or this
         # satellite's own camera stream reader
         self.rtsp: Optional[RtspSource] = None
@@ -285,6 +287,8 @@ class SatelliteRunner:
         self.meter_out = LevelMeter()
         self.mic_filter.output_meter = self.meter_out
         self._recordings: list[bytearray] = []
+        # Live copies of the received audio (calibration's wake word test)
+        self._taps: list[Callable[[bytes], None]] = []
         self._converter = WyomingConverter()
         self.mic_feed = MicFeed()
         self.handlers: weakref.WeakSet[VbanSatelliteHandler] = weakref.WeakSet()
@@ -415,7 +419,7 @@ class SatelliteRunner:
             return handler
 
         server: Optional[AsyncServer] = None
-        zeroconf: Optional[HomeAssistantZeroconf] = None
+        registered = False
         try:
             if self.vban_sender:
                 self.vban_sender.open()
@@ -438,21 +442,17 @@ class SatelliteRunner:
             # Discovery is a convenience: without it (no multicast route
             # yet, name conflict) the satellite still works once added.
             try:
-                zeroconf = HomeAssistantZeroconf(
-                    port=cfg.wyoming_port,
-                    name=_build_zeroconf_name(cfg.name, cfg.wyoming_port),
+                service = await self.discovery.register(
+                    _build_zeroconf_name(cfg.name, cfg.wyoming_port), cfg.wyoming_port,
                 )
-                await zeroconf.register_server()
-                _LOGGER.info(
-                    "Zeroconf registered: %s on port %d", zeroconf.name, cfg.wyoming_port,
-                )
+                registered = True
+                _LOGGER.info("Zeroconf registered: %s on port %d", service, cfg.wyoming_port)
             except Exception as err:  # noqa: BLE001 - any failure: serve anyway
                 _LOGGER.warning(
                     "Zeroconf registration failed (%s): Home Assistant won't discover "
                     "this satellite by itself, add it with the Wyoming integration "
                     "(host of this app, port %d)", str(err) or type(err).__name__, cfg.wyoming_port,
                 )
-                zeroconf = None
 
             # Serve until cancelled. Not server.run(): cancelling serve_forever()
             # awaits Server.wait_closed(), which can hang on Python 3.12.
@@ -469,12 +469,9 @@ class SatelliteRunner:
                 await self.media_output.stop()
 
             # Unregister Zeroconf service
-            if zeroconf is not None:
-                try:
-                    await zeroconf._aiozc.async_close()
-                    _LOGGER.debug("Zeroconf unregistered")
-                except Exception as err:
-                    _LOGGER.debug("Zeroconf cleanup error: %s", err)
+            if registered:
+                await self.discovery.unregister(cfg.wyoming_port)
+                _LOGGER.debug("Zeroconf unregistered")
 
     def mic_settings(self) -> tuple[str, bool, float, float]:
         """(noise suppression, auto gain, volume, auto gain target dBFS): the
@@ -581,6 +578,12 @@ class SatelliteRunner:
         pcm16 = self._converter.convert(packet)
         for recording in self._recordings:
             recording.extend(pcm16)
+        for tap in tuple(self._taps):
+            try:
+                tap(pcm16)
+            except Exception:  # noqa: BLE001 - never at the expense of HA's stream
+                _LOGGER.exception("Calibration audio tap failed: removed")
+                self._taps.remove(tap)
         if pcm16:
             dc = audioop.avg(pcm16, 2)
             centered = audioop.add(pcm16, audioop.bias(bytes(len(pcm16)), 2, -dc), 2)
@@ -631,16 +634,22 @@ class SatelliteRunner:
             "output": self.cfg.tts_output,
         }
 
-    async def record(self, seconds: float) -> bytes:
+    async def record(
+        self, seconds: float, tap: Optional[Callable[[bytes], None]] = None,
+    ) -> bytes:
         """Copy of the received microphone audio (16 kHz mono 16-bit) for
-        `seconds`; the stream to HA goes on."""
+        `seconds`; the stream to HA goes on. tap(pcm) also gets each packet
+        as it arrives."""
         recording = bytearray()
         self._recordings.append(recording)
+        if tap is not None:
+            self._taps.append(tap)
         try:
             await asyncio.sleep(seconds)
         finally:
             # By identity: two recordings of the same audio are equal
             self._recordings = [r for r in self._recordings if r is not recording]
+            self._taps = [t for t in self._taps if t is not tap]
         return bytes(recording)
 
     async def test(self, signal: str) -> list[str]:
@@ -716,6 +725,7 @@ class AppRuntime:
         self._watcher_task: Optional[asyncio.Task] = None
         self._ha_audio: Optional[HaAudioSync] = None
         self.ha_ws_url = SUPERVISOR_WS_URL
+        self.discovery = Discovery()  # one mDNS responder for all satellites
         self.publisher = ExchangePublisher(False, None)
 
     @property
@@ -857,7 +867,7 @@ class AppRuntime:
         runner = SatelliteRunner(
             sat,
             self._receivers[sat.vban_receive_port] if sat.mic_source == "vban" else None,
-            self._watcher, self.publisher, cues, mirrors,
+            self._watcher, self.publisher, cues, mirrors, self.discovery,
         )
         self._runners[sat.name] = runner
         if self._ha_audio is not None and sat.name in self._ha_audio.settings:

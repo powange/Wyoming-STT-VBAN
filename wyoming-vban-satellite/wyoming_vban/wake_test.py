@@ -78,11 +78,12 @@ async def check_model(host: str, port: int, model: str) -> None:
         )
 
 
-async def count_detections(
-    pcm: bytes, host: str, port: int, model: str, pace: float = 1.0,
+async def count_detections_live(
+    chunks: "asyncio.Queue[Optional[bytes]]", host: str, port: int, model: str,
 ) -> list[Optional[int]]:
-    """Send 16 kHz mono 16-bit audio, return the detections' timestamps
-    (ms into the audio). pace 1.0 is real time (needed, see above)."""
+    """Send 16 kHz mono 16-bit audio as it comes from `chunks` (None ends
+    it), return the detections' timestamps (ms into the audio). The audio
+    must come in real time (see above): e.g. while it is recorded."""
     detections: list[Optional[int]] = []
     chunk_bytes = CHUNK_SAMPLES * WYOMING_WIDTH
     try:
@@ -98,21 +99,26 @@ async def count_detections(
                         if detection.name in (None, model):
                             detections.append(detection.timestamp)
 
+            async def send(audio: bytes) -> None:
+                await client.write_event(AudioChunk(
+                    rate=WYOMING_RATE, width=WYOMING_WIDTH, channels=WYOMING_CHANNELS,
+                    audio=audio,
+                ).event())
+
             reader = asyncio.create_task(receive())
             try:
                 await client.write_event(Detect(names=[model]).event())
                 await client.write_event(AudioStart(
                     rate=WYOMING_RATE, width=WYOMING_WIDTH, channels=WYOMING_CHANNELS,
                 ).event())
-                start = time.monotonic()
-                for i, offset in enumerate(range(0, len(pcm), chunk_bytes)):
-                    await client.write_event(AudioChunk(
-                        rate=WYOMING_RATE, width=WYOMING_WIDTH, channels=WYOMING_CHANNELS,
-                        audio=pcm[offset:offset + chunk_bytes],
-                    ).event())
-                    if pace:
-                        due = start + (i + 1) * CHUNK_SAMPLES / WYOMING_RATE * pace
-                        await asyncio.sleep(max(0.0, due - time.monotonic()))
+                pending = bytearray()  # sent in CHUNK_SAMPLES chunks
+                while (pcm := await chunks.get()) is not None:
+                    pending.extend(pcm)
+                    while len(pending) >= chunk_bytes:
+                        await send(bytes(pending[:chunk_bytes]))
+                        del pending[:chunk_bytes]
+                if pending:
+                    await send(bytes(pending))
                 await client.write_event(AudioStop().event())
                 try:
                     await asyncio.wait_for(asyncio.shield(reader), TAIL_S)
@@ -130,3 +136,28 @@ async def count_detections(
         ) from err
     _LOGGER.debug("Wake word test: %d detection(s) of %s", len(detections), model)
     return detections
+
+
+async def count_detections(
+    pcm: bytes, host: str, port: int, model: str, pace: float = 1.0,
+) -> list[Optional[int]]:
+    """count_detections_live() for a recording, fed at `pace` (1.0 is real
+    time, needed with openWakeWord; 0 for tests)."""
+    queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
+    chunk_bytes = CHUNK_SAMPLES * WYOMING_WIDTH
+
+    async def feed() -> None:
+        start = time.monotonic()
+        for i, offset in enumerate(range(0, len(pcm), chunk_bytes)):
+            queue.put_nowait(pcm[offset:offset + chunk_bytes])
+            if pace:
+                due = start + (i + 1) * CHUNK_SAMPLES / WYOMING_RATE * pace
+                await asyncio.sleep(max(0.0, due - time.monotonic()))
+        queue.put_nowait(None)
+
+    feeder = asyncio.create_task(feed())
+    try:
+        return await count_detections_live(queue, host, port, model)
+    finally:
+        feeder.cancel()
+        await asyncio.gather(feeder, return_exceptions=True)

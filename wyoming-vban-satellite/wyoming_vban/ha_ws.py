@@ -64,7 +64,7 @@ class HaStateWatcher:
         # HA event type -> callbacks(event data), subscribed on each connection
         self._event_listeners: dict[str, list[Callable[[dict[str, Any]], None]]] = {}
         self._event_sub_ids: dict[int, str] = {}  # subscription id -> event type
-        self._resubscribe = False  # reconnect at once (entities changed)
+        self._states_sub: Optional[int] = None  # media_player state trigger
         self._results: dict[int, asyncio.Future] = {}  # command id -> its result
         # Subscriptions made with subscribe(): id -> callback(event), per connection
         self._subscriptions: dict[int, Callable[[dict[str, Any]], None]] = {}
@@ -75,7 +75,8 @@ class HaStateWatcher:
         self._late_subscriptions: set[int] = set()
 
     async def set_entity_ids(self, entity_ids: list[str]) -> None:
-        """Watch other media_players: reconnects to subscribe to them."""
+        """Watch other media_players: the subscription is replaced on the
+        open connection (no reconnection: the other subscriptions stay)."""
         entity_ids = sorted(set(entity_ids))
         if entity_ids == self.entity_ids:
             return
@@ -85,9 +86,25 @@ class HaStateWatcher:
             or collections.deque(maxlen=self.HISTORY_LEN)
             for entity_id in entity_ids
         }
-        if self._ws is not None:
-            self._resubscribe = True
-            await self._ws.close()
+        if self._connected:
+            await self._subscribe_states()
+
+    async def _subscribe_states(self) -> None:
+        """(Re)subscribe to the state changes of the watched media_players."""
+        if self._states_sub is not None:
+            sub_id, self._states_sub = self._states_sub, None
+            await self.unsubscribe(sub_id)
+        if not self.entity_ids:
+            return
+        try:
+            # A state trigger with only entity_id also fires on attribute
+            # changes, e.g. a new media_content_id while already playing.
+            self._states_sub = await self.subscribe({
+                "type": "subscribe_trigger",
+                "trigger": {"platform": "state", "entity_id": self.entity_ids},
+            }, self._on_state_trigger)
+        except (HaUnavailable, HaCommandError) as err:
+            _LOGGER.warning("Cannot follow %s: %s", ", ".join(self.entity_ids), err)
 
     def add_event_listener(
         self, event_type: str, callback: Callable[[dict[str, Any]], None]
@@ -130,8 +147,6 @@ class HaStateWatcher:
                         await self._authenticate(ws)
                         self._next_id = 1
                         self._event_sub_ids = {}
-                        if self.entity_ids:
-                            await self._subscribe(ws)
                         for event_type in self._event_listeners:
                             await self._subscribe_event(ws, event_type)
                         self._ws = ws
@@ -142,11 +157,12 @@ class HaStateWatcher:
                             f", watching {', '.join(self.entity_ids)}"
                             if self.entity_ids else "",
                         )
+                        self._states_sub = None
+                        self._spawn(self._subscribe_states())
                         for callback in self._connect_listeners:
                             self._spawn(callback())
                         await self._receive(ws)
-                    if not self._resubscribe:
-                        _LOGGER.warning("HA WebSocket closed")
+                    _LOGGER.warning("HA WebSocket closed")
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as err:
                     _LOGGER.warning("HA WebSocket error: %s", str(err) or type(err).__name__)
                 except asyncio.CancelledError:
@@ -166,10 +182,6 @@ class HaStateWatcher:
                     if self._connected:
                         self._connected = False
                         await self._notify()
-                if self._resubscribe:  # entities changed: reconnect at once
-                    self._resubscribe = False
-                    continue
-
                 _LOGGER.info("Reconnecting to HA WebSocket in %.0fs", backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, self.BACKOFF_MAX_S)
@@ -182,18 +194,6 @@ class HaStateWatcher:
         msg = await ws.receive_json(timeout=10)
         if msg.get("type") != "auth_ok":
             raise ValueError(f"authentication failed: {msg.get('message', msg)}")
-
-    async def _subscribe(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-        # A state trigger with only entity_id also fires on attribute
-        # changes, e.g. a new media_content_id while already playing.
-        await ws.send_json({
-            "id": self._take_id(),
-            "type": "subscribe_trigger",
-            "trigger": {"platform": "state", "entity_id": self.entity_ids},
-        })
-        msg = await ws.receive_json(timeout=10)
-        if not msg.get("success"):
-            raise ValueError(f"subscribe_trigger failed: {msg.get('error', msg)}")
 
     async def _subscribe_event(
         self, ws: aiohttp.ClientWebSocketResponse, event_type: str
@@ -332,19 +332,21 @@ class HaStateWatcher:
                     except Exception:  # a listener bug must not drop the connection
                         _LOGGER.exception("Error in %s listener", event_type)
                 continue
-            trigger = ((msg.get("event") or {}).get("variables") or {}).get("trigger") or {}
-            to_state = trigger.get("to_state") or {}
-            entity_id = to_state.get("entity_id") or trigger.get("entity_id")
-            if entity_id not in self._history:
-                continue
-            change = StateChange(
-                time=time.monotonic(),
-                state=to_state.get("state", "unavailable"),
-                attributes=to_state.get("attributes") or {},
-            )
-            self._history[entity_id].append(change)
-            _LOGGER.debug("%s -> %s", entity_id, change.state)
-            await self._notify()
+
+    def _on_state_trigger(self, event: dict[str, Any]) -> None:
+        trigger = (event.get("variables") or {}).get("trigger") or {}
+        to_state = trigger.get("to_state") or {}
+        entity_id = to_state.get("entity_id") or trigger.get("entity_id")
+        if entity_id not in self._history:
+            return
+        change = StateChange(
+            time=time.monotonic(),
+            state=to_state.get("state", "unavailable"),
+            attributes=to_state.get("attributes") or {},
+        )
+        self._history[entity_id].append(change)
+        _LOGGER.debug("%s -> %s", entity_id, change.state)
+        self._spawn(self._notify())
 
     async def _notify(self) -> None:
         async with self._changed:

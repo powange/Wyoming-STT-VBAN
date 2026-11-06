@@ -971,15 +971,17 @@ function renderVu(data) {
 
 function stopMeter() {
   if (calib.source) { calib.source.close(); calib.source = null; }
-  if (calib.poll) { clearInterval(calib.poll); calib.poll = null; }
+  if (calib.poll) { clearTimeout(calib.poll); calib.poll = null; }
 }
 
 function startMeter() {
   stopMeter();
   if (!calib.satellite) return;
   const query = `satellite=${encodeURIComponent(calib.satellite)}`;
+  // Fallback polling: the next request only once the previous one has
+  // answered (a fixed interval piles requests up over a slow Ingress)
   const poll = () => {
-    calib.poll = setInterval(async () => {
+    calib.poll = setTimeout(async () => {
       try {
         const resp = await fetch(`api/meter/once?${query}`);
         if (resp.ok) renderVu(await resp.json());
@@ -988,8 +990,10 @@ function startMeter() {
           const box = document.getElementById("calib-vu");
           if (box) box.replaceChildren(el("p", { class: "help" },
             "Ce satellite ne tourne pas : enregistrez la configuration ou consultez le journal."));
+          return;
         }
       } catch (err) { /* next tick */ }
+      if (calib.poll) poll();
     }, 100);
   };
   if (window.EventSource) {
@@ -1081,8 +1085,6 @@ function recordStep(step) {
     const request = postJson("api/calibration/record", { step, ...extra });
     request.catch(() => { failed = true; }); // stops the countdown at once
     await countdown(STEP_SECONDS[step], STEP_LABELS[step], () => failed || closed());
-    if (step === "wake" && !failed) document.getElementById("calib-progress").textContent =
-      "Envoi à openWakeWord (en temps réel)…";
     const body = await request;
     if (closed()) return;
     say("");
@@ -1403,6 +1405,13 @@ function showTab(name) {
 for (const tab of document.querySelectorAll(".tab")) {
   tab.addEventListener("click", () => showTab(tab.dataset.tab));
 }
+
+// Browser tab hidden: no live meter (it would stream for nothing)
+document.addEventListener("visibilitychange", () => {
+  if (currentTab !== "calibration") return;
+  if (document.hidden) stopMeter();
+  else startMeter();
+});
 
 /* Load, save, import, export */
 

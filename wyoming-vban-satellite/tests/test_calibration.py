@@ -398,7 +398,6 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
         oww = FakeOpenWakeWord()
         await oww.start()
         self.ui.STEP_SECONDS = dict(self.ui.STEP_SECONDS, wake=2.0)
-        self.ui.WAKE_PACE = 0
         try:
             oww.detections = 3
             status, wake = await self.record("wake", speech(2.3, 3000), {

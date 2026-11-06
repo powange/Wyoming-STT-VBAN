@@ -226,8 +226,9 @@ class VbanReceiver:
         self.multicast_group = multicast_group
         self._socket: Optional[socket.socket] = None
         self._running = False
-        # stream name ("" = catch-all) -> callbacks
-        self._subscribers: dict[str, list[Callable[[VbanPacket], None]]] = {}
+        # stream name ("" = catch-all) -> callbacks (tuples: rebuilt on
+        # (un)subscribe, read as is for every packet)
+        self._subscribers: dict[str, tuple[Callable[[VbanPacket], None], ...]] = {}
         self._last_subscriber_error_log = 0.0
         self._unrouted_logged: set[str] = set()  # log each unrouted stream once
 
@@ -235,9 +236,9 @@ class VbanReceiver:
         self, callback: Callable[[VbanPacket], None], stream_name: str = ""
     ) -> None:
         """Register a callback for one stream name ("" = any unclaimed stream)."""
-        callbacks = self._subscribers.setdefault(stream_name, [])
+        callbacks = self._subscribers.get(stream_name, ())
         if callback not in callbacks:
-            callbacks.append(callback)
+            self._subscribers[stream_name] = (*callbacks, callback)
             _LOGGER.debug(
                 "Port %d: subscriber added for stream '%s'",
                 self.port, stream_name or "<any>",
@@ -247,15 +248,17 @@ class VbanReceiver:
         """Remove a callback (whatever stream it subscribed to)."""
         for stream_name, callbacks in list(self._subscribers.items()):
             if callback in callbacks:
-                callbacks.remove(callback)
-                if not callbacks:
+                remaining = tuple(c for c in callbacks if c != callback)
+                if remaining:
+                    self._subscribers[stream_name] = remaining
+                else:
                     del self._subscribers[stream_name]
                 _LOGGER.debug(
                     "Port %d: subscriber removed for stream '%s'",
                     self.port, stream_name or "<any>",
                 )
 
-    def _targets(self, stream_name: str) -> list[Callable[[VbanPacket], None]]:
+    def _targets(self, stream_name: str) -> tuple[Callable[[VbanPacket], None], ...]:
         """Subscribers that should receive a packet of this stream."""
         callbacks = self._subscribers.get(stream_name) or self._subscribers.get("")
         if not callbacks:
@@ -265,8 +268,8 @@ class VbanReceiver:
                     self.port, stream_name,
                 )
                 self._unrouted_logged.add(stream_name)
-            return []
-        return list(callbacks)
+            return ()
+        return callbacks
 
     def _create_socket(self) -> socket.socket:
         """Create and configure the UDP socket."""
@@ -414,6 +417,8 @@ class VbanSender:
         self._socket: Optional[socket.socket] = None
         self._frame_counter = 0
         self._ratecv_state = None
+        self._header = b""  # VBAN header without its frame counter
+        self._header_name: Optional[str] = None
         self._pending: bytearray = bytearray()
         self._data_ready: Optional[asyncio.Event] = None
         self._drain_task: Optional[asyncio.Task] = None
@@ -548,18 +553,19 @@ class VbanSender:
         if self._socket is None or len(self._pending) < packet_bytes:
             return False
 
-        chunk = bytes(self._pending[:packet_bytes])
+        with memoryview(self._pending) as view:
+            chunk = view[:packet_bytes].tobytes()
         del self._pending[:packet_bytes]
 
-        packet = build_packet(
-            payload=chunk,
-            stream_name=self.stream_name,
-            sample_rate=self.sample_rate,
-            channels=self.channels,
-            samples_per_frame=self.SAMPLES_PER_PACKET,
-            frame_counter=self._frame_counter,
-            data_format=VBAN_DATATYPE_INT16,
-        )
+        # The header only changes with the stream name (and the counter)
+        if self._header_name != self.stream_name:
+            self._header = build_packet(
+                payload=b"", stream_name=self.stream_name, sample_rate=self.sample_rate,
+                channels=self.channels, samples_per_frame=self.SAMPLES_PER_PACKET,
+                frame_counter=0, data_format=VBAN_DATATYPE_INT16,
+            )[:-4]
+            self._header_name = self.stream_name
+        packet = self._header + struct.pack("<I", self._frame_counter) + chunk
 
         try:
             self._socket.sendto(packet, (self.address, self.port))

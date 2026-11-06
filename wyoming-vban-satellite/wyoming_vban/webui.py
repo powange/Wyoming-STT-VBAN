@@ -22,6 +22,7 @@ from .calibration import CalibrationSession
 from .config import ConfigError, parse_options, validate
 from .ha_ws import HaCommandError, HaUnavailable
 from .media_player import build_wav
+from .mic_filter import MicFilter
 from .runtime import AppRuntime, SatelliteRunner
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ class WebUI:
         self.supervisor = supervisor or SupervisorOptions()
         self.allowed_ips = allowed_ips
         self._runner: Optional[web.AppRunner] = None
+        self._purge_task: Optional[asyncio.Task] = None
         self._sessions: dict[str, CalibrationSession] = {}  # by satellite
         # One calibration request at a time per satellite (another tab…)
         self._busy: set[str] = set()
@@ -116,8 +118,20 @@ class WebUI:
         await self._runner.setup()
         await web.TCPSite(self._runner, "0.0.0.0", self.port).start()
         _LOGGER.info("Configuration UI listening on port %d (Ingress)", self.port)
+        self._purge_task = asyncio.create_task(self._purge_sessions())
+
+    async def _purge_sessions(self) -> None:
+        """Expired calibrations are deleted even if the page isn't used again."""
+        while True:
+            await asyncio.sleep(60)
+            for name in [n for n, s in self._sessions.items() if s.expired]:
+                del self._sessions[name]
 
     async def stop(self) -> None:
+        if self._purge_task is not None:
+            self._purge_task.cancel()
+            await asyncio.gather(self._purge_task, return_exceptions=True)
+            self._purge_task = None
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -271,6 +285,8 @@ class WebUI:
             return web.json_response({"error": "Requête invalide"}, status=400)
         self._busy.add(name)
         try:
+            if step == "wake":
+                return await self._wake_step(runner, session, body, wake_target)
             pcm = await runner.record(self.STEP_SECONDS[step])
             if len(pcm) < calibration.FRAME_BYTES * 10:
                 return web.json_response(
@@ -285,19 +301,16 @@ class WebUI:
             if self._sessions.get(name) is not session:
                 return web.json_response(
                     {"error": "Calibrage effacé pendant la mesure", "expired": True}, status=409)
-            return await self._record_step(runner, session, step, pcm, body, wake_target)
+            return await self._record_step(runner, session, step, pcm, body)
         finally:
             self._busy.discard(name)
 
     async def _record_step(
         self, runner: SatelliteRunner, session: CalibrationSession, step: str,
-        pcm: bytes, body: dict[str, Any], wake_target: Optional[tuple[str, int, str]],
+        pcm: bytes, body: dict[str, Any],
     ) -> web.Response:
         if step == "voice":
             return web.json_response(await asyncio.to_thread(self._voice_step, runner, session, pcm))
-        if step == "wake":
-            assert wake_target is not None
-            return await self._wake_step(runner, session, pcm, body, wake_target)
         session.takes[step] = pcm
         level = await asyncio.to_thread(
             calibration.take_level, session.noise_pcm, pcm, session.noise["rms_db"],
@@ -308,7 +321,6 @@ class WebUI:
     # Recording lengths (s) of the steps
     STEP_SECONDS = {"noise": 5.0, "voice": 8.0, "near": 6.0, "far": 6.0, "wake": 20.0}
     WAKE_REPEATS = 5  # times the wake word is said in the test
-    WAKE_PACE = 1.0  # real time (see wake_test)
 
     @staticmethod
     def _voice_step(
@@ -401,31 +413,50 @@ class WebUI:
         )
 
     async def _wake_step(
-        self, runner: SatelliteRunner, session: CalibrationSession, raw: bytes,
-        body: dict[str, Any], wake_target: tuple[str, int, str],
+        self, runner: SatelliteRunner, session: CalibrationSession,
+        body: dict[str, Any], wake_target: Optional[tuple[str, int, str]],
     ) -> web.Response:
-        """Step C: the take with the current and the proposed settings,
-        sent at the same time to openWakeWord (not stored)."""
+        """Step C: while the wake words are said, the audio is processed
+        with the current and the proposed settings and sent, as it comes, to
+        openWakeWord over two connections (nothing stored)."""
+        assert wake_target is not None
+        host, port, model = wake_target
         current = dict(zip(("noise_suppression", "auto_gain", "volume", "auto_gain_target_db"),
                            runner.mic_settings_applied()))
         proposed = self._proposed_settings(session, body.get("proposed") or {}, current)
-        processed = await asyncio.gather(*(
-            asyncio.to_thread(
-                calibration.process_take, session.noise_pcm, raw, s["noise_suppression"],
-                s["volume"], s["auto_gain"], s["auto_gain_target_db"],
-            ) for s in (current, proposed)
-        ))
-        host, port, model = wake_target
         try:
             # The page checked the model before the countdown; checked again
             # (openWakeWord falls back to another model for an unknown name)
             await wake_test.check_model(host, port, model)
-            counts = await asyncio.gather(*(
-                wake_test.count_detections(pcm, host, port, model, self.WAKE_PACE)
-                for pcm in processed
-            ))
         except wake_test.WakeTestError as err:
             return web.json_response({"error": str(err)}, status=502)
+        filters = await asyncio.to_thread(self._warm_filters, session, (current, proposed))
+        queues: list[asyncio.Queue] = [asyncio.Queue() for _ in filters]
+        tasks = [asyncio.create_task(wake_test.count_detections_live(q, host, port, model))
+                 for q in queues]
+
+        def tap(pcm: bytes) -> None:
+            for mic_filter, queue in zip(filters, queues):
+                if out := mic_filter.process(pcm):
+                    queue.put_nowait(out)
+
+        try:
+            raw = await runner.record(self.STEP_SECONDS["wake"], tap)
+        finally:
+            for queue in queues:
+                queue.put_nowait(None)
+        try:
+            counts = await asyncio.gather(*tasks)
+        except wake_test.WakeTestError as err:
+            return web.json_response({"error": str(err)}, status=502)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if len(raw) < calibration.FRAME_BYTES * 10:
+            return web.json_response(
+                {"error": "Aucun audio reçu de ce micro pendant la mesure"}, status=409,
+            )
         result = {
             "model": model, "expected": self.WAKE_REPEATS,
             "current": current | {"detections": len(counts[0])},
@@ -433,6 +464,22 @@ class WebUI:
         }
         session.wake = result
         return web.json_response(result)
+
+    @staticmethod
+    def _warm_filters(
+        session: CalibrationSession, settings: tuple[dict[str, Any], ...],
+    ) -> list[MicFilter]:
+        """One filter per settings, having learnt the background noise and
+        (auto gain) settled on the voice take, like during use."""
+        filters = []
+        for s in settings:
+            mic_filter = MicFilter(s["noise_suppression"], s["auto_gain"], s["volume"],
+                                   s["auto_gain_target_db"])
+            calibration.run_filter(mic_filter, session.noise_pcm)
+            if s["auto_gain"] and session.voice_pcm:
+                calibration.run_filter(mic_filter, session.voice_pcm)
+            filters.append(mic_filter)
+        return filters
 
     @staticmethod
     def _proposed_settings(

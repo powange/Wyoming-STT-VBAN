@@ -106,6 +106,13 @@ class ApplyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((mic_filter.noise_suppression, mic_filter.auto_gain), ("medium", True))
         self.assertTrue(mic_filter.active)
 
+    async def test_stream_name_changed_live(self) -> None:
+        before = self.tasks()
+        done = await self.apply(
+            lambda o: o["satellites"][1]["microphone"].update(stream_name="AtomSalon2"))
+        self.assertEqual(done, ["satellite 'Salon' updated without restart"])
+        self.assertEqual(self.tasks(), before)
+
     async def test_restart_field_restarts_only_that_satellite(self) -> None:
         before = self.tasks()
         new_port = _free_port()
