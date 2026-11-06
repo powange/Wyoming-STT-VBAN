@@ -8,17 +8,21 @@ import array
 import audioop
 import dataclasses
 import math
+import socket
 import struct
 import tempfile
 import unittest
 from pathlib import Path
 
-from wyoming_vban.config import SatelliteConfig, vban_name
+import aiohttp
+
+from wyoming_vban.config import ConfigError, SatelliteConfig, validate, vban_name
 from wyoming_vban.const import (
     VBAN_DATATYPE_FLOAT32,
     VBAN_DATATYPE_INT16,
     VBAN_DATATYPE_UINT8,
 )
+from wyoming_vban.media_player import MediaPlayerOutput
 from wyoming_vban.rtsp_source import mask_url
 from wyoming_vban.runtime import needs_restart
 from wyoming_vban.tts_phrase import TtsPhrase, remove_stale_phrases
@@ -109,6 +113,45 @@ class PhraseCacheTest(unittest.TestCase):
             stale.write_bytes(b"x")
             remove_stale_phrases([], folder)
             self.assertFalse(stale.exists())
+
+
+class MulticastInterfaceTest(unittest.TestCase):
+    def sat(self, interface: str) -> SatelliteConfig:
+        return SatelliteConfig(name="Salon", vban_receive_mode="multicast",
+                               vban_receive_multicast_group="239.0.0.1",
+                               vban_receive_multicast_interface=interface, tts_output="none")
+
+    def test_address_checked(self) -> None:
+        validate([self.sat("192.168.1.10")], strict=True)
+        with self.assertRaises(ConfigError):
+            validate([self.sat("eth0")], strict=True)
+
+    def test_unicast_ignores_it(self) -> None:
+        sat = self.sat("eth0")
+        sat.vban_receive_mode = "unicast"
+        validate([sat], strict=True)
+        self.assertEqual(sat.vban_receive_multicast_interface, "")
+
+
+class RangeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_partial_wav(self) -> None:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        output = MediaPlayerOutput("media_player.x", "127.0.0.1", port)
+        await output.start()
+        try:
+            url = output.publish(bytes(range(256)) * 4)
+            async with aiohttp.ClientSession() as http:
+                async with http.get(url, headers={"Range": "bytes=10-19"}) as resp:
+                    self.assertEqual(resp.status, 206)
+                    self.assertEqual(resp.headers["Content-Range"], "bytes 10-19/1024")
+                    self.assertEqual(await resp.read(), bytes(range(10, 20)))
+                async with http.get(url) as resp:
+                    self.assertEqual((resp.status, len(await resp.read())), (200, 1024))
+                    self.assertEqual(resp.headers["Accept-Ranges"], "bytes")
+        finally:
+            await output.stop()
 
 
 if __name__ == "__main__":

@@ -220,10 +220,14 @@ class VbanReceiver:
         port: int = DEFAULT_VBAN_PORT,
         mode: str = "unicast",
         multicast_group: str = "",
+        multicast_interface: str = "",
     ):
         self.port = port
         self.mode = mode
         self.multicast_group = multicast_group
+        # Interface joining the group ("" = the kernel's choice: the default
+        # route's, maybe not the LAN's on a host with several interfaces)
+        self.multicast_interface = multicast_interface
         self._socket: Optional[socket.socket] = None
         self._running = False
         # stream name ("" = catch-all) -> callbacks (tuples: rebuilt on
@@ -287,12 +291,11 @@ class VbanReceiver:
 
         if self.mode == "multicast" and self.multicast_group:
             group = socket.inet_aton(self.multicast_group)
-            mreq = group + socket.inet_aton("0.0.0.0")
+            mreq = group + socket.inet_aton(self.multicast_interface or "0.0.0.0")
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
             _LOGGER.info(
-                "Joined multicast group %s on port %d",
-                self.multicast_group,
-                self.port,
+                "Joined multicast group %s on port %d (interface %s)",
+                self.multicast_group, self.port, self.multicast_interface or "default",
             )
         else:
             _LOGGER.info(
@@ -352,7 +355,7 @@ class VbanReceiver:
             if self.mode == "multicast" and self.multicast_group:
                 try:
                     group = socket.inet_aton(self.multicast_group)
-                    mreq = group + socket.inet_aton("0.0.0.0")
+                    mreq = group + socket.inet_aton(self.multicast_interface or "0.0.0.0")
                     self._socket.setsockopt(
                         socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq
                     )

@@ -563,7 +563,10 @@ function microphoneSection(mic, satName) {
           field(mic, "vban_mode", { label: "Mode", type: "select", def: "unicast", rerender: true,
                 choices: [["unicast", "Unicast"], ["multicast", "Multicast"]] }),
           mic.vban_mode === "multicast" && field(mic, "multicast_group", {
-                label: "Groupe multicast", placeholder: "239.0.0.1", required: true })),
+                label: "Groupe multicast", placeholder: "239.0.0.1", required: true }),
+          mic.vban_mode === "multicast" && field(mic, "multicast_interface", {
+                label: "Interface multicast", placeholder: "192.168.1.10",
+                help: "adresse de la carte réseau de cet hôte ; vide = choix du système" })),
     group("Nettoyage du son", null,
       field(mic, "follow_ha_entities", { label: "Suivre les entités Home Assistant", type: "switch",
             wide: true, rerender: true,
@@ -871,6 +874,11 @@ function renderStatus(status) {
         el("h2", {}, "Derniers échanges"),
         exchanges.length ? el("ul", { class: "exchanges" }, exchanges)
                          : el("p", { class: "help" }, "Aucun pour l'instant.")),
+      status.problems && status.problems.length ? el("div", { class: "card panel" },
+        el("h2", {}, "Problèmes récents"),
+        el("ul", { class: "exchanges" }, status.problems.map((p) => el("li", {},
+          el("div", { class: "meta" }, new Date(p.time * 1000).toLocaleString("fr-FR")),
+          p.text)))) : null,
       el("div", { class: "card panel" },
         el("h2", {}, "Home Assistant"),
         el("div", { class: "status-line" }, dot(status.ha_websocket),
@@ -1028,6 +1036,30 @@ function openCalibration() {
   if (!names.includes(calib.satellite)) calib.satellite = names[0] || null;
   renderCalibration();
   startMeter();
+  resumeCalibration();
+}
+
+/* A calibration still kept by the server (e.g. the page was reloaded):
+   show it again instead of starting over. */
+async function resumeCalibration() {
+  if (!calib.satellite || calib.noise || calib.busy) return;
+  const generation = calib.generation;
+  let state = null;
+  try {
+    const resp = await fetch(`api/calibration?satellite=${encodeURIComponent(calib.satellite)}`);
+    if (resp.ok) state = await resp.json();
+  } catch (err) { return; }
+  if (!state || !state.noise || calib.generation !== generation || calib.noise) return;
+  calib.noise = state.noise;
+  calib.result = state.result;
+  calib.denoise = state.denoise;
+  calib.noiseChoice = state.denoise ? state.denoise.recommended : null;
+  calib.takes = state.takes || {};
+  calib.autogain = state.autogain;
+  calib.wake = state.wake;
+  if (calib.result) loadWakeModels();
+  say("Calibrage en cours repris.", "ok");
+  renderCalibration();
 }
 
 async function countdown(seconds, label, stopped = () => false) {

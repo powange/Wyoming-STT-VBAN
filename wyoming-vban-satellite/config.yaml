@@ -1,6 +1,6 @@
 name: "Wyoming VBAN Satellite"
 description: "Use VBAN audio sources as Wyoming voice assistant satellites for Home Assistant"
-version: "3.8.2"
+version: "3.9.0"
 slug: wyoming-vban-satellite
 url: "https://github.com/powange/Wyoming-STT-VBAN"
 arch:
@@ -16,6 +16,8 @@ ingress_port: 8743
 panel_icon: mdi:account-voice
 panel_title: VBAN Satellite
 host_network: true
+# Restarted by the Supervisor if the app stops answering
+watchdog: tcp://[HOST]:8743
 map:
   - share:ro
 options:
@@ -53,6 +55,7 @@ schema:
         vban_port: "port?"
         vban_mode: "list(unicast|multicast)?"
         multicast_group: "str?"
+        multicast_interface: "str?"
         stream_name: "str?"
       vban_output:
         enabled: "bool?"

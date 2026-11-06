@@ -49,6 +49,9 @@ configuration:
           multicast_group:
             name: Multicast group
             description: Only in multicast mode, e.g. 239.0.0.1
+          multicast_interface:
+            name: Multicast interface
+            description: Address of this host's network interface that joins the group, e.g. 192.168.1.10 (default empty, the system's choice); useful with several network interfaces
           stream_name:
             name: VBAN stream name
             description: Stream routed to this satellite (empty = any stream not claimed by another satellite on the port)

@@ -99,14 +99,19 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         self.publisher = FakePublisher()
         port = _free_tcp_port()
         self.server = AsyncServer.from_uri(f"tcp://127.0.0.1:{port}")
-        await self.server.start(
-            lambda reader, writer: VbanSatelliteHandler(
+        self.handlers: list[VbanSatelliteHandler] = []
+
+        def factory(reader, writer):
+            handler = VbanSatelliteHandler(
                 reader, writer, make_satellite_info("Bureau"), self.receiver,
                 self.sender, followup=self.followup,
                 exchange_publisher=self.publisher, satellite_name="Bureau",
                 waiting_cues=self.waiting_cues,
             )
-        )
+            self.handlers.append(handler)
+            return handler
+
+        await self.server.start(factory)
         self.ha = AsyncTcpClient("127.0.0.1", port)
         await self.ha.connect()
         # HA's connection sequence
@@ -180,6 +185,25 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         )
         run = await self.next_run()
         self.assertEqual(run.start_stage, "wake")
+
+    async def test_empty_response_ends_the_run_from_the_ha_state(self) -> None:
+        await self.next_run()
+        await self.ha.write_event(Transcript(text="Allume").event())
+        await asyncio.sleep(0.7)
+        self.handlers[-1].on_assist_state("idle")  # HA: run over, no TTS
+        run = await self.next_run(timeout=2)  # not after 60 s
+        self.assertEqual(run.start_stage, "wake")
+
+    async def test_question_with_closing_quote(self) -> None:
+        await self.next_run()
+        await self.respond("Vous voulez dire « laquelle ?»")
+        self.assertEqual((await self.next_run()).start_stage, "asr")
+
+    async def test_announcement_text_does_not_decide_the_follow_up(self) -> None:
+        await self.next_run()
+        await self.ha.write_event(Synthesize(text="Tu es là ?").event())  # no transcript
+        await self.respond("Il est 9 heures.")
+        self.assertEqual((await self.next_run()).start_stage, "wake")
 
     async def test_at_most_three_follow_ups(self) -> None:
         await self.next_run()
@@ -521,6 +545,15 @@ class FollowupDisabledTest(FollowupTest):
         })])
 
     async def test_exchange_dropped_when_not_connected(self) -> None:
+        pass
+
+    async def test_empty_response_ends_the_run_from_the_ha_state(self) -> None:
+        pass
+
+    async def test_question_with_closing_quote(self) -> None:
+        pass
+
+    async def test_announcement_text_does_not_decide_the_follow_up(self) -> None:
         pass
 
 

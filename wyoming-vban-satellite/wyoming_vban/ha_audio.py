@@ -35,7 +35,11 @@ ENTITY_KEYS = {
     "volume_multiplier": "volume",
     "auto_gain": "auto_gain",
     "noise_suppression_level": "noise_suppression",
+    # Not a setting: the satellite's state (idle, listening, processing,
+    # responding), followed in follow-up mode to see a run end
+    "assist_satellite": "assist_state",
 }
+MIC_SETTINGS = ("volume", "auto_gain", "noise_suppression")
 # HA's levels -> the app's (the app has no level above strong)
 HA_NOISE_LEVELS = {
     "off": "off", "low": "light", "medium": "medium", "high": "strong", "max": "strong",
@@ -127,10 +131,13 @@ class HaAudioSync:
 
     def __init__(
         self, watcher: HaStateWatcher, on_change: Callable[[str, HaMicSettings], None],
+        on_assist_state: Optional[Callable[[str, str], None]] = None,
     ):
         self.watcher = watcher
         self.on_change = on_change
+        self.on_assist_state = on_assist_state
         self.names: list[str] = []  # satellites following their HA entities
+        self.state_names: list[str] = []  # satellites following their state
         self.settings: dict[str, HaMicSettings] = {}
         self.entities: dict[str, dict[str, str]] = {}  # name -> setting -> entity_id
         self._owners: dict[str, tuple[str, str]] = {}  # entity_id -> (name, setting)
@@ -147,12 +154,15 @@ class HaAudioSync:
         if self._resolve_task is not None:
             self._resolve_task.cancel()
 
-    def set_satellites(self, names: list[str]) -> None:
-        """Satellites following their HA entities (e.g. after a change)."""
+    def set_satellites(self, names: list[str], state_names: Optional[list[str]] = None) -> None:
+        """Satellites following their HA microphone entities, and those
+        following their assist_satellite state (e.g. after a change)."""
         names = sorted(set(names))
-        if names == self.names:
+        state_names = sorted(set(state_names or []))
+        if (names, state_names) == (self.names, self.state_names):
             return
         self.names = names
+        self.state_names = state_names
         self.settings = {n: s for n, s in self.settings.items() if n in names}
         if self.watcher.connected:
             self._schedule_resolve(0)
@@ -160,7 +170,8 @@ class HaAudioSync:
     def status(self, name: str) -> dict[str, Any]:
         settings = self.settings.get(name)
         return {
-            "entities": self.entities.get(name, {}),
+            "entities": {s: e for s, e in self.entities.get(name, {}).items()
+                         if s in MIC_SETTINGS},
             "synced_at": settings.synced_at if settings else None,
         }
 
@@ -258,18 +269,26 @@ class HaAudioSync:
         if self._state_sub is not None:
             await self.watcher.unsubscribe(self._state_sub)
             self._state_sub = None
-        if not self.names:
+        wanted = sorted(set(self.names) | set(self.state_names))
+        if not wanted:
             self.entities, self._owners = {}, {}
             return
         devices = await self.watcher.call({"type": "config/device_registry/list"})
         entities = await self.watcher.call({"type": "config/entity_registry/list"})
-        self.entities = resolve_entities(self.names, devices or [], entities or [])
+        found_all = resolve_entities(wanted, devices or [], entities or [])
+        # Each satellite only what it follows
+        self.entities = {
+            name: {s: e for s, e in found.items()
+                   if (s in MIC_SETTINGS and name in self.names)
+                   or (s == "assist_state" and name in self.state_names)}
+            for name, found in found_all.items()
+        }
         self._owners = {
             entity_id: (name, setting)
             for name, found in self.entities.items() for setting, entity_id in found.items()
         }
         for name in self.names:
-            missing = tuple(s for s in ENTITY_KEYS.values() if s not in self.entities.get(name, {}))
+            missing = tuple(s for s in MIC_SETTINGS if s not in self.entities.get(name, {}))
             if missing and self._missing_logged.get(name) != missing:
                 _LOGGER.warning(
                     "[%s] Home Assistant entities not found (%s): the app's settings "
@@ -303,6 +322,10 @@ class HaAudioSync:
         if entity_id not in self._owners:
             return None
         name, setting = self._owners[entity_id]
+        if setting == "assist_state":
+            if self.on_assist_state is not None and isinstance(state, str):
+                self.on_assist_state(name, state)
+            return None
         value = parse_state(setting, state)
         if value is None:
             _LOGGER.debug("%s is %s: last value kept", entity_id, state)

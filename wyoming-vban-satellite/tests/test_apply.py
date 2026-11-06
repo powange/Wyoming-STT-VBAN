@@ -186,10 +186,29 @@ class ApplyTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(self.runtime.fatal.is_set())
 
+    async def test_failed_satellite_is_started_again_alone(self) -> None:
+        self.runtime.RESTART_DELAYS_S = (0.1,)
+        failed = self.runtime.runners["Salon"]
+        others = {n: r for n, r in self.runtime.runners.items() if n != "Salon"}
+
+        async def crash() -> None:
+            raise RuntimeError("boom")
+
+        task = asyncio.create_task(crash())
+        await asyncio.gather(task, return_exceptions=True)
+        self.runtime._on_task_done(task, "satellite 'Salon'", "Salon")
+        self.assertFalse(self.runtime.fatal.is_set())
+        await asyncio.sleep(0.5)
+        self.assertIsNot(self.runtime.runners["Salon"], failed)
+        self.assertTrue(all(self.runtime.runners[n] is r for n, r in others.items()))
+        problems = self.runtime.status()["problems"]
+        self.assertTrue(any("boom" in p["text"] for p in problems))
+
     async def test_status(self) -> None:
         status = self.runtime.status()
         self.assertEqual([s["name"] for s in status["satellites"]], ["Bureau", "Salon"])
-        self.assertIsNone(status["ha_websocket"])  # no HA connection needed here
+        # No HA here: not connected (follow-up satellites use it for the run state)
+        self.assertFalse(status["ha_websocket"])
         self.assertEqual(status["exchanges"], [])
 
 

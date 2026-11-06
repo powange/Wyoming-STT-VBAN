@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vban-receive-port", type=int, default=DEFAULT_VBAN_PORT)
     parser.add_argument("--vban-receive-mode", choices=["unicast", "multicast"], default="unicast")
     parser.add_argument("--vban-receive-multicast-group", default="")
+    parser.add_argument("--vban-receive-multicast-interface", default="",
+                        help="Address of the interface joining the group (default: system's)")
     parser.add_argument("--vban-receive-stream-name", default="", help="Filter by VBAN stream name (empty = accept all)")
 
     # VBAN send (TTS output) — optional

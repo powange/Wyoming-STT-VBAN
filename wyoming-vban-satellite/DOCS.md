@@ -37,13 +37,19 @@ saving.
 
 The interface also shows the **status** of each satellite (connected to Home
 Assistant, microphone level, last audio received), the spoken phrases being
-synthesized and the **last exchanges**; a **Test** button plays each
+synthesized, the **last exchanges** and the **recent problems** (a satellite
+that stopped and was started again, a configuration refused, a discovery
+failure); a **Test** button plays each
 announcement or the follow-up beep on the satellite's output (with the saved
 configuration); **Export** / **Import** save or load the configuration as
 YAML (an import is checked and loaded in the editor, then saved like any
 change).
 
 The interface is only reachable through Home Assistant (Ingress).
+
+A satellite that stops on its own (a crash, a port taken) is started again
+by itself after 5, 10, 30 then 60 s, the others keep running. The
+Supervisor's watchdog restarts the app if it stops answering.
 
 ## Configuration
 
@@ -128,6 +134,7 @@ VBAN source:
 - **vban_port**: UDP port to listen on (e.g. 6980)
 - **vban_mode**: `unicast` (default) or `multicast`
 - **multicast_group**: Multicast group address (e.g. `239.0.0.1`), required when mode is `multicast` (optional, ignored in `unicast` mode)
+- **multicast_interface**: address of this host's network interface that joins the group (e.g. `192.168.1.10`); empty (default) lets the system choose, which is the default route's interface. Useful on a host with several interfaces (VLAN, Docker) when no multicast audio arrives. Satellites sharing a VBAN port must use the same one.
 - **stream_name**: VBAN stream name routed to this satellite. Leave empty to accept any stream not claimed by another satellite on the same port.
 
 #### Several satellites on the same VBAN port
@@ -213,6 +220,10 @@ needed as usual.
 - **timeout_s**: If no speech is detected within this time, go back to wake word listening, 3–30 s (default: 8)
 
 At most 3 follow-ups in a row; then the wake word is required again.
+
+When Home Assistant gives no spoken response (an empty answer), the app sees
+the satellite's state go back to idle in Home Assistant and listens for the
+wake word again at once (after 60 s if Home Assistant can't be reached).
 
 The follow-up run starts together with the beep. The microphone is replaced
 by silence while the beep plays (0.45 s on a media player, 0.55 s on VBAN),

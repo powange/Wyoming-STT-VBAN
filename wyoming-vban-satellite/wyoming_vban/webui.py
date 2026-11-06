@@ -114,6 +114,7 @@ class WebUI:
         app.router.add_post("/api/calibration/autogain", self._calibration_autogain)
         app.router.add_get("/api/calibration/wake_models", self._wake_models)
         app.router.add_delete("/api/calibration", self._calibration_clear)
+        app.router.add_get("/api/calibration", self._calibration_state)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         await web.TCPSite(self._runner, "0.0.0.0", self.port).start()
@@ -316,6 +317,7 @@ class WebUI:
             calibration.take_level, session.noise_pcm, pcm, session.noise["rms_db"],
             self._noise_choice(session, body), session.proposal["volume"],
         )
+        session.take_levels[step] = level
         return web.json_response({"take": step, "voice_db": level})
 
     # Recording lengths (s) of the steps
@@ -635,7 +637,13 @@ class WebUI:
             session.denoise_pcm = {}
         if "auto_gain" in applied:
             session.takes = {}
+            session.take_levels = {}
             session.autogain_pcm = {}
+
+    async def _calibration_state(self, request: web.Request) -> web.Response:
+        """The satellite's calibration in progress (or none)."""
+        session = self._session(request.query.get("satellite", ""))
+        return web.json_response(session.state() if session is not None else None)
 
     async def _calibration_clear(self, request: web.Request) -> web.Response:
         self._sessions.pop(request.query.get("satellite", ""), None)

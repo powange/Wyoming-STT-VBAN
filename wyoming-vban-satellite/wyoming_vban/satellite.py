@@ -1025,6 +1025,22 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._watchdog_task.cancel()
         self._watchdog_task = None
 
+    def on_assist_state(self, state: str) -> None:
+        """State of this satellite's assist_satellite entity in HA (follow-up
+        mode): back to idle after a transcript with no response coming
+        means HA ended the run (empty response) — no need to wait for
+        RESPONSE_TIMEOUT_S."""
+        if not (self._driven and self._awaiting_response and state == "idle"):
+            return
+        if time.monotonic() - self._last_transcript_at < 0.5:
+            return  # the state before the transcript, arriving late
+        _LOGGER.info("Home Assistant ended the run without a response")
+        self._cancel_watchdog()
+        self._awaiting_response = False
+        self._last_transcript = ""
+        self._stop_thinking()
+        self._run_ended(self._run_seq)
+
     def _on_response_timeout(self) -> None:
         _LOGGER.info("No response after transcript (empty response?): run over")
         self._run_ended(self._run_seq)

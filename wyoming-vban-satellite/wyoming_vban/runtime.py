@@ -179,7 +179,7 @@ class ExchangePublisher:
 # applied while it runs
 RESTART_FIELDS = (
     "name", "wyoming_port", "vban_receive_port", "vban_receive_mode",
-    "vban_receive_multicast_group", "tts_output",
+    "vban_receive_multicast_group", "vban_receive_multicast_interface", "tts_output",
     "tts_vban_enabled", "tts_vban_mode", "tts_vban_batch_packets",
     "tts_http_port", "tts_http_host", "followup_enabled",
     "mic_source", "rtsp_url", "rtsp_transport",
@@ -227,12 +227,21 @@ class MicFeed:
             self._callbacks[-1](packet, pcm)
 
 
+# Recent problems, shown in the status tab (the app has one runtime)
+PROBLEMS: collections.deque[dict[str, Any]] = collections.deque(maxlen=10)
+
+
+def report_problem(text: str) -> None:
+    PROBLEMS.append({"time": time.time(), "text": text})
+
+
 def _log_task_failure(what: str) -> Callable[[asyncio.Task], None]:
     """Done-callback logging an unexpected end of a background task."""
 
     def done(task: asyncio.Task) -> None:
         if not task.cancelled() and task.exception() is not None:
             _LOGGER.error("%s stopped: %s", what, task.exception(), exc_info=task.exception())
+            report_problem(f"{what} arrêté : {task.exception()}")
 
     return done
 
@@ -293,6 +302,7 @@ class SatelliteRunner:
         self.mic_feed = MicFeed()
         self.handlers: weakref.WeakSet[VbanSatelliteHandler] = weakref.WeakSet()
         self.task: Optional[asyncio.Task] = None
+        self.started_at = 0.0
         # Microphone level from the received VBAN packets
         # (time, level dB without DC, DC offset / full scale) per packet
         self._levels: collections.deque[tuple[float, float, float]] = collections.deque()
@@ -453,6 +463,7 @@ class SatelliteRunner:
                     "this satellite by itself, add it with the Wyoming integration "
                     "(host of this app, port %d)", str(err) or type(err).__name__, cfg.wyoming_port,
                 )
+                report_problem(f"{cfg.name} : découverte Zeroconf impossible ({err})")
 
             # Serve until cancelled. Not server.run(): cancelling serve_forever()
             # awaits Server.wait_closed(), which can hang on Python 3.12.
@@ -703,6 +714,10 @@ class AppRuntime:
     """
 
     STARTUP_CHECK_S = 1.5  # a satellite failing to start does so by then
+    # A satellite stopping on its own is started again after these delays
+    # (the next one each time it fails again within STABLE_S)
+    RESTART_DELAYS_S = (5.0, 10.0, 30.0, 60.0)
+    STABLE_S = 60.0
 
     def __init__(self, cache_dir: str):
         self.cache_dir = cache_dir
@@ -719,6 +734,8 @@ class AppRuntime:
         self._receivers: dict[int, VbanReceiver] = {}
         self._receiver_tasks: dict[int, asyncio.Task] = {}
         self._runners: dict[str, SatelliteRunner] = {}
+        self._restarts: dict[str, int] = {}  # failures in a row, by satellite
+        self._restart_tasks: dict[str, asyncio.Task] = {}
         self._phrases: Optional[PhraseRegistry] = None
         self._phrase_tasks: dict[int, asyncio.Task] = {}  # id(phrase) -> task
         self._watcher: Optional[HaStateWatcher] = None
@@ -748,7 +765,7 @@ class AppRuntime:
         return bool(
             options.publish_exchanges
             or any(s.tts_output == "media_player" for s in options.satellites)
-            or any(s.mic_follow_ha for s in options.satellites)
+            or any(s.mic_follow_ha or s.followup_enabled for s in options.satellites)
             or any(c.search or c.vision for c in cues.values())
         )
 
@@ -801,7 +818,7 @@ class AppRuntime:
             # demander_ia_externe / regarder_la_camera scripts)
             self._watcher.add_event_listener("jarvis_recherche", notify_search)
             self._watcher.add_event_listener("jarvis_vision", notify_vision)
-            self._ha_audio = HaAudioSync(self._watcher, self._on_ha_mic)
+            self._ha_audio = HaAudioSync(self._watcher, self._on_ha_mic, self._on_assist_state)
             self._watcher_task = asyncio.create_task(self._watcher.run())
             self._watcher_task.add_done_callback(_log_task_failure("HA WebSocket"))
         elif not needed and self._watcher is not None:
@@ -815,7 +832,8 @@ class AppRuntime:
             await self._watcher.set_entity_ids(self._media_players(options))
         if self._ha_audio is not None:
             self._ha_audio.set_satellites(
-                [s.name for s in options.satellites if s.mic_follow_ha]
+                [s.name for s in options.satellites if s.mic_follow_ha],
+                [s.name for s in options.satellites if s.followup_enabled],
             )
         self.publisher.watcher = self._watcher
         for runner in self._runners.values():
@@ -832,6 +850,11 @@ class AppRuntime:
         if (runner := self._runners.get(name)) is not None:
             runner.set_ha_mic(settings)
 
+    def _on_assist_state(self, name: str, state: str) -> None:
+        if (runner := self._runners.get(name)) is not None:
+            for handler in list(runner.handlers):
+                handler.on_assist_state(state)
+
     def ha_mic_status(self, name: str) -> Optional[dict[str, Any]]:
         """Entities found and last synchronization of a satellite following HA."""
         return self._ha_audio.status(name) if self._ha_audio is not None else None
@@ -847,6 +870,7 @@ class AppRuntime:
         receiver = VbanReceiver(
             port=port, mode=sat.vban_receive_mode,
             multicast_group=sat.vban_receive_multicast_group,
+            multicast_interface=sat.vban_receive_multicast_interface,
         )
         self._receivers[port] = receiver
         task = asyncio.create_task(receiver.run())
@@ -872,8 +896,9 @@ class AppRuntime:
         self._runners[sat.name] = runner
         if self._ha_audio is not None and sat.name in self._ha_audio.settings:
             runner.set_ha_mic(self._ha_audio.settings[sat.name])
+        runner.started_at = time.monotonic()
         runner.start().add_done_callback(
-            lambda t, name=sat.name: self._on_task_done(t, f"satellite '{name}'")
+            lambda t, name=sat.name: self._on_task_done(t, f"satellite '{name}'", name)
         )
 
     async def _stop_runner(self, name: str) -> None:
@@ -883,16 +908,55 @@ class AppRuntime:
         finally:
             self._stopping = False
 
-    def _on_task_done(self, task: asyncio.Task, what: str) -> None:
-        """A satellite or receiver stopped: a failure unless we stopped it."""
+    def _on_task_done(self, task: asyncio.Task, what: str, satellite: str = "") -> None:
+        """A satellite or receiver stopped: a failure unless we stopped it.
+
+        While a change is applied, the change fails (and is rolled back).
+        Otherwise a satellite is started again a bit later, alone; a
+        receiver (they retry by themselves) stops the app.
+        """
         if self._stopping or task.cancelled():
             return
         self.failure = f"{what} stopped ({task.exception() or 'no error'})"
         _LOGGER.error("%s", self.failure)
+        report_problem(self.failure)
         if self._changing:
             self._change_failed.set()
+        elif satellite and satellite in self._runners:
+            self._restart_later(satellite)
         else:
             self.fatal.set()
+
+    def _restart_later(self, name: str) -> None:
+        runner = self._runners[name]
+        if time.monotonic() - runner.started_at > self.STABLE_S:
+            self._restarts[name] = 0
+        attempt = self._restarts.get(name, 0)
+        self._restarts[name] = attempt + 1
+        delay = self.RESTART_DELAYS_S[min(attempt, len(self.RESTART_DELAYS_S) - 1)]
+        _LOGGER.warning("Satellite '%s' is started again in %.0fs", name, delay)
+        if (old := self._restart_tasks.get(name)) is not None:
+            old.cancel()
+        self._restart_tasks[name] = asyncio.create_task(self._restart_runner(name, runner, delay))
+
+    async def _restart_runner(self, name: str, failed: SatelliteRunner, delay: float) -> None:
+        await asyncio.sleep(delay)
+        async with self.change_lock:  # not in the middle of a change
+            if self._runners.get(name) is not failed or self.options is None:
+                return  # replaced or removed by a change meanwhile
+            sat = next((s for s in self.options.satellites if s.name == name), None)
+            if sat is None:
+                return
+            mirrors = validate_mirrors(self.options.debug_mirrors, self.options.satellites,
+                                       quiet=True)
+            del self._runners[name]
+            self._stopping = True
+            try:
+                await failed.stop()
+            finally:
+                self._stopping = False
+            _LOGGER.info("Starting satellite '%s' again", name)
+            self._start_runner(sat, failed.cues, [m for m in mirrors if m.satellite == name])
 
     # Whole configuration
 
@@ -930,6 +994,9 @@ class AppRuntime:
         """Stop everything (the app keeps running)."""
         self._stopping = True
         try:
+            for task in self._restart_tasks.values():
+                task.cancel()
+            self._restart_tasks = {}
             for runner in self._runners.values():
                 await runner.stop()
             for task in self._phrase_tasks.values():
@@ -991,6 +1058,7 @@ class AppRuntime:
                 return None
             error = self.failure
             _LOGGER.error("New configuration failed (%s): restoring the previous one", error)
+            report_problem(f"Nouvelle configuration refusée ({error}) : précédente rétablie")
             await self.stop()
             if previous is not None:
                 await self.start(previous)
@@ -1027,8 +1095,9 @@ class AppRuntime:
         changed_ports = {
             port for port, receiver in self._receivers.items()
             if port not in wanted
-            or (receiver.mode, receiver.multicast_group)
-            != (wanted[port].vban_receive_mode, wanted[port].vban_receive_multicast_group)
+            or (receiver.mode, receiver.multicast_group, receiver.multicast_interface)
+            != (wanted[port].vban_receive_mode, wanted[port].vban_receive_multicast_group,
+                wanted[port].vban_receive_multicast_interface)
         }
         restart |= {
             name for name, sat in old_sats.items()
@@ -1087,5 +1156,6 @@ class AppRuntime:
                 {"text": p.text, "ready": p.cue is not None} for p in self.phrases
             ],
             "exchanges": list(self.publisher.history)[::-1],
+            "problems": list(PROBLEMS)[::-1],
         }
 

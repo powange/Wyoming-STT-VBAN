@@ -2,6 +2,7 @@
 
 import json
 import logging
+import socket
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -41,6 +42,7 @@ OPTION_BLOCKS: dict[str, dict[str, str]] = {
         "vban_port": "vban_receive_port",
         "vban_mode": "vban_receive_mode",
         "multicast_group": "vban_receive_multicast_group",
+        "multicast_interface": "vban_receive_multicast_interface",
         "stream_name": "vban_receive_stream_name",
     },
     "vban_output": {
@@ -121,6 +123,9 @@ class SatelliteConfig:
     vban_receive_port: int = DEFAULT_VBAN_PORT
     vban_receive_mode: str = "unicast"
     vban_receive_multicast_group: str = ""
+    # Address of the network interface joining the group ("" = the system's
+    # choice, the default route's interface)
+    vban_receive_multicast_interface: str = ""
     vban_receive_stream_name: str = ""
     # Microphone source: "vban" (the vban_receive_* fields) or "rtsp" (the
     # audio of a camera stream, e.g. published by go2rtc)
@@ -230,6 +235,10 @@ class SatelliteConfig:
         # in the schema): ignore a leftover value in unicast mode.
         self.vban_receive_multicast_group = (
             self.vban_receive_multicast_group.strip()
+            if self.vban_receive_mode == "multicast" else ""
+        )
+        self.vban_receive_multicast_interface = (
+            self.vban_receive_multicast_interface.strip()
             if self.vban_receive_mode == "multicast" else ""
         )
 
@@ -501,6 +510,15 @@ def validate(satellites: list[SatelliteConfig], strict: bool = False) -> None:
                 "microphone.multicast_group is empty. Set the multicast group "
                 "address (e.g. 239.0.0.1), or use unicast mode."
             )
+        if sat.vban_receive_multicast_interface:
+            try:
+                socket.inet_aton(sat.vban_receive_multicast_interface)
+            except OSError:
+                raise ConfigError(
+                    f"Satellite '{sat.name}': microphone.multicast_interface "
+                    f"'{sat.vban_receive_multicast_interface}' isn't an IPv4 address "
+                    "(the address of the network interface, e.g. 192.168.1.10)"
+                ) from None
 
         if sat.tts_output != "none" and sat.tts_vban_enabled and not sat.tts_vban_address:
             raise ConfigError(
@@ -530,12 +548,14 @@ def validate(satellites: list[SatelliteConfig], strict: bool = False) -> None:
             continue
 
         # One socket per port: all its satellites must agree on how to open it
-        modes = {(s.vban_receive_mode, s.vban_receive_multicast_group) for s in sats}
+        modes = {(s.vban_receive_mode, s.vban_receive_multicast_group,
+                  s.vban_receive_multicast_interface) for s in sats}
         if len(modes) > 1:
             raise ConfigError(
                 f"Satellites {', '.join(s.name for s in sats)} share VBAN port "
-                f"{port} but use different microphone.vban_mode / multicast_group. "
-                "Satellites on the same port must use the same mode and group."
+                f"{port} but use different microphone.vban_mode / multicast_group / "
+                "multicast_interface. Satellites on the same port must use the same "
+                "mode, group and interface."
             )
 
         names: dict[str, list[str]] = {}

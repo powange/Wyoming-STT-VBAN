@@ -105,7 +105,21 @@ class MediaPlayerOutput:
         if data is None:
             raise web.HTTPNotFound()
         _LOGGER.debug("Serving %s to %s", request.path, request.remote)
-        return web.Response(body=data, content_type="audio/wav")
+        headers = {"Accept-Ranges": "bytes"}
+        # Some renderers (Sonos, DLNA) ask for parts of the file
+        try:
+            wanted = request.http_range
+        except ValueError:  # malformed: the whole file
+            wanted = slice(None, None)
+        if wanted.start is not None or wanted.stop is not None:
+            start, stop, _ = wanted.indices(len(data))
+            if start >= stop:
+                raise web.HTTPRequestRangeNotSatisfiable(
+                    headers={"Content-Range": f"bytes */{len(data)}"})
+            headers["Content-Range"] = f"bytes {start}-{stop - 1}/{len(data)}"
+            return web.Response(body=data[start:stop], status=206,
+                                content_type="audio/wav", headers=headers)
+        return web.Response(body=data, content_type="audio/wav", headers=headers)
 
     def publish(self, wav: bytes) -> str:
         """Make a WAV available under a unique name and return its URL."""

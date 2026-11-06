@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.9.0
+
+Improvements from the review.
+
+- **A satellite that stops on its own is started again alone**, after 5, 10, 30 then 60 s (the delay grows while it keeps failing), instead of stopping the whole app. The Supervisor's **watchdog** restarts the app if it stops answering.
+- **Status tab: recent problems** (a satellite stopped and started again, a configuration refused and rolled back, a discovery failure, a background task stopped).
+- **Follow-up: empty responses end the run at once.** The satellite's `assist_satellite` state in Home Assistant going back to idle after a transcript is seen (60 s timeout kept as a fallback when Home Assistant can't be reached). Follow-up satellites therefore use the HA WebSocket.
+- **New `microphone.multicast_interface`**: the address of the network interface joining the multicast group, for hosts with several interfaces (default: the system's choice).
+- **Calibration picks up where it was** after a page reload (within the 15 minutes the recordings are kept).
+- The TTS HTTP server answers **byte-range requests** (Sonos, DLNA renderers).
+- Ready for **Python 3.13** (`audioop-lts` installed there; `audioop` was removed from Python).
+
 ## 3.8.2
 
 Optimisations from the review.

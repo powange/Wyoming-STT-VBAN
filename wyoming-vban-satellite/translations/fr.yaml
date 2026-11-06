@@ -49,6 +49,9 @@ configuration:
           multicast_group:
             name: Groupe multicast
             description: Seulement en mode multicast, ex. 239.0.0.1
+          multicast_interface:
+            name: Interface multicast
+            description: Adresse de l'interface reseau de cet hote qui rejoint le groupe, ex. 192.168.1.10 (vide par defaut, choix du systeme) ; utile avec plusieurs interfaces reseau
           stream_name:
             name: Nom du flux VBAN
             description: Flux dirige vers ce satellite (vide = tout flux non reclame par un autre satellite du port)

@@ -330,6 +330,7 @@ class CalibrationSession:
     denoise_pcm: dict[str, bytes] = field(default_factory=dict)
     # Auto gain: near and far takes, and before / after the auto gain
     takes: dict[str, bytes] = field(default_factory=dict)  # "near", "far"
+    take_levels: dict[str, Optional[float]] = field(default_factory=dict)
     autogain: Optional[dict[str, Any]] = None
     autogain_pcm: dict[str, bytes] = field(default_factory=dict)  # "near-after"…
     wake: Optional[dict[str, Any]] = None  # wake word test result (no audio kept)
@@ -344,6 +345,18 @@ class CalibrationSession:
         if which.startswith("denoise-"):
             return self.denoise_pcm.get(which[len("denoise-"):], b"")
         return self.autogain_pcm.get(which, b"")
+
+    def state(self) -> dict[str, Any]:
+        """What the page shows, to pick the calibration up again (reload)."""
+        return {
+            "noise": self.noise,
+            "result": {"noise": self.noise, "voice": self.voice, "proposal": self.proposal}
+            if self.proposal is not None else None,
+            "denoise": self.denoise,
+            "takes": dict(self.take_levels),
+            "autogain": self.autogain,
+            "wake": self.wake,
+        }
 
     def touch(self) -> None:
         """Used: the expiry counts from the last action."""
