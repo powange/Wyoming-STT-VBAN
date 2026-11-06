@@ -309,6 +309,59 @@ remove them to get the new defaults, or set the modes.
 
 ### Voice exchanges as Home Assistant events
 
+### Wake word clips (`wake_clips` block)
+
+To retrain the wake word model on what really triggers it, the app can keep
+the audio of each detection and let you sort it.
+
+- **enabled** (default `false`): record each wake word detection.
+- **retention_days** (default 30): unsorted and ignored clips older than this are deleted (sorted ones are kept: they are training data).
+- **max_clips** (default 2000): beyond this, unsorted clips go first, then ignored ones, then the oldest sorted ones.
+- Satellite option **wake_clips** (default `true`): `false` to leave a satellite out.
+
+What is kept: the audio **sent to Home Assistant** (after volume, noise
+suppression and automatic gain, what openWakeWord heard), from 2.5 s before
+to 0.5 s after the detection, 16 kHz mono 16-bit. The moment comes from the
+`timestamp` Home Assistant sends with the detection when the satellite
+started the run (follow-up mode), otherwise from when the detection arrived
+minus the measured delay. Follow-up runs (started at the transcription) have
+no wake word: no clip. Each clip has a JSON file: satellite, time, wake
+word, RMS and peak level, the transcript and response that followed, and a
+**suggestion** (`probablement_faux` when nothing was said after the wake
+word: empty transcript, `...`, `*bip*`, or `stt-no-text-recognized`;
+otherwise `a_verifier`). The app never sorts for you.
+
+The **Mot-clé** tab lists the clips, the latest first, by room and status,
+with a waveform, a play button and **Bon mot-clé** / **Faux déclenchement**
+/ **Ignorer** (keys B, F, I; arrows to move; Space to play), and the count of
+good and false triggers per room and day.
+
+Sorted clips are copied for WakeForge to
+`/share/wakeforge/inbox/<wake word>/positifs/` (good) or `negatifs/` (false),
+`<satellite>_<time>_<id>.wav` with its `.json`; the folder is the model name
+without its version (`dis_moi_jarvis-6` → `dis_moi_jarvis`). `manifest.json`
+lists them (path, status, sha256, satellite, date, transcript) and is
+rewritten at each change. Sorting again moves the file; **Ignorer** removes
+it from the inbox. The clips themselves are in `/data/wake_clips`.
+
+"That wasn't for you": the button **Marquer le dernier déclenchement comme
+faux** in the tab, or the Home Assistant event `jarvis_faux_declenchement`
+(data `satellite: Salon`; without it, the last clip of any satellite), e.g.
+from a sentence:
+
+```yaml
+automation:
+  - alias: Ce n'était pas pour toi
+    triggers:
+      - trigger: conversation
+        command: "ce n'était pas pour toi"
+    actions:
+      - event: jarvis_faux_declenchement
+        event_data:
+          satellite: Salon
+      - set_conversation_response: "D'accord, je le note."
+```
+
 - **publish_exchanges** (app option, default: `true`): after each voice request, fire a `jarvis_echange` event on the Home Assistant event bus, e.g. to show the last commands on a dashboard:
 
 ```json

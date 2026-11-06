@@ -102,13 +102,10 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         self.server = AsyncServer.from_uri(f"tcp://127.0.0.1:{port}")
         self.handlers: list[VbanSatelliteHandler] = []
 
+        self.info = make_satellite_info("Bureau")
+
         def factory(reader, writer):
-            handler = VbanSatelliteHandler(
-                reader, writer, make_satellite_info("Bureau"), self.receiver,
-                self.sender, followup=self.followup,
-                exchange_publisher=self.publisher, satellite_name="Bureau",
-                waiting_cues=self.waiting_cues,
-            )
+            handler = self.make_handler(reader, writer)
             self.handlers.append(handler)
             return handler
 
@@ -119,6 +116,13 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         await self.ha.write_event(Describe().event())
         await self.ha.write_event(RunSatellite().event())
         await self.ha.write_event(Describe().event())
+
+    def make_handler(self, reader, writer) -> VbanSatelliteHandler:
+        return VbanSatelliteHandler(
+            reader, writer, self.info, self.receiver, self.sender,
+            followup=self.followup, exchange_publisher=self.publisher,
+            satellite_name="Bureau", waiting_cues=self.waiting_cues,
+        )
 
     async def asyncTearDown(self) -> None:
         await self.ha.disconnect()

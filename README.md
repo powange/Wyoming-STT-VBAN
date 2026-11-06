@@ -13,6 +13,7 @@ Use any VBAN-capable microphone on your network (VoiceMeeter, ESP32, VBAN Recept
 - **Follow-up without wake word** when Jarvis asks a question
 - **Announcements while waiting** — sounds or spoken phrases while the response is prepared (see below)
 - **Exchanges published** as Home Assistant events (`jarvis_echange`), **debug audio copies** as VBAN streams
+- **Wake word clips**: the audio of each detection kept and sorted in the interface (good / false trigger), sorted clips dropped in `/share/wakeforge/inbox` for retraining the model
 - **Host networking** — full UDP multicast support in Docker
 
 ## Microphone calibration

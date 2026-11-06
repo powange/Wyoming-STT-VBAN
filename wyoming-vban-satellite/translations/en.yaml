@@ -9,6 +9,9 @@ configuration:
       wyoming_port:
         name: Wyoming port
         description: TCP port of this satellite, unique per satellite (e.g. 10700, 10701...)
+      wake_clips:
+        name: Keep wake word clips
+        description: Keep this satellite's wake word clips when wake_clips is enabled (default on)
       output:
         name: Response output
         description: 'vban (default): the VBAN output block; media_player: the Media player block (VBAN output as fallback if enabled); none: responses are not played (e.g. to test a microphone)'
@@ -171,6 +174,19 @@ configuration:
           enabled:
             name: (old) Enabled
             description: Before 3.2; used only if Mode is empty (off = none). Prefer Mode
+  wake_clips:
+    name: Wake word clips
+    description: Keep the audio of each wake word detection to sort it (Wake word tab); sorted clips go to /share/wakeforge/inbox for WakeForge
+    fields:
+      enabled:
+        name: Record detections
+        description: Default off
+      retention_days:
+        name: Retention (days)
+        description: Unsorted and ignored clips older than this are deleted, 1-365 (default 30)
+      max_clips:
+        name: Maximum clips
+        description: Beyond this, unsorted clips go first, then ignored, then the oldest sorted ones, 10-20000 (default 2000)
   publish_exchanges:
     name: Publish exchanges
     description: Fire a jarvis_echange Home Assistant event with each request and response (satellite, transcript, response, follow-up)

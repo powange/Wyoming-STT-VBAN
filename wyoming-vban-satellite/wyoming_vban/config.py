@@ -183,6 +183,8 @@ class SatelliteConfig:
     # announcements_tts_engine / announcements_tts_voice)
     vision_tts_engine: str = ""
     vision_tts_voice: str = ""
+    # Keep its wake word clips (when the app's wake_clips.enabled is on)
+    wake_clips: bool = True
 
     @classmethod
     def from_options(cls, options: dict[str, Any], index: int) -> "SatelliteConfig":
@@ -400,6 +402,10 @@ class AppOptions:
     debug_mirrors: list[DebugMirror] = field(default_factory=list)
     announcements_tts_engine: str = DEFAULT_TTS_ENGINE
     announcements_tts_voice: str = DEFAULT_TTS_VOICE
+    # Wake word clips (wake_clips block)
+    wake_clips_enabled: bool = False
+    wake_clips_retention_days: int = 30
+    wake_clips_max: int = 2000
 
 
 def load_options(path: str) -> AppOptions:
@@ -422,7 +428,13 @@ def parse_options(options: dict[str, Any]) -> AppOptions:
         })
         for entry in options.get("debug_mirror") or []
     ]
+    clips = options.get("wake_clips") or {}
+    if not isinstance(clips, dict):
+        clips = {}
     return AppOptions(
+        wake_clips_enabled=bool(clips.get("enabled")),
+        wake_clips_retention_days=max(1, min(365, int(clips.get("retention_days") or 30))),
+        wake_clips_max=max(10, min(20000, int(clips.get("max_clips") or 2000))),
         satellites=satellites,
         debug_logging=bool(options.get("debug_logging")),
         publish_exchanges=True if publish is None else bool(publish),

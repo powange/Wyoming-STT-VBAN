@@ -27,6 +27,7 @@ from wyoming.satellite import (
 from wyoming.server import AsyncEventHandler
 from wyoming.snd import Played
 from wyoming.tts import Synthesize
+from wyoming.wake import Detection
 
 from .const import WYOMING_CHANNELS, WYOMING_RATE, WYOMING_WIDTH
 from .ha_ws import HaStateWatcher
@@ -35,6 +36,7 @@ from .vban import VbanPacket, VbanReceiver, VbanSender, WyomingConverter
 
 if TYPE_CHECKING:
     from .mic_filter import MicFilter
+    from .wake_clips import ClipRecorder
     from .mirror import SatelliteMirrors
     from .tts_phrase import TtsPhrase
 
@@ -307,6 +309,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         mic_filter: Optional["MicFilter"] = None,
         waiting_cues: Optional[WaitingCues] = None,
         debug_mirrors: Optional["SatelliteMirrors"] = None,
+        clip_recorder: Optional[Callable[[], Optional["ClipRecorder"]]] = None,
     ):
         super().__init__(reader, writer)
         self._info = satellite_info
@@ -354,6 +357,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         # Debug copies of the audio sent to HA and of the responses
         self._mirrors = debug_mirrors
+
+        # Wake word clips: the satellite's recorder (None when off), the
+        # first sample of the current wake run, the clip being completed
+        self._clip_recorder = clip_recorder or (lambda: None)
+        self._wake_run = True  # the current run listens for the wake word
+        self._wake_sample0: Optional[int] = None
+        self._wake_sample0_pending = False
+        self._clip: Optional[dict] = None  # {"id": ..., "meta": {...}}
 
         # Waiting sounds between transcript and response
         self._cues = waiting_cues or WaitingCues()
@@ -461,6 +472,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             # audio from now on is this run's response, not an announcement.
             self._awaiting_response = True
             self._last_transcript = Transcript.from_event(event).text or ""
+            self._clip_note(transcript=self._last_transcript)
             self._last_transcript_at = time.monotonic()
             self._start_thinking()
             self._expire_transcript_later()
@@ -469,9 +481,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 self._set_watchdog(self.RESPONSE_TIMEOUT_S, self._on_response_timeout)
             return True
 
-        if event.type == "detection" and not self._driven:
-            # A new wake word: whatever was awaited from the last run is over
-            self._forget_transcript()
+        if event.type == "detection":
+            if not self._driven:
+                # A new wake word: whatever was awaited from the last run is over
+                self._forget_transcript()
+            self._capture_wake_clip(Detection.from_event(event))
             return True
 
         if event.type == "voice-started":
@@ -491,6 +505,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 _LOGGER.debug("Announcement text: %s", text)
                 return True
             self._stop_thinking()
+            self._clip_note(close=True, response=text)
             self._publish_exchange(text)
             if self._driven:
                 self._expect_followup = bool(self.QUESTION_END.search(text.strip()))
@@ -621,6 +636,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             (_LOGGER.info if code in self.ROUTINE_ERRORS else _LOGGER.error)(
                 "Error from server: [%s] %s", code, text,
             )
+            self._clip_note(close=True, stt_error=code)
             self._last_transcript = ""
             self._stop_thinking()
             if self._driven:
@@ -1034,6 +1050,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
             ).event()
         )
         self._run_seq += 1
+        # A wake run's detection timestamp counts from its first audio chunk
+        self._wake_run = start_stage == PipelineStage.WAKE
+        self._wake_sample0 = None
+        self._wake_sample0_pending = self._wake_run
         self._awaiting_response = False
         self._last_transcript = ""
         self._stop_thinking()
@@ -1063,6 +1083,69 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if self._watchdog_task and not self._watchdog_task.done():
             self._watchdog_task.cancel()
         self._watchdog_task = None
+
+    # Wake word clips
+
+    def _capture_wake_clip(self, detection: Detection) -> None:
+        """HA detected the wake word: keep what openWakeWord heard."""
+        recorder = self._clip_recorder()
+        if recorder is None or not self._wake_run or self._followup_active:
+            return  # off, or a follow-up (started at ASR: no wake word)
+        received = time.monotonic()
+        sample, source = None, "latence"
+        # The timestamp (ms of the run's audio) places it exactly, when this
+        # satellite started the run (follow-up mode: first chunk known)
+        if self._driven and detection.timestamp is not None and self._wake_sample0 is not None:
+            candidate = self._wake_sample0 + int(detection.timestamp * WYOMING_RATE / 1000)
+            if 0 <= recorder.samples_sent - candidate <= 3 * WYOMING_RATE:
+                sample, source = candidate, "timestamp"
+                recorder.learn_latency(candidate, received)
+        if sample is None:
+            sample = recorder.sample_at(received - recorder.latency_s)
+        clip = {"id": None, "meta": {}}
+        self._clip = clip
+        task = asyncio.create_task(self._save_wake_clip(
+            recorder, clip, sample, detection.name or "", source))
+        _PLAYBACK_TASKS.add(task)
+        task.add_done_callback(_PLAYBACK_TASKS.discard)
+
+    async def _save_wake_clip(
+        self, recorder: "ClipRecorder", clip: dict, sample: int, wake_word: str, source: str,
+    ) -> None:
+        from .wake_clips import AFTER_S
+        # The 0.5 s after it are sent first (2 s at most: mic cut…)
+        end = sample + int(AFTER_S * WYOMING_RATE)
+        for _ in range(40):
+            if recorder.samples_sent >= end:
+                break
+            await asyncio.sleep(0.05)
+        try:
+            meta = dict(clip["meta"])
+            clip["id"] = await asyncio.to_thread(
+                recorder.store.add, recorder.satellite, wake_word,
+                recorder.extract(sample), detection_source=source, **meta,
+            )
+            if clip["meta"] != meta:  # completed while it was being written
+                recorder.store.update(clip["id"], **clip["meta"])
+            _LOGGER.debug("Wake word clip %s kept (%s)", clip["id"], source)
+        except OSError as err:
+            _LOGGER.error("Wake word clip not saved: %s", err)
+
+    def _clip_note(self, close: bool = False, **fields) -> None:
+        """What followed the detection, for its clip (until the response or
+        an error: a later follow-up run is another exchange)."""
+        clip = self._clip
+        if clip is None:
+            return
+        clip["meta"].update(fields)
+        recorder = self._clip_recorder()
+        if clip["id"] is not None and recorder is not None:
+            try:
+                recorder.store.update(clip["id"], **fields)
+            except OSError as err:
+                _LOGGER.error("Wake word clip not updated: %s", err)
+        if close:
+            self._clip = None
 
     def followup_changed(self) -> None:
         """followup.enabled changed (applied without restarting the satellite).
@@ -1514,6 +1597,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     await self.write_event(chunk.event())
                     if self._mirrors:
                         self._mirrors.mic_sent(send_pcm)
+                    if (recorder := self._clip_recorder()) is not None:
+                        if self._wake_sample0_pending:
+                            self._wake_sample0 = recorder.samples_sent
+                            self._wake_sample0_pending = False
+                        recorder.sent(send_pcm)
         except (ConnectionError, asyncio.CancelledError, OSError):
             pass
         except Exception:  # noqa: BLE001 - never stay deaf on a live connection

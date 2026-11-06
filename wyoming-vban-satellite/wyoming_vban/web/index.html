@@ -243,6 +243,22 @@
   .pill { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: var(--accent); color: #fff; margin-left: 6px; font-weight: 500; }
   .ha-driven { display: grid; gap: 4px; padding: 8px 10px; border-radius: 6px; background: var(--section); }
   .ha-driven .vals { font-variant-numeric: tabular-nums; }
+  .clips-head { display: grid; gap: 10px; }
+  .clip { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+  .clip.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .clip .info { display: grid; gap: 2px; min-width: 0; }
+  .clip .meta { font-size: 12px; color: var(--muted); }
+  .clip .transcript { overflow-wrap: anywhere; }
+  .clip .wave { grid-column: 1 / -1; height: 36px; width: 100%; display: block; }
+  .clip .wave rect { fill: var(--accent); }
+  .clip .actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
+  .clip .actions button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .clips { display: grid; gap: 8px; }
+  .counts { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .counts th, .counts td { padding: 3px 8px 3px 0; text-align: left; border-top: 1px solid var(--border); }
+  .counts th { color: var(--muted); font-weight: 500; font-size: 12px; border-top: 0; }
+  .counts-wrap { overflow-x: auto; }
+  kbd { font-family: inherit; font-size: 11px; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; }
   .wake-score { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
 </style>
 </head>
@@ -263,6 +279,7 @@
       <button class="tab" role="tab" data-tab="status">État</button>
       <button class="tab" role="tab" data-tab="satellites">Satellites</button>
       <button class="tab" role="tab" data-tab="calibration">Calibrage</button>
+      <button class="tab" role="tab" data-tab="wake">Mot-clé</button>
       <button class="tab" role="tab" data-tab="general">Général</button>
     </nav>
     <p id="message" role="status"></p>
@@ -270,6 +287,7 @@
   <section id="tab-status" role="tabpanel"></section>
   <section id="tab-satellites" role="tabpanel" hidden></section>
   <section id="tab-calibration" role="tabpanel" hidden></section>
+  <section id="tab-wake" role="tabpanel" hidden></section>
   <section id="tab-general" role="tabpanel" hidden></section>
 </main>
 <script>
@@ -294,6 +312,7 @@ const openSatellites = new Set(); // indexes of expanded satellite cards
 
 const panels = {
   calibration: document.getElementById("tab-calibration"),
+  wake: document.getElementById("tab-wake"),
   status: document.getElementById("tab-status"),
   satellites: document.getElementById("tab-satellites"),
   general: document.getElementById("tab-general"),
@@ -320,6 +339,7 @@ function setDirty() {
   for (const tab of document.querySelectorAll(".tab")) {
     const name = tab.dataset.tab;
     const label = { status: "État", satellites: "Satellites", calibration: "Calibrage",
+                    wake: "Mot-clé",
                     general: "Général" }[name];
     const marked = dirty && (name === "satellites" || name === "general");
     tab.replaceChildren(label, marked ? el("span", { class: "dirty" }, " •") : "");
@@ -683,7 +703,9 @@ function satelliteCard(sat, index) {
         section("Général", null, grid(
           field(sat, "name", { label: "Nom", required: true }),
           field(sat, "wyoming_port", { label: "Port Wyoming", type: "number", required: true,
-                help: "Unique par satellite (10700, 10701…)" }))),
+                help: "Unique par satellite (10700, 10701…)" }),
+          field(sat, "wake_clips", { label: "Garder les extraits du mot-clé", type: "switch",
+                def: true, wide: true, help: "si l'option est activée dans Général" }))),
         microphoneSection(sat.microphone, sat.name),
         outputSection(sat, index),
         followupSection(sat, output)),
@@ -767,7 +789,19 @@ function renderGeneral() {
           field(options, "publish_exchanges", { label: "Publier les échanges", type: "switch",
                 def: true, wide: true, help: "événement jarvis_echange" }),
           field(options, "debug_logging", { label: "Journalisation de débogage",
-                type: "switch", wide: true }))))),
+                type: "switch", wide: true })))),
+      el("div", { class: "card panel" },
+        section("Extraits du mot-clé", null,
+          el("p", { class: "help" }, "Garde l'audio de chaque déclenchement pour le trier (onglet Mot-clé) ; les extraits triés vont dans /share/wakeforge/inbox pour WakeForge."),
+          grid(
+            field(options.wake_clips = options.wake_clips || {}, "enabled",
+                  { label: "Enregistrer les déclenchements", type: "switch", wide: true }),
+            field(options.wake_clips, "retention_days", { label: "Durée de conservation (jours)",
+                  type: "number", min: 1, max: 365, placeholder: "30",
+                  help: "extraits non classés ou ignorés" }),
+            field(options.wake_clips, "max_clips", { label: "Nombre maximal", type: "number",
+                  min: 10, max: 20000, placeholder: "2000",
+                  help: "au-delà, les non classés partent en premier" }))))),
     el("div", { class: "card panel" },
       section("Copies audio de debug (VBAN)", null,
         el("p", { class: "help" }, "Envoie une copie d'un flux audio vers un ordinateur (VBAN Receptor, VoiceMeeter)."),
@@ -1439,6 +1473,171 @@ function renderCalibration() {
         "quand on l'applique, tous le sont avec « Tout appliquer », en quittant l'onglet, ou au bout de 15 minutes."))));
 }
 
+/* Wake word tab */
+
+const CLIP_STATUS = { non_classe: "Non classés", bon: "Bons", faux: "Faux", ignore: "Ignorés" };
+const wake = { satellite: "", status: "non_classe", clips: [], counts: {}, enabled: true,
+               index: 0, audio: null, total: 0 };
+
+async function loadClips() {
+  const query = new URLSearchParams({ satellite: wake.satellite, status: wake.status });
+  try {
+    const resp = await fetch(`api/wake_clips?${query}`);
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
+    Object.assign(wake, { clips: body.clips, counts: body.counts, enabled: body.enabled,
+                          total: body.total || 0 });
+    wake.index = Math.min(wake.index, Math.max(0, wake.clips.length - 1));
+  } catch (err) {
+    say(`Extraits indisponibles : ${err.message || err}`, "error");
+  }
+  renderWake();
+}
+
+function playClip(clip) {
+  if (wake.audio) wake.audio.pause();
+  wake.audio = new Audio(`api/wake_clips/audio?id=${encodeURIComponent(clip.id)}`);
+  wake.audio.play().catch((err) => say(`Lecture impossible : ${err}`, "error"));
+}
+
+async function classifyClip(clip, status) {
+  try {
+    const resp = await fetch("api/wake_clips/classify", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: clip.id, status }),
+    });
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
+    Object.assign(clip, body.clip);
+    // Sorting the unsorted ones: it leaves the list, the next one is selected
+    if (wake.status && wake.status !== status) wake.clips = wake.clips.filter((c) => c !== clip);
+    else wake.index = Math.min(wake.index + 1, wake.clips.length - 1);
+    await loadClips();
+  } catch (err) {
+    say(`Classement impossible : ${err.message || err}`, "error");
+  }
+}
+
+async function markLastFalse() {
+  try {
+    const resp = await fetch("api/wake_clips/last_false", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ satellite: wake.satellite }),
+    });
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
+    say(`Dernier déclenchement (${body.clip.satellite}) marqué comme faux.`, "ok");
+    await loadClips();
+  } catch (err) {
+    say(err.message || `Erreur : ${err}`, "error");
+  }
+}
+
+function waveform(peaks) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "wave");
+  svg.setAttribute("viewBox", `0 0 ${Math.max(1, peaks.length)} 36`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  peaks.forEach((p, i) => {
+    const h = Math.max(1, p * 34);
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    for (const [k, v] of Object.entries({ x: i + 0.1, y: 18 - h / 2, width: 0.8, height: h })) {
+      rect.setAttribute(k, v);
+    }
+    svg.append(rect);
+  });
+  return svg;
+}
+
+function clipRow(clip, index) {
+  const when = new Date(clip.time * 1000).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "medium" });
+  const transcript = clip.transcript === null || clip.transcript === undefined
+    ? (clip.stt_error ? `(${clip.stt_error})` : "(rien de reçu)")
+    : `« ${clip.transcript} »`;
+  const button = (status, text, key) => el("button", {
+    type: "button", "aria-pressed": String(clip.status === status),
+    onclick: () => { wake.index = index; classifyClip(clip, status); },
+  }, text, " ", el("kbd", {}, key));
+  const row = el("div", { class: `clip${index === wake.index ? " selected" : ""}` },
+    el("button", { type: "button", title: "Écouter", onclick: () => { wake.index = index; playClip(clip); renderWake(); } }, "▶"),
+    el("div", { class: "info" },
+      el("span", { class: "meta" }, `${when} · ${clip.satellite} · ${clip.wake_word || "?"}`,
+         clip.status === "non_classe" && clip.suggestion === "probablement_faux"
+           ? el("span", { class: "pill" }, "probablement faux") : null),
+      el("span", { class: "transcript" }, transcript,
+         clip.response ? el("span", { class: "meta" }, ` → « ${clip.response} »`) : null)),
+    waveform(clip.peaks || []),
+    el("div", { class: "actions" },
+      button("bon", "Bon mot-clé", "B"), button("faux", "Faux déclenchement", "F"),
+      button("ignore", "Ignorer", "I")));
+  return row;
+}
+
+function countsTable() {
+  const days = Object.keys(wake.counts).sort().reverse().slice(0, 14);
+  if (!days.length) return el("p", { class: "help" }, "Aucun déclenchement enregistré.");
+  const rows = [];
+  for (const day of days) {
+    for (const [room, n] of Object.entries(wake.counts[day])) {
+      rows.push(el("tr", {}, el("td", {}, new Date(`${day}T12:00:00`).toLocaleDateString("fr-FR")),
+        el("td", {}, room), el("td", {}, String(n.bon)), el("td", {}, String(n.faux)),
+        el("td", {}, String(n.non_classe))));
+    }
+  }
+  return el("div", { class: "counts-wrap" }, el("table", { class: "counts" },
+    el("tr", {}, ["Jour", "Pièce", "Bons", "Faux", "Non classés"].map((h) => el("th", {}, h))), rows));
+}
+
+function renderWake() {
+  if (!wake.enabled) {
+    panels.wake.replaceChildren(el("div", { class: "card panel" },
+      el("h2", {}, "Extraits du mot-clé"),
+      el("p", { class: "help" }, "Désactivés : activez « Enregistrer les déclenchements » dans l'onglet Général, puis enregistrez.")));
+    return;
+  }
+  const names = (saved?.satellites || []).map((s) => s.name);
+  const select = el("select", {}, el("option", { value: "" }, "Toutes les pièces"),
+    names.map((n) => el("option", { value: n }, n)));
+  select.value = wake.satellite;
+  select.addEventListener("change", () => { wake.satellite = select.value; wake.index = 0; loadClips(); });
+  panels.wake.replaceChildren(el("div", { class: "clips-head" },
+    el("div", { class: "card panel" },
+      el("div", { class: "row-buttons", style: "margin-top: 0; align-items: center" },
+        el("label", {}, select),
+        segmented(null, wake.status, [...Object.entries(CLIP_STATUS), ["", "Tous"]],
+          (value) => { wake.status = value; wake.index = 0; loadClips(); }),
+        el("button", { type: "button", onclick: markLastFalse }, "Marquer le dernier déclenchement comme faux")),
+      el("p", { class: "help" }, "Raccourcis : ", el("kbd", {}, "B"), " bon, ", el("kbd", {}, "F"), " faux, ",
+         el("kbd", {}, "I"), " ignorer, ", el("kbd", {}, "↑"), el("kbd", {}, "↓"), " extrait précédent / suivant, ",
+         el("kbd", {}, "Espace"), " écouter.")),
+    el("div", { class: "card panel" }, el("h2", {}, "Par pièce et par jour"), countsTable()),
+    wake.clips.length
+      ? el("div", { class: "clips" }, wake.clips.map(clipRow),
+          wake.total > wake.clips.length ? el("p", { class: "help" }, `${wake.clips.length} sur ${wake.total} affichés.`) : null)
+      : el("p", { class: "help" }, "Aucun extrait avec ces filtres.")));
+}
+
+document.addEventListener("keydown", (event) => {
+  if (currentTab !== "wake" || event.target.closest("input, select, textarea") ||
+      event.ctrlKey || event.metaKey || event.altKey) return;
+  const clip = wake.clips[wake.index];
+  const key = event.key.toLowerCase();
+  if (key === "arrowdown" || key === "arrowright") {
+    wake.index = Math.min(wake.index + 1, wake.clips.length - 1);
+  } else if (key === "arrowup" || key === "arrowleft") {
+    wake.index = Math.max(wake.index - 1, 0);
+  } else if (clip && key === " ") {
+    playClip(clip);
+  } else if (clip && { b: 1, f: 1, i: 1 }[key]) {
+    classifyClip(clip, { b: "bon", f: "faux", i: "ignore" }[key]);
+  } else {
+    return;
+  }
+  event.preventDefault();
+  renderWake();
+  document.querySelector(".clip.selected")?.scrollIntoView({ block: "nearest" });
+});
+
 /* Tabs */
 
 function showTab(name) {
@@ -1447,11 +1646,12 @@ function showTab(name) {
     tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
   }
   for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== name;
-  document.getElementById("actions").hidden = name === "status" || name === "calibration";
+  document.getElementById("actions").hidden = ["status", "calibration", "wake"].includes(name);
   try { localStorage.setItem("vban-satellite-tab", name); } catch (err) { /* private mode */ }
   if (name === "status") refreshStatus();
   if (name === "calibration") openCalibration();
   else closeCalibration();
+  if (name === "wake") loadClips();
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
@@ -1478,6 +1678,7 @@ async function load() {
   saved = body.options;
   // Fill what the editor adds anyway, so loading doesn't look like a change
   saved.debug_mirror = saved.debug_mirror || [];
+  saved.wake_clips = saved.wake_clips || {};
   for (const sat of saved.satellites || []) {
     for (const block of BLOCKS) sat[block] = sat[block] || {};
   }

@@ -9,6 +9,9 @@ configuration:
       wyoming_port:
         name: Port Wyoming
         description: Port TCP de ce satellite, unique par satellite (ex. 10700, 10701...)
+      wake_clips:
+        name: Garder les extraits du mot-cle
+        description: Garder les extraits du mot-cle de ce satellite quand wake_clips est active (active par defaut)
       output:
         name: Sortie des reponses
         description: 'vban (defaut) : bloc Sortie VBAN ; media_player : bloc Media player (Sortie VBAN en secours si activee) ; none : reponses non jouees (ex. pour tester un micro)'
@@ -171,6 +174,19 @@ configuration:
           enabled:
             name: (ancien) Activee
             description: Avant 3.2 ; utilise seulement si Mode est vide (non = none). Preferer Mode
+  wake_clips:
+    name: Extraits du mot-cle
+    description: Garde l'audio de chaque detection du mot-cle pour le trier (onglet Mot-cle) ; les extraits tries vont dans /share/wakeforge/inbox pour WakeForge
+    fields:
+      enabled:
+        name: Enregistrer les declenchements
+        description: Desactive par defaut
+      retention_days:
+        name: Duree de conservation (jours)
+        description: Les extraits non classes ou ignores plus anciens sont supprimes, 1-365 (defaut 30)
+      max_clips:
+        name: Nombre maximal
+        description: Au-dela, les non classes partent en premier, puis les ignores, puis les plus anciens tries, 10-20000 (defaut 2000)
   publish_exchanges:
     name: Publier les echanges
     description: Envoyer un evenement Home Assistant jarvis_echange pour chaque demande et reponse (satellite, transcript, reponse, relance)

@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.10.0
+
+- **New: wake word clips**, to retrain the wake word model on what really triggers it (`wake_clips` block, off by default):
+  - each detection in a wake run keeps the audio sent to Home Assistant (what openWakeWord heard) from 2.5 s before to 0.5 s after it, placed by the detection's `timestamp` when the satellite started the run (follow-up mode), otherwise by its arrival minus the measured delay; counted in samples sent, so a microphone cut (Atom playing) doesn't shorten it; no clip for follow-up runs (started at ASR);
+  - one WAV and one JSON per clip in `/data/wake_clips`: satellite, time, wake word, RMS and peak, transcript and response that followed (or the STT error), and a suggestion (`probablement_faux` when nothing was said after the wake word, otherwise `a_verifier`); never sorted by the app;
+  - retention: `retention_days` (30) for unsorted and ignored clips; `max_clips` (2000), unsorted ones going first; per satellite `wake_clips: false` to leave one out;
+  - **Mot-clé tab**: clips by room and status, waveform, play, **Bon mot-clé** / **Faux déclenchement** / **Ignorer** (keys B, F, I, arrows, Space), counts of good and false triggers per room and day, **Marquer le dernier déclenchement comme faux**;
+  - sorted clips copied to `/share/wakeforge/inbox/<wake word without -N>/positifs|negatifs/` with `manifest.json` (path, status, sha256, satellite, date, transcript), moved when sorted again, removed when ignored. The app now maps `/share` read-write;
+  - Home Assistant event `jarvis_faux_declenchement` (`satellite`): marks that satellite's last clip as a false trigger, e.g. from a "ce n'était pas pour toi" sentence.
+
 ## 3.9.3
 
 The last points of the review.

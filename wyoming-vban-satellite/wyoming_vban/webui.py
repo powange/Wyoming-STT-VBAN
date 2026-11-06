@@ -115,6 +115,10 @@ class WebUI:
         app.router.add_get("/api/calibration/wake_models", self._wake_models)
         app.router.add_delete("/api/calibration", self._calibration_clear)
         app.router.add_get("/api/calibration", self._calibration_state)
+        app.router.add_get("/api/wake_clips", self._clips_list)
+        app.router.add_get("/api/wake_clips/audio", self._clips_audio)
+        app.router.add_post("/api/wake_clips/classify", self._clips_classify)
+        app.router.add_post("/api/wake_clips/last_false", self._clips_last_false)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         await web.TCPSite(self._runner, "0.0.0.0", self.port).start()
@@ -648,6 +652,56 @@ class WebUI:
     async def _calibration_clear(self, request: web.Request) -> web.Response:
         self._sessions.pop(request.query.get("satellite", ""), None)
         return web.json_response({"ok": True})
+
+    # Wake word clips
+
+    def _clip_store(self):
+        store = self.runtime.clip_store
+        if store is None:
+            raise web.HTTPConflict(
+                text=json.dumps({"error": "Extraits du mot-clé désactivés (option wake_clips.enabled)"}),
+                content_type="application/json",
+            )
+        return store
+
+    async def _clips_list(self, request: web.Request) -> web.Response:
+        """Clips, the latest first (filters: satellite, status), and the
+        counts per day and room."""
+        store = self.runtime.clip_store
+        if store is None:
+            return web.json_response({"enabled": False, "clips": [], "counts": {}})
+        clips = store.list(request.query.get("satellite", ""), request.query.get("status", ""))
+        return web.json_response({
+            "enabled": True, "clips": clips[:500], "total": len(clips), "counts": store.counts(),
+        })
+
+    async def _clips_audio(self, request: web.Request) -> web.Response:
+        store = self._clip_store()
+        clip_id = request.query.get("id", "")
+        if not clip_id.replace("-", "").isalnum() or clip_id not in {c["id"] for c in store.list()}:
+            raise web.HTTPNotFound(text="Extrait inconnu")
+        return web.FileResponse(store.wav_path(clip_id), headers={"Cache-Control": "no-store"})
+
+    async def _clips_classify(self, request: web.Request) -> web.Response:
+        store = self._clip_store()
+        body = await self._json(request)
+        try:
+            clip = await asyncio.to_thread(store.classify, str(body.get("id", "")),
+                                           str(body.get("status", "")))
+        except KeyError:
+            return web.json_response({"error": "Extrait inconnu"}, status=404)
+        except ValueError:
+            return web.json_response({"error": "Statut inconnu"}, status=400)
+        return web.json_response({"clip": clip})
+
+    async def _clips_last_false(self, request: web.Request) -> web.Response:
+        """The satellite's last clip (or the last one at all) is false."""
+        self._clip_store()
+        body = await self._json(request)
+        clip = self.runtime.mark_last_false(str(body.get("satellite") or ""))
+        if clip is None:
+            return web.json_response({"error": "Aucun déclenchement enregistré"}, status=404)
+        return web.json_response({"clip": clip})
 
     async def _status(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.status())

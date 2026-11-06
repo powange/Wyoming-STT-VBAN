@@ -22,6 +22,7 @@ from .config import (
     validate_mirrors,
 )
 from .discovery import Discovery
+from .wake_clips import ClipRecorder, ClipStore
 from .ha_audio import HaAudioSync, HaMicSettings, auto_gain_settings
 from .ha_ws import SUPERVISOR_WS_URL, HaStateWatcher, HaUnavailable
 from .calibration import LevelMeter
@@ -306,6 +307,7 @@ class SatelliteRunner:
         self._taps: list[Callable[[bytes], None]] = []
         self._converter = WyomingConverter()
         self.mic_feed = MicFeed()
+        self.clip_recorder: Optional[ClipRecorder] = None  # wake word clips (if on)
         self.handlers: weakref.WeakSet[VbanSatelliteHandler] = weakref.WeakSet()
         self.task: Optional[asyncio.Task] = None
         self.started_at = 0.0
@@ -431,6 +433,7 @@ class SatelliteRunner:
                 mic_filter=self.mic_filter,
                 waiting_cues=self.cues,
                 debug_mirrors=self.mirrors,
+                clip_recorder=lambda: self.clip_recorder,
             )
             self.handlers.add(handler)
             return handler
@@ -733,8 +736,14 @@ class AppRuntime:
     RESTART_DELAYS_S = (5.0, 10.0, 30.0, 60.0)
     STABLE_S = 60.0
 
-    def __init__(self, cache_dir: str):
+    def __init__(
+        self, cache_dir: str, clips_root: str = "/data/wake_clips",
+        clips_inbox: str = "/share/wakeforge/inbox",
+    ):
         self.cache_dir = cache_dir
+        self.clips_root = clips_root
+        self.clips_inbox = clips_inbox
+        self.clip_store: Optional[ClipStore] = None
         self.options: Optional[AppOptions] = None
         # A satellite or receiver stopped on its own (outside a change)
         self.fatal = asyncio.Event()
@@ -780,6 +789,7 @@ class AppRuntime:
             options.publish_exchanges
             or any(s.tts_output == "media_player" for s in options.satellites)
             or any(s.mic_follow_ha or s.followup_enabled for s in options.satellites)
+            or options.wake_clips_enabled
             or any(c.search or c.vision for c in cues.values())
         )
 
@@ -832,6 +842,8 @@ class AppRuntime:
             # demander_ia_externe / regarder_la_camera scripts)
             self._watcher.add_event_listener("jarvis_recherche", notify_search)
             self._watcher.add_event_listener("jarvis_vision", notify_vision)
+            # "That wasn't for you": the satellite's last wake word clip is false
+            self._watcher.add_event_listener("jarvis_faux_declenchement", self._on_false_wake)
             self._ha_audio = HaAudioSync(self._watcher, self._on_ha_mic, self._on_assist_state)
             self._watcher_task = asyncio.create_task(self._watcher.run())
             self._watcher_task.add_done_callback(_log_task_failure("HA WebSocket"))
@@ -854,6 +866,55 @@ class AppRuntime:
             runner.watcher = self._watcher
             if runner.media_output is not None:
                 runner.media_output.state_watcher = self._watcher
+
+    # Wake word clips
+
+    def _sync_clips(self, options: AppOptions) -> None:
+        """Open (or close) the clip store, give each satellite its recorder."""
+        if not options.wake_clips_enabled:
+            self.clip_store = None
+        elif self.clip_store is None:
+            try:
+                self.clip_store = ClipStore(
+                    self.clips_root, self.clips_inbox,
+                    options.wake_clips_retention_days, options.wake_clips_max,
+                )
+            except OSError as err:
+                _LOGGER.error("Wake word clips not kept: %s", err)
+                report_problem(f"Extraits du mot-clé désactivés : {err}")
+        else:
+            self.clip_store.retention_days = options.wake_clips_retention_days
+            self.clip_store.max_clips = options.wake_clips_max
+            self.clip_store.purge()
+        for runner in self._runners.values():
+            self._attach_clips(runner)
+
+    def _attach_clips(self, runner: SatelliteRunner) -> None:
+        if self.clip_store is None or not runner.cfg.wake_clips:
+            runner.clip_recorder = None
+        elif runner.clip_recorder is None or runner.clip_recorder.store is not self.clip_store:
+            runner.clip_recorder = ClipRecorder(self.clip_store, runner.cfg.name)
+
+    def mark_last_false(self, satellite: str = "") -> Optional[dict[str, Any]]:
+        """The satellite's last clip (or the last one at all) is a false
+        trigger. Returns it, None if there is none."""
+        if self.clip_store is None:
+            return None
+        clips = self.clip_store.list(satellite)
+        if not clips:
+            return None
+        return self.clip_store.classify(clips[0]["id"], "faux")
+
+    def _on_false_wake(self, data: dict[str, Any]) -> None:
+        satellite = str(data.get("satellite") or "")
+        try:
+            clip = self.mark_last_false(satellite)
+        except OSError as err:
+            _LOGGER.error("Last wake word clip not marked: %s", err)
+            return
+        if clip is not None:
+            _LOGGER.info("Wake word clip %s (%s) marked as a false trigger from Home Assistant",
+                         clip["id"], clip["satellite"])
 
     def _close_ha_audio(self) -> None:
         if self._ha_audio is not None:
@@ -908,6 +969,7 @@ class AppRuntime:
             self._watcher, self.publisher, cues, mirrors, self.discovery,
         )
         self._runners[sat.name] = runner
+        self._attach_clips(runner)
         if self._ha_audio is not None and sat.name in self._ha_audio.settings:
             runner.set_ha_mic(self._ha_audio.settings[sat.name])
         runner.started_at = time.monotonic()
@@ -979,6 +1041,7 @@ class AppRuntime:
         self.options = options
         logging.getLogger().setLevel(logging.DEBUG if options.debug_logging else logging.INFO)
         _LOGGER.info("Starting %d satellite(s)", len(options.satellites))
+        self._sync_clips(options)
         cues = self._build_cues(options)
         self._sync_phrases(cues)
         remove_legacy_cache()
@@ -1123,6 +1186,7 @@ class AppRuntime:
         cues = self._build_cues(new)
         self.options = new
         logging.getLogger().setLevel(logging.DEBUG if new.debug_logging else logging.INFO)
+        self._sync_clips(new)
         self.publisher.enabled = new.publish_exchanges
         self._sync_phrases(cues)
         await self._set_watcher(self._needs_watcher(new, cues), new)
@@ -1189,6 +1253,7 @@ class AppRuntime:
                     != [dataclasses.asdict(m) for m in old_mirrors[sat.name]]
                 ) or cues[sat.name] != runner.cues:
                     await runner.update(sat, cues[sat.name], sat_mirrors)
+                    self._attach_clips(runner)
                     done.append(f"satellite '{sat.name}' updated without restart")
 
     def status(self) -> dict[str, Any]:
