@@ -281,6 +281,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
     # Waiting sound on a media_player: Cast start delay (0.07-0.2 s) margin,
     # for the mic silence and before the response can follow
     CUE_CAST_START_S = 0.3
+    # A response waits for a short sound (beep, chime) to end, but cuts a
+    # longer announcement (a spoken phrase) instead of waiting seconds
+    CUE_FINISH_MAX_S = 1.0
 
     def __init__(
         self,
@@ -354,6 +357,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # Announcements to play, in order: (signal, cue, label)
         self._cue_queue: collections.deque[tuple[str, Cue, str]] = collections.deque()
         self._cue_task: Optional[asyncio.Task] = None  # plays the queue
+        self._current_cue: Optional[Cue] = None
         self._mic_silence_until = 0.0  # mic replaced by silence (sound playing)
 
         # Follow-up: when enabled, the satellite drives the pipeline runs
@@ -453,6 +457,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._start_thinking()
             self._expire_transcript_later()
             if self._driven:
+                _LOGGER.debug("Transcript received, waiting for the response")
                 self._set_watchdog(self.RESPONSE_TIMEOUT_S, self._on_response_timeout)
             return True
 
@@ -528,6 +533,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
             # waiting sound is playing: the response then follows it.
             if self._vban_sender:
                 self._vban_sender.reset_resampler()
+                if self._response_audio:
+                    self._interrupt_long_cue()
                 if not self._cue_playing():
                     self._vban_sender.clear_pending()
             return True
@@ -740,7 +747,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         while self._cue_queue:
             signal, cue, label = self._cue_queue.popleft()
             _LOGGER.info("Announcement %s: %s (%.2fs)", signal, label, cue.duration)
-            await self._play_cue(cue)
+            self._current_cue = cue
+            try:
+                await self._play_cue(cue)
+            finally:
+                self._current_cue = None
 
     async def _play_cue(self, cue: Cue) -> None:
         """Play one cue; returns once it has played (the next may follow)."""
@@ -768,7 +779,24 @@ class VbanSatelliteHandler(AsyncEventHandler):
             # Until it has left the send buffer (a response then queues after)
             await asyncio.sleep(cue.duration + 0.1)
 
+    def _interrupt_long_cue(self) -> bool:
+        """The response is here: a spoken announcement still playing is cut
+        (a short sound is left to finish). True if one was cut."""
+        cue = self._current_cue
+        if not self._cue_playing() or cue is None or cue.duration <= self.CUE_FINISH_MAX_S:
+            return False
+        assert self._cue_task is not None
+        self._cue_task.cancel()
+        self._cue_queue.clear()
+        self._mic_silence_until = 0.0
+        if self._vban_sender:
+            self._vban_sender.clear_pending()
+        _LOGGER.debug("Announcement cut by the response")
+        return True
+
     async def _wait_cue(self) -> None:
+        if self._interrupt_long_cue():
+            return  # the response replaces it on the media_player
         if self._cue_playing():
             assert self._cue_task is not None
             await asyncio.gather(self._cue_task, return_exceptions=True)

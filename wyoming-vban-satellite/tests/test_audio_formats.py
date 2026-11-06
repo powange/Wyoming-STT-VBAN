@@ -133,6 +133,20 @@ class MulticastInterfaceTest(unittest.TestCase):
         self.assertEqual(sat.vban_receive_multicast_interface, "")
 
 
+class PortConflictTest(unittest.TestCase):
+    def test_http_port_on_a_wyoming_port(self) -> None:
+        a = SatelliteConfig(name="A", wyoming_port=10700, tts_output="none")
+        b = SatelliteConfig(name="B", wyoming_port=10701, tts_output="media_player",
+                            tts_media_player="media_player.x", tts_http_port=10700)
+        with self.assertRaisesRegex(ConfigError, "Port 10700"):
+            validate([a, b], strict=True)
+
+    def test_interface_port(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "configuration interface"):
+            validate([SatelliteConfig(name="A", wyoming_port=8743, tts_output="none")],
+                     strict=True)
+
+
 class RangeTest(unittest.IsolatedAsyncioTestCase):
     async def test_partial_wav(self) -> None:
         with socket.socket() as sock:

@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.9.1
+
+Friction points from the review.
+
+- **A failed configuration is rolled back piecemeal**: only what the change touched (or what stopped) is restarted; the other satellites keep running, conversations included.
+- **Port conflicts are refused when saving**, with a clear message: a satellite's `media_player.http_port` equal to another's Wyoming port, or any of them on 8743 (the configuration interface). They were only seen when a satellite failed to start.
+- **A long spoken announcement no longer delays the response**: the response cuts it (a short sound, under 1 s, still finishes first).
+- **Media player on a LAN without internet**: the host's address is found through the mDNS route when the internet one fails; if none, a clear error tells to set `media_player.http_host` (127.0.0.1 can't be reached by a Cast device).
+- **Calibration**: shorter sentence to read (it was tight in 8 s); detections above the number of wake words show as "5/5 +1" with "false wake-up"; a **Réessayer** button when openWakeWord can't be reached (no need to measure the voice again).
+- **Interface**: "Modifications non enregistrées" no longer replaces an error message at each keystroke; the last API messages in English are in French.
+- **Logs**: range warnings use the option names of the interface (`vban_output.volume`, `media_player.mic_mute_tail_ms`, `followup.timeout_s`…); in follow-up mode, the wait for a response is logged (debug).
+- The `microphone` block description (Supervisor's configuration tab) covers the camera source and the clean-up.
+
 ## 3.9.0
 
 Improvements from the review.

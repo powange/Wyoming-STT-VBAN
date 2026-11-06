@@ -509,6 +509,20 @@ class AnnouncementTest(unittest.IsolatedAsyncioTestCase):
         self.assertSent(THINKING)
 
 
+    async def test_response_cuts_a_long_spoken_announcement(self) -> None:
+        long_phrase = FakePhrase("Je cherche sur internet, un instant s'il te plaît.", 3.0)
+        await self.start(WaitingCues(
+            thinking=Announcement(phrase=long_phrase), thinking_delay_s=0.2,
+        ))
+        await self.transcript()
+        await asyncio.sleep(0.4)  # the 3 s phrase is playing
+        cleared = self.sender.cleared
+        await self.response()
+        await asyncio.sleep(0.2)
+        # Cut (VBAN buffer cleared) instead of making the response wait 3 s
+        self.assertGreater(self.sender.cleared, cleared)
+
+
 class FollowupDisabledTest(FollowupTest):
     followup = FollowupSettings(enabled=False)
 

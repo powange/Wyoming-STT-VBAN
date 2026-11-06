@@ -1059,12 +1059,45 @@ class AppRuntime:
             error = self.failure
             _LOGGER.error("New configuration failed (%s): restoring the previous one", error)
             report_problem(f"Nouvelle configuration refusée ({error}) : précédente rétablie")
-            await self.stop()
-            if previous is not None:
+            if previous is None:
+                await self.stop()
+            elif not await self._roll_back(previous):
+                # Couldn't restore piecemeal: everything again
+                await self.stop()
                 await self.start(previous)
             return error
         finally:
             self._changing = False
+
+    async def _roll_back(self, previous: AppOptions) -> bool:
+        """Back to the previous options, restarting only what differs or
+        stopped (the satellites the change didn't touch keep running).
+        False if that didn't work."""
+        try:
+            # What died is started again by the change below
+            for port, task in list(self._receiver_tasks.items()):
+                if task.done():
+                    for name, runner in list(self._runners.items()):
+                        if runner.receiver is self._receivers.get(port):
+                            await self._stop_runner(name)
+                    self._stopping = True
+                    try:
+                        await self._stop_receiver(port)
+                    finally:
+                        self._stopping = False
+            for name, runner in list(self._runners.items()):
+                if runner.task is None or runner.task.done():
+                    await self._stop_runner(name)
+            self._change_failed.clear()
+            await self._apply_changes(previous, [])
+            try:
+                await asyncio.wait_for(self._change_failed.wait(), self.STARTUP_CHECK_S)
+            except asyncio.TimeoutError:
+                return True
+            _LOGGER.error("Restoring the previous configuration failed too: restarting all")
+        except Exception:  # noqa: BLE001 - fall back to a full restart
+            _LOGGER.exception("Error while restoring the previous configuration")
+        return False
 
     async def _restart_all(self, options: AppOptions) -> None:
         await self.stop()

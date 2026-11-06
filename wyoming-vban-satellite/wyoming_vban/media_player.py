@@ -26,20 +26,29 @@ SUPERVISOR_API = "http://supervisor/core/api"
 
 
 def detect_local_ip() -> str:
-    """Return the host's LAN IP (the source address used to reach the internet).
+    """Return the host's LAN IP: the source address towards the internet,
+    or else towards the mDNS group (a LAN without internet access).
 
     A UDP "connect" sends no packet; it only selects the outgoing interface.
     The app runs with host_network, so this is the host's IP.
     """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.connect(("8.8.8.8", 80))
-        return sock.getsockname()[0]
-    except OSError as err:
-        _LOGGER.warning("Could not detect LAN IP (%s), using 127.0.0.1", err)
-        return "127.0.0.1"
-    finally:
-        sock.close()
+    errors = []
+    for target in ("8.8.8.8", "224.0.0.251"):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            try:
+                sock.connect((target, 80))
+                address = sock.getsockname()[0]
+            except OSError as err:
+                errors.append(str(err))
+                continue
+        if not address.startswith("127."):
+            return address
+    _LOGGER.error(
+        "Could not detect the LAN IP (%s): using 127.0.0.1, which the media "
+        "player can't reach. Set media_player.http_host to this host's address.",
+        "; ".join(errors) or "loopback only",
+    )
+    return "127.0.0.1"
 
 
 def build_wav(pcm: bytes, rate: int, width: int, channels: int) -> bytes:

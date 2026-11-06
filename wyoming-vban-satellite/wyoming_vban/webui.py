@@ -544,7 +544,7 @@ class WebUI:
         session = self._session(request.query.get("satellite", ""))
         pcm = session.audio(request.query.get("which", "")) if session is not None else b""
         if not pcm:
-            raise web.HTTPNotFound(text="No recording")
+            raise web.HTTPNotFound(text="Aucun enregistrement (effacé ou expiré)")
         return web.Response(
             body=build_wav(pcm, 16000, 2, 1), content_type="audio/wav",
             headers={"Cache-Control": "no-store"},

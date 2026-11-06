@@ -20,6 +20,7 @@ DEFAULT_TTS_VOICE = "fr_FR-siwis-medium"
 MIC_SOURCES = ("vban", "rtsp")
 NOISE_SUPPRESSION_LEVELS = ("off", "light", "medium", "strong")
 MIC_VOLUME_RANGE = (0.1, 10.0)
+UI_PORT = 8743  # the configuration interface (ingress_port, run.sh)
 AUTO_GAIN_TARGET_RANGE = (-31.0, -3.0)  # dBFS
 
 # Announcement modes (waiting_sounds.*_mode, camera_phrase.mode)
@@ -245,7 +246,7 @@ class SatelliteConfig:
         volume = max(0.0, min(2.0, self.tts_vban_volume))
         if volume != self.tts_vban_volume:
             _LOGGER.warning(
-                "[%s] tts_vban_volume %.2f clamped to %.2f (valid range 0.0-2.0)",
+                "[%s] vban_output.volume %.2f clamped to %.2f (valid range 0.0-2.0)",
                 self.name, self.tts_vban_volume, volume,
             )
             self.tts_vban_volume = volume
@@ -253,7 +254,7 @@ class SatelliteConfig:
         batch = max(1, min(8, self.tts_vban_batch_packets))
         if batch != self.tts_vban_batch_packets:
             _LOGGER.warning(
-                "[%s] tts_vban_batch_packets %d clamped to %d (valid range 1-8)",
+                "[%s] vban_output.batch_packets %d clamped to %d (valid range 1-8)",
                 self.name, self.tts_vban_batch_packets, batch,
             )
             self.tts_vban_batch_packets = batch
@@ -261,7 +262,7 @@ class SatelliteConfig:
         tail = max(0, min(5000, self.mic_mute_tail_ms))
         if tail != self.mic_mute_tail_ms:
             _LOGGER.warning(
-                "[%s] mic_mute_tail_ms %d clamped to %d (valid range 0-5000)",
+                "[%s] media_player.mic_mute_tail_ms %d clamped to %d (valid range 0-5000)",
                 self.name, self.mic_mute_tail_ms, tail,
             )
             self.mic_mute_tail_ms = tail
@@ -269,7 +270,7 @@ class SatelliteConfig:
         timeout = max(3, min(30, self.followup_timeout_s))
         if timeout != self.followup_timeout_s:
             _LOGGER.warning(
-                "[%s] followup_timeout_s %d clamped to %d (valid range 3-30)",
+                "[%s] followup.timeout_s %d clamped to %d (valid range 3-30)",
                 self.name, self.followup_timeout_s, timeout,
             )
             self.followup_timeout_s = timeout
@@ -277,7 +278,7 @@ class SatelliteConfig:
         delay = max(300, min(5000, self.thinking_delay_ms))
         if delay != self.thinking_delay_ms:
             _LOGGER.warning(
-                "[%s] thinking_delay_ms %d clamped to %d (valid range 300-5000)",
+                "[%s] waiting_sounds.thinking_delay_ms %d clamped to %d (valid range 300-5000)",
                 self.name, self.thinking_delay_ms, delay,
             )
             self.thinking_delay_ms = delay
@@ -542,6 +543,19 @@ def validate(satellites: list[SatelliteConfig], strict: bool = False) -> None:
 
         if sat.mic_source == "vban":
             by_vban_port.setdefault(sat.vban_receive_port, []).append(sat)
+
+    # TCP ports opened by the app: Wyoming servers, TTS HTTP servers and the
+    # interface must all differ (otherwise only seen when one fails to start)
+    tcp_ports: dict[int, str] = {UI_PORT: "the configuration interface"}
+    for port, owner in [(p, f"satellite '{n}' (Wyoming port)") for p, n in wyoming_ports.items()] + [
+        (p, f"satellite '{n}' (media_player.http_port)") for p, n in http_ports.items()
+    ]:
+        if port in tcp_ports:
+            raise ConfigError(
+                f"Port {port} is used by {owner} and by {tcp_ports[port]}: choose "
+                "another port."
+            )
+        tcp_ports[port] = owner
 
     for port, sats in by_vban_port.items():
         if len(sats) < 2:

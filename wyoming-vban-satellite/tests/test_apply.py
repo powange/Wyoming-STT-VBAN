@@ -172,6 +172,7 @@ class ApplyTest(unittest.IsolatedAsyncioTestCase):
         busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         busy.bind(("0.0.0.0", 0))
         busy.listen()
+        salon = self.runtime.runners["Salon"]
         try:
             new = copy.deepcopy(self.options)
             new["satellites"][0]["wyoming_port"] = busy.getsockname()[1]
@@ -185,6 +186,9 @@ class ApplyTest(unittest.IsolatedAsyncioTestCase):
             self.options["satellites"][0]["wyoming_port"],
         )
         self.assertFalse(self.runtime.fatal.is_set())
+        # Only what the change touched was restored: Salon kept running
+        self.assertIs(self.runtime.runners["Salon"], salon)
+        self.assertFalse(self.runtime.runners["Bureau"].task.done())
 
     async def test_failed_satellite_is_started_again_alone(self) -> None:
         self.runtime.RESTART_DELAYS_S = (0.1,)

@@ -311,6 +311,8 @@ function isDirty() {
   return options !== null && JSON.stringify(options) !== JSON.stringify(saved);
 }
 
+let wasDirty = false;
+
 function setDirty() {
   const dirty = isDirty();
   saveButton.disabled = !dirty;
@@ -322,7 +324,9 @@ function setDirty() {
     const marked = dirty && (name === "satellites" || name === "general");
     tab.replaceChildren(label, marked ? el("span", { class: "dirty" }, " •") : "");
   }
-  if (dirty) say("Modifications non enregistrées.");
+  // Said when it becomes dirty, not at each keystroke (an error stays shown)
+  if (dirty && !wasDirty) say("Modifications non enregistrées.");
+  wasDirty = dirty;
 }
 
 function el(tag, attrs = {}, ...children) {
@@ -904,8 +908,9 @@ async function refreshStatus() {
 
 /* Calibration tab */
 
-const CALIB_PHRASE = "Dis-moi Jarvis, allume la lumière du salon, règle le chauffage à vingt " +
-                     "degrés, puis dis-moi quel temps il fera demain matin.";
+// Short enough to be read calmly within the 6 to 8 s of a take
+const CALIB_PHRASE = "Dis-moi Jarvis, allume la lumière du salon et règle le chauffage " +
+                     "à vingt degrés.";
 const WAKE_PHRASE = "Dis-moi Jarvis";
 const STEP_SECONDS = { noise: 5, voice: 8, near: 6, far: 6, wake: 20 };
 const STEP_LABELS = {
@@ -1309,7 +1314,9 @@ function wakeStep() {
   const disabled = calib.busy || !calib.result || !calib.models;
   const score = (label, part) => el("div", {},
     el("div", { class: "help" }, label),
-    el("div", { class: "wake-score" }, `${part.detections}/${w.expected}`),
+    el("div", { class: "wake-score" }, wakeScore(part.detections, w.expected)),
+    part.detections > w.expected && el("div", { class: "help" },
+      `+${part.detections - w.expected} détection(s) en trop : faux réveil`),
     el("div", { class: "help" }, micSettingsText(part)));
   const models = calib.models
     ? el("label", {}, el("span", { class: "name" }, "Modèle"), (() => {
@@ -1319,9 +1326,12 @@ function wakeStep() {
         select.addEventListener("change", () => { calib.model = select.value; });
         return select;
       })())
-    : el("p", { class: "help" }, calib.modelsError
-        ? `openWakeWord : ${calib.modelsError}`
-        : calib.result ? "Recherche d'openWakeWord…" : "Après la mesure de la voix.");
+    : calib.modelsError
+      ? el("p", { class: "help" }, `openWakeWord : ${calib.modelsError} `,
+          el("button", { type: "button", disabled: calib.busy || null,
+                         onclick: () => loadWakeModels() }, "Réessayer"))
+      : el("p", { class: "help" },
+          calib.result ? "Recherche d'openWakeWord…" : "Après la mesure de la voix.");
   return [
     el("p", { class: "help" },
       `À votre place habituelle, dites « ${WAKE_PHRASE} » 5 fois en 20 secondes. Le son, traité avec ` +
@@ -1336,6 +1346,12 @@ function wakeStep() {
       el("p", { class: "help" }, "openWakeWord ne donne pas de score de confiance : seul le nombre de détections est indiqué."),
     ],
   ];
+}
+
+/* "3/5", or "5/5 +1" when openWakeWord woke up more often than said */
+function wakeScore(detections, expected) {
+  return detections <= expected ? `${detections}/${expected}`
+    : `${expected}/${expected} +${detections - expected}`;
 }
 
 function summaryCard() {
@@ -1356,7 +1372,8 @@ function summaryCard() {
       row("Réduction de bruit", p.noise_suppression ? NOISE_NAMES[p.noise_suppression] : "étape A à faire"),
       row("Gain automatique", p.auto_gain === undefined ? "étape B à faire"
                                 : gainText(p.auto_gain, p.auto_gain_target_db ?? 0)),
-      row("Mot-clé", w ? `actuel ${w.current.detections}/${w.expected}, proposé ${w.proposed.detections}/${w.expected}`
+      row("Mot-clé", w ? `actuel ${wakeScore(w.current.detections, w.expected)}, ` +
+                         `proposé ${wakeScore(w.proposed.detections, w.expected)}`
                        : "étape C à faire")),
     el("p", { class: "help" }, followsHa()
       ? "Appliquer écrit dans les entités Home Assistant du satellite (Volume du micro, Niveau de suppression du bruit, Gain automatique)."

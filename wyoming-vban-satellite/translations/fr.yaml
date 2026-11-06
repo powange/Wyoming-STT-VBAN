@@ -14,7 +14,7 @@ configuration:
         description: 'vban (defaut) : bloc Sortie VBAN ; media_player : bloc Media player (Sortie VBAN en secours si activee) ; none : reponses non jouees (ex. pour tester un micro)'
       microphone:
         name: Micro
-        description: Flux VBAN du micro
+        description: Provenance du micro (flux VBAN ou flux RTSP d une camera) et nettoyage du son (volume, reduction de bruit, gain automatique, entites Home Assistant)
         fields:
           source:
             name: Source

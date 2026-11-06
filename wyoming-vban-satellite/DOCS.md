@@ -47,6 +47,11 @@ change).
 
 The interface is only reachable through Home Assistant (Ingress).
 
+Ports are checked when saving: each Wyoming port and media player HTTP port
+must be unique, and none can be 8743 (the configuration interface). A
+configuration that fails to start is rolled back, restarting only what it
+had changed.
+
 A satellite that stops on its own (a crash, a port taken) is started again
 by itself after 5, 10, 30 then 60 s, the others keep running. The
 Supervisor's watchdog restarts the app if it stops answering.

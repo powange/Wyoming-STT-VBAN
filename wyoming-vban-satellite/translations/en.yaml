@@ -14,7 +14,7 @@ configuration:
         description: 'vban (default): the VBAN output block; media_player: the Media player block (VBAN output as fallback if enabled); none: responses are not played (e.g. to test a microphone)'
       microphone:
         name: Microphone
-        description: VBAN stream of the microphone
+        description: Where the microphone comes from (VBAN stream or camera RTSP stream) and how it is cleaned up (volume, noise suppression, automatic gain, Home Assistant entities)
         fields:
           source:
             name: Source
