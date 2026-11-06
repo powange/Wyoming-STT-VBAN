@@ -410,8 +410,8 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
                               wake["expected"]), (3, 3, 5))
             self.assertEqual(wake["proposed"]["noise_suppression"], "medium")
             self.assertTrue(wake["proposed"]["auto_gain"])
-            # Unknown model: refused before recording
-            status, body = await self.record("wake", b"", {
+            # Unknown model: refused (openWakeWord would use another one)
+            status, body = await self.record("wake", speech(2.3, 3000), {
                 "host": "127.0.0.1", "port": oww.port, "model": "hey_jarvis"})
             self.assertEqual(status, 502)
             self.assertIn("hey_jarvis", body["error"])
@@ -447,6 +447,36 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
         async with self.http.delete(self.url("/api/calibration?satellite=Bureau")) as resp:
             self.assertEqual(resp.status, 200)
         self.assertEqual(self.ui._sessions, {})
+
+    async def test_failed_noise_keeps_the_calibration(self) -> None:
+        status, _ = await self.record("noise", noise(5.3, 100))
+        self.assertEqual(status, 200)
+        session = self.ui._sessions["Bureau"]
+        async with self.http.post(self.url("/api/calibration/record"),
+                                  json={"satellite": "Bureau", "step": "noise"}) as resp:
+            self.assertEqual(resp.status, 409)  # no audio this time
+        self.assertIs(self.ui._sessions["Bureau"], session)
+
+    async def test_one_measure_at_a_time(self) -> None:
+        first = asyncio.create_task(self.record("noise", noise(5.3, 100)))
+        await asyncio.sleep(0.5)
+        async with self.http.post(self.url("/api/calibration/record"),
+                                  json={"satellite": "Bureau", "step": "noise"}) as resp:
+            self.assertEqual(resp.status, 409)
+            self.assertIn("déjà en cours", (await resp.json())["error"])
+        status, _ = await first
+        self.assertEqual(status, 200)
+
+    async def test_bad_requests_are_400(self) -> None:
+        for body in ([], {"satellite": ["Bureau"], "step": "noise"},
+                     {"satellite": "Bureau", "step": 3}):
+            async with self.http.post(self.url("/api/calibration/record"), json=body) as resp:
+                self.assertEqual(resp.status, 400, body)
+        async with self.http.get(self.url("/api/calibration/wake_models?port=abc")) as resp:
+            self.assertEqual(resp.status, 400)
+        async with self.http.get(self.url("/api/meter/once?satellite=Nope")) as resp:
+            self.assertEqual(resp.status, 404)
+            self.assertIn("pas démarré", (await resp.json())["error"])
 
     async def test_no_audio(self) -> None:
         async with self.http.post(self.url("/api/calibration/record"),

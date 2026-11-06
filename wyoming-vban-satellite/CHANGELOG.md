@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.8.1
+
+Fixes from a full review of the app.
+
+- **Follow-up**: an STT error arriving while the follow-up beep started could leave the microphone silenced for an hour (deaf to the wake word).
+- **Automatic gain**: after a single chunk of digital silence (VBAN gap, muted microphone) it raised the room noise by +20 dB (false wake-ups). The background is now a percentile of the last 3 s, near-silent chunks ignored.
+- **Noise suppression**: "strong" in a quiet room (about −63 dB) tripped the "clean-up outputs silence" safety net, which turned suppression off. The safety net now only reacts to an output really at zero while the microphone clearly picks up sound.
+- **VBAN microphone**: 44.1 / 48 kHz streams were resampled packet by packet (a click every 5 ms, +0.8 % samples); the resampling is now continuous. 8-bit (unsigned) and float formats are converted correctly; stereo is averaged instead of summed (clipping); with more than 2 channels the first one is used. Each packet is converted once per satellite.
+- **VBAN stream names** are made 16 ASCII characters (warning in the log): an accented output name stopped TTS without any log; a microphone name over 16 characters never matched. The VBAN send task logs its failures.
+- **HA WebSocket**: an unexpected error (e.g. the Supervisor proxy closing at the wrong moment) could stop it for good; it now always reconnects. A subscription answered after its timeout is undone. Error messages are no longer empty for timeouts.
+- **Configuration**: two satellites with the same name (case and spaces ignored) are refused; names, VBAN address, media player, HTTP host are trimmed. Changes are applied one at a time (a double click on Save, or a calibration Apply during a save, could mix them). An exception while applying now restores the previous configuration. Removing a satellite no longer restarts the next ones using the VBAN output. An invalid debug copy no longer counts as a change at every save.
+- **Zeroconf**: a discovery failure no longer stops the whole app; the satellite works, added by hand.
+- **Satellites**: an empty response no longer leaves the waiting announcements and the transcript pending (paired with the next response); only the run's response decides a follow-up and is published; question detection accepts `?»`, `?)` or an emoji after the `?`; a response replaced by another TTS stream hands its run end over; an unexpected error in the audio loop is logged and the pipeline restarted instead of leaving the satellite deaf; `played` is sent after VBAN playback too; a newer HA connection gets the audio alone (no double processing); the connection is closed on disconnect; the follow-up pre-roll no longer includes the beep; routine HA errors (no text recognized, duplicate wake-up) are logged at INFO; resume after a pause without Describe.
+- **Phrases**: cache written atomically, cleaned when no phrase is left, unexpected TTS API answers retried.
+- **VBAN receiver** retries after a network error; the socket is closed by its own task. **VBAN sender**: the last partial packet is sent (padded), no holes after a full buffer, an unknown sample rate is refused.
+- **RTSP**: passwords containing `@` or `/` are masked in the logs.
+- **Microphone clean-up**: DC removal near full scale shifts with saturation instead of skipping the chunk; changing the volume keeps the learnt noise profile and the settled gain.
+- **Calibration**: the DC offset no longer counts as noise in the measures; a failed noise measure keeps the calibration; one measure at a time per satellite; expiry 15 min after the last action; leaving the tab during a measure no longer leaves the page inconsistent; the wake word model is checked before the countdown, which stops at once on an error; "applied ✓" follows the value applied; changing step A after applying B no longer fails; the live meter follows a restarted satellite and stops asking for a satellite that isn't running; API errors in French and in JSON; malformed requests give 400 instead of 500; wake test connections time out after 5 s.
+- **Interface**: Apply in the calibration keeps the unsaved changes of the editor; numbers accept a decimal comma; leaving the Name field keeps the focus on the next one; debug copies follow a renamed satellite; export and import errors are shown.
+- The CLI accepts `--tts-output none`. The app no longer maps Home Assistant's `/config` (unused).
+
 ## 3.8.0
 
 - **New**: `microphone.follow_ha_entities` (off by default): the satellite's *Mic volume*, *Auto gain* and *Noise suppression level* entities in Home Assistant, which Home Assistant doesn't pass to Wyoming pipelines, are applied by the app to its own clean-up, live:

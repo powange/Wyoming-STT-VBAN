@@ -40,7 +40,10 @@ class AutoGain:
     """Brings speech to target_db; doesn't boost the background noise.
 
     The gain only follows the voice: chunks louder than the background noise
-    by SPEECH_MARGIN_DB. It rises slowly and drops fast (no clipping).
+    by SPEECH_MARGIN_DB. It rises slowly and drops fast (no clipping). The
+    background is a low percentile of the last FLOOR_WINDOW_S; near-silent
+    chunks (a VBAN gap, a muted microphone) don't count, or the room noise
+    would then pass for speech and be raised by MAX_GAIN_DB.
     """
 
     TARGET_DB = -18.0
@@ -49,21 +52,33 @@ class AutoGain:
     SPEECH_MARGIN_DB = 10.0
     UP_DB_PER_S = 6.0
     DOWN_DB_PER_S = 40.0
-    FLOOR_RISE_DB_PER_S = 3.0  # background estimate follows a rising noise
+    FLOOR_WINDOW_S = 3.0
+    FLOOR_PERCENTILE = 0.1
+    SILENT_DB = -80.0  # chunks under this don't count for the background
 
     def __init__(self, target_db: float = TARGET_DB) -> None:
         self.target_db = target_db
         self.gain_db = 0.0
-        self._floor_db: Optional[float] = None
+        self._levels: collections.deque[tuple[float, float]] = collections.deque()
+        self._audio_s = 0.0  # audio time, so offline processing works too
+
+    @property
+    def floor_db(self) -> Optional[float]:
+        if not self._levels:
+            return None
+        levels = sorted(db for _, db in self._levels)
+        return levels[int(len(levels) * self.FLOOR_PERCENTILE)]
 
     def process(self, pcm: bytes) -> bytes:
         seconds = len(pcm) / WYOMING_WIDTH / WYOMING_RATE
+        self._audio_s += seconds
         level = _db(pcm)
-        if self._floor_db is None or level < self._floor_db:
-            self._floor_db = level
-        else:
-            self._floor_db += self.FLOOR_RISE_DB_PER_S * seconds
-        if level > self._floor_db + self.SPEECH_MARGIN_DB:
+        if level > self.SILENT_DB:
+            self._levels.append((self._audio_s, level))
+            while self._audio_s - self._levels[0][0] > self.FLOOR_WINDOW_S:
+                self._levels.popleft()
+        floor = self.floor_db
+        if floor is not None and level > floor + self.SPEECH_MARGIN_DB:
             target = min(self.MAX_GAIN_DB, max(self.MIN_GAIN_DB, self.target_db - level))
             if target > self.gain_db:
                 self.gain_db = min(target, self.gain_db + self.UP_DB_PER_S * seconds)
@@ -81,8 +96,11 @@ class MicFilter:
     STATS_WINDOW_S = 10.0
     # Safety net: cleaned audio silent while the microphone isn't, for this
     # long → clean-up bypassed (HA must never be left with silence)
+    # (seconds of clear sound in, zeros out). Not a quiet room under strong
+    # noise suppression: its output is near-silent too, but not while
+    # someone speaks.
     SILENT_OUTPUT_S = 3.0
-    SILENT_DB = -85.0
+    LIVE_INPUT_DB = -50.0  # the microphone clearly picks something up
 
     def __init__(
         self, noise_suppression: str = "off", auto_gain: bool = False, volume: float = 1.0,
@@ -117,16 +135,25 @@ class MicFilter:
             self.noise_suppression, self.auto_gain, self.volume, self.auto_gain_target_db
         ):
             return
+        # Rebuild only what changed: a new volume keeps the learnt noise
+        # profile and the settled gain
+        if noise_suppression != self.noise_suppression:
+            level = NOISE_LEVELS.get(noise_suppression, 0)
+            # Speex for noise suppression only (its automatic gain is broken)
+            self._speex = AudioProcessor(0, level) if level else None
+            self._pending.clear()
+            self._levels.clear()
+        if not auto_gain:
+            self._agc = None
+        elif self._agc is None:
+            self._agc = AutoGain(auto_gain_target_db)
+            self._levels.clear()
+        else:
+            self._agc.target_db = auto_gain_target_db
         self.noise_suppression = noise_suppression
         self.auto_gain = auto_gain
         self.volume = volume
         self.auto_gain_target_db = auto_gain_target_db
-        level = NOISE_LEVELS.get(noise_suppression, 0)
-        # Speex for noise suppression only (its automatic gain is broken)
-        self._speex = AudioProcessor(0, level) if level else None
-        self._agc = AutoGain(auto_gain_target_db) if auto_gain else None
-        self._pending.clear()
-        self._levels.clear()
         self._silent_s = 0.0
         self.bypassed = False
 
@@ -169,10 +196,10 @@ class MicFilter:
 
     def _output_stuck_silent(self, raw: bytes, cleaned: bytes) -> bool:
         """Bypass the clean-up if it has been silencing a live microphone."""
-        if _db(cleaned) < self.SILENT_DB and _db(raw) > self.SILENT_DB + 20:
-            self._silent_s += len(raw) / WYOMING_WIDTH / WYOMING_RATE
-        else:
+        if audioop.max(cleaned, WYOMING_WIDTH) > 1:  # some sound comes out
             self._silent_s = 0.0
+        elif _db(raw) > self.LIVE_INPUT_DB:
+            self._silent_s += len(raw) / WYOMING_WIDTH / WYOMING_RATE
         if self._silent_s < self.SILENT_OUTPUT_S:
             return False
         self.bypassed = True
@@ -194,11 +221,12 @@ class MicFilter:
         offset = round(self._dc)
         if abs(offset) < 2:
             return pcm
-        # audioop.bias wraps around on overflow: skip the (rare) chunks that
-        # would overflow rather than distort them
+        # audioop.bias wraps around on overflow: near full scale, add a
+        # constant instead (audioop.add saturates)
         low, high = audioop.minmax(pcm, WYOMING_WIDTH)
         if low - offset < -MAX_SAMPLE - 1 or high - offset > MAX_SAMPLE:
-            return pcm
+            shift = audioop.bias(bytes(len(pcm)), WYOMING_WIDTH, -offset)
+            return audioop.add(pcm, shift, WYOMING_WIDTH)
         return audioop.bias(pcm, WYOMING_WIDTH, -offset)
 
     def level_db(self) -> Optional[float]:

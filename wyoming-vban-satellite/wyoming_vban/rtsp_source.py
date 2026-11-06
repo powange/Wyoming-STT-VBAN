@@ -26,8 +26,9 @@ PACKET_BYTES = SAMPLES_PER_PACKET * WYOMING_WIDTH
 
 def mask_url(text: str) -> str:
     """Hide credentials in URLs (also inside a message), e.g.
-    rtsp://user:pass@host → rtsp://***@host."""
-    return re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]*@", r"\1***@", text)
+    rtsp://user:pass@host → rtsp://***@host. Up to the last "@" of the
+    URL: a password may contain "@" or "/"."""
+    return re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://)\S*@", r"\1***@", text)
 
 
 class RtspSource:

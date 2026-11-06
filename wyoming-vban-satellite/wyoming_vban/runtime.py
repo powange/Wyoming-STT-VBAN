@@ -10,7 +10,7 @@ import math
 import time
 import wave
 import weakref
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from wyoming.server import AsyncServer
 from wyoming.zeroconf import HomeAssistantZeroconf
@@ -45,7 +45,7 @@ from .satellite import (
 )
 from .rtsp_source import RtspSource, mask_url
 from .tts_phrase import TtsPhrase, remove_legacy_cache, remove_stale_phrases
-from .vban import VbanPacket, VbanReceiver, VbanSender, resample_to_wyoming
+from .vban import VbanPacket, VbanReceiver, VbanSender, WyomingConverter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -186,8 +186,55 @@ RESTART_FIELDS = (
 )
 
 
+# Only used by the media_player output (the default HTTP port follows the
+# satellite's position in the list: removing one shifts the next ones)
+MEDIA_PLAYER_FIELDS = ("tts_http_port", "tts_http_host")
+
+
 def needs_restart(old: SatelliteConfig, new: SatelliteConfig) -> bool:
-    return any(getattr(old, f) != getattr(new, f) for f in RESTART_FIELDS)
+    media_player = "media_player" in (old.tts_output, new.tts_output)
+    return any(
+        getattr(old, f) != getattr(new, f) for f in RESTART_FIELDS
+        if media_player or f not in MEDIA_PLAYER_FIELDS
+    )
+
+
+class MicFeed:
+    """A satellite's microphone for its Wyoming connections: each packet
+    converted once (WyomingConverter keeps the resampling continuous).
+
+    Only the newest connection gets the audio: when HA reconnects while an
+    old TCP connection is still half open, both would otherwise run the
+    same clean-up filter on every packet.
+    """
+
+    def __init__(self) -> None:
+        self._callbacks: list[Callable[[VbanPacket, bytes], None]] = []
+
+    def subscribe(self, callback: Callable[[VbanPacket, bytes], None], stream_name: str = "") -> None:
+        if callback in self._callbacks:
+            return
+        if self._callbacks:
+            _LOGGER.info("New Home Assistant connection: the previous one gets no more audio")
+        self._callbacks.append(callback)
+
+    def unsubscribe(self, callback: Callable[[VbanPacket, bytes], None]) -> None:
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
+    def dispatch(self, packet: VbanPacket, pcm: bytes) -> None:
+        if self._callbacks:
+            self._callbacks[-1](packet, pcm)
+
+
+def _log_task_failure(what: str) -> Callable[[asyncio.Task], None]:
+    """Done-callback logging an unexpected end of a background task."""
+
+    def done(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            _LOGGER.error("%s stopped: %s", what, task.exception(), exc_info=task.exception())
+
+    return done
 
 
 class SatelliteRunner:
@@ -238,6 +285,8 @@ class SatelliteRunner:
         self.meter_out = LevelMeter()
         self.mic_filter.output_meter = self.meter_out
         self._recordings: list[bytearray] = []
+        self._converter = WyomingConverter()
+        self.mic_feed = MicFeed()
         self.handlers: weakref.WeakSet[VbanSatelliteHandler] = weakref.WeakSet()
         self.task: Optional[asyncio.Task] = None
         # Microphone level from the received VBAN packets
@@ -252,6 +301,7 @@ class SatelliteRunner:
         self._subscribe()
         if self.rtsp is not None:
             self._rtsp_task = asyncio.create_task(self._run_rtsp())
+            self._rtsp_task.add_done_callback(_log_task_failure("Camera stream reader"))
         self.task = asyncio.create_task(self._run())
         return self.task
 
@@ -348,7 +398,7 @@ class SatelliteRunner:
                 reader=reader,
                 writer=writer,
                 satellite_info=satellite_info,
-                vban_receiver=self.receiver,
+                vban_receiver=self.mic_feed,
                 vban_sender=self.vban_sender,
                 media_output=self.media_output,
                 vban_stream_name=cfg.vban_receive_stream_name,
@@ -385,12 +435,24 @@ class SatelliteRunner:
             # Register via Zeroconf so HA auto-discovers the satellite.
             # Build a unique name per satellite (name + port) so multiple
             # satellites on the same host don't collide on the default MAC name.
-            zeroconf = HomeAssistantZeroconf(
-                port=cfg.wyoming_port,
-                name=_build_zeroconf_name(cfg.name, cfg.wyoming_port),
-            )
-            await zeroconf.register_server()
-            _LOGGER.info("Zeroconf registered: %s on port %d", zeroconf.name, cfg.wyoming_port)
+            # Discovery is a convenience: without it (no multicast route
+            # yet, name conflict) the satellite still works once added.
+            try:
+                zeroconf = HomeAssistantZeroconf(
+                    port=cfg.wyoming_port,
+                    name=_build_zeroconf_name(cfg.name, cfg.wyoming_port),
+                )
+                await zeroconf.register_server()
+                _LOGGER.info(
+                    "Zeroconf registered: %s on port %d", zeroconf.name, cfg.wyoming_port,
+                )
+            except Exception as err:  # noqa: BLE001 - any failure: serve anyway
+                _LOGGER.warning(
+                    "Zeroconf registration failed (%s): Home Assistant won't discover "
+                    "this satellite by itself, add it with the Wyoming integration "
+                    "(host of this app, port %d)", str(err) or type(err).__name__, cfg.wyoming_port,
+                )
+                zeroconf = None
 
             # Serve until cancelled. Not server.run(): cancelling serve_forever()
             # awaits Server.wait_closed(), which can hang on Python 3.12.
@@ -514,20 +576,19 @@ class SatelliteRunner:
         shift, common on ESP32 microphones, that isn't heard)."""
         now = time.monotonic()
         self.last_packet_at = now
-        pcm16 = resample_to_wyoming(packet.payload, packet)
-        self.meter_in.add(pcm16)
+        # Converted once, for the levels, the calibration and HA (any VBAN
+        # format: measured on the 16-bit audio)
+        pcm16 = self._converter.convert(packet)
         for recording in self._recordings:
             recording.extend(pcm16)
-        width = packet.sample_width
-        payload = packet.payload[: len(packet.payload) // width * width]
-        if width in (1, 2, 4) and payload:
-            full_scale = 1 << (8 * width - 1)
-            if width == 1:  # VBAN 8-bit is unsigned
-                payload = audioop.bias(payload, 1, -128)
-            dc = audioop.avg(payload, width)
-            rms = audioop.rms(audioop.bias(payload, width, -dc), width)
-            self._levels.append((now, _db(rms / full_scale), abs(dc) / full_scale))
+        if pcm16:
+            dc = audioop.avg(pcm16, 2)
+            centered = audioop.add(pcm16, audioop.bias(bytes(len(pcm16)), 2, -dc), 2)
+            self.meter_in.add(centered)
+            rms = audioop.rms(centered, 2)
+            self._levels.append((now, _db(rms / 32768), abs(dc) / 32768))
         self._expire_levels(now)
+        self.mic_feed.dispatch(packet, pcm16)
 
     def _expire_levels(self, now: float) -> None:
         while self._levels and now - self._levels[0][0] > self.STATS_WINDOW_S:
@@ -578,7 +639,8 @@ class SatelliteRunner:
         try:
             await asyncio.sleep(seconds)
         finally:
-            self._recordings.remove(recording)
+            # By identity: two recordings of the same audio are equal
+            self._recordings = [r for r in self._recordings if r is not recording]
         return bytes(recording)
 
     async def test(self, signal: str) -> list[str]:
@@ -642,6 +704,9 @@ class AppRuntime:
         self._changing = False
         self._stopping = False
         self._change_failed = asyncio.Event()
+        # One configuration change at a time (double click, calibration
+        # applying while the editor saves)
+        self.change_lock = asyncio.Lock()
         self._receivers: dict[int, VbanReceiver] = {}
         self._receiver_tasks: dict[int, asyncio.Task] = {}
         self._runners: dict[str, SatelliteRunner] = {}
@@ -706,11 +771,13 @@ class AppRuntime:
         for key, phrase in used.items():
             if key not in self._phrase_tasks:
                 self._phrase_tasks[key] = asyncio.create_task(phrase.run())
+                self._phrase_tasks[key].add_done_callback(
+                    _log_task_failure(f"Phrase synthesis « {phrase.text} »"))
         if self._phrases is not None:
             self._phrases._phrases = {
                 k: p for k, p in self._phrases._phrases.items() if id(p) in used
             }
-        remove_stale_phrases(list(used.values()))
+        remove_stale_phrases(list(used.values()), self.cache_dir)
 
     async def _set_watcher(self, needed: bool, options: AppOptions) -> None:
         """Start or stop the HA WebSocket and attach it to the satellites.
@@ -726,6 +793,7 @@ class AppRuntime:
             self._watcher.add_event_listener("jarvis_vision", notify_vision)
             self._ha_audio = HaAudioSync(self._watcher, self._on_ha_mic)
             self._watcher_task = asyncio.create_task(self._watcher.run())
+            self._watcher_task.add_done_callback(_log_task_failure("HA WebSocket"))
         elif not needed and self._watcher is not None:
             assert self._watcher_task is not None
             self._close_ha_audio()
@@ -891,12 +959,21 @@ class AppRuntime:
         return error, done
 
     async def _change(self, options: AppOptions, change) -> Optional[str]:
+        async with self.change_lock:
+            return await self._change_locked(options, change)
+
+    async def _change_locked(self, options: AppOptions, change) -> Optional[str]:
         previous = self.options
         _LOGGER.info("Applying new configuration")
         self._changing = True
         self._change_failed.clear()
         try:
-            await change(options)
+            try:
+                await change(options)
+            except Exception as err:  # noqa: BLE001 - restore whatever happened
+                _LOGGER.exception("Error while applying the new configuration")
+                self.failure = str(err) or type(err).__name__
+                self._change_failed.set()
             try:
                 await asyncio.wait_for(self._change_failed.wait(), self.STARTUP_CHECK_S)
             except asyncio.TimeoutError:
@@ -966,6 +1043,11 @@ class AppRuntime:
                 self._start_receiver(port, sat)
 
         mirrors = validate_mirrors(new.debug_mirrors, new.satellites)
+        # Compared with the copies that were valid (an invalid one would
+        # otherwise count as a change at every apply)
+        valid_old = validate_mirrors(list(old.debug_mirrors), old.satellites, quiet=True)
+        old_mirrors = {s.name: [m for m in valid_old if m.satellite == s.name]
+                       for s in new.satellites}
         for sat in new.satellites:
             sat_mirrors = [m for m in mirrors if m.satellite == sat.name]
             if sat.name not in self._runners:
@@ -978,7 +1060,7 @@ class AppRuntime:
                 runner = self._runners[sat.name]
                 if dataclasses.asdict(runner.cfg) != dataclasses.asdict(sat) or (
                     [dataclasses.asdict(m) for m in sat_mirrors]
-                    != [dataclasses.asdict(m) for m in old_mirrors_of(old, sat.name)]
+                    != [dataclasses.asdict(m) for m in old_mirrors[sat.name]]
                 ) or cues[sat.name] != runner.cues:
                     await runner.update(sat, cues[sat.name], sat_mirrors)
                     done.append(f"satellite '{sat.name}' updated without restart")
@@ -997,6 +1079,3 @@ class AppRuntime:
             "exchanges": list(self.publisher.history)[::-1],
         }
 
-
-def old_mirrors_of(options: AppOptions, satellite: str) -> list[DebugMirror]:
-    return [m for m in options.debug_mirrors if m.satellite == satellite]

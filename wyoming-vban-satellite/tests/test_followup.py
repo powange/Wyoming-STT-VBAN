@@ -292,8 +292,9 @@ class FollowupBeepTest(FollowupTest):
         self.assertTrue(loud)
         first = loud[0]
         self.assertGreaterEqual(first, self.GUARD - 0.05)
+        # The kept audio (the last 0.3 s of the guard, after the beep)
         burst = [t for t in loud if t < first + 0.1]
-        self.assertGreaterEqual(len(burst), 8)
+        self.assertGreaterEqual(len(burst), 4)
 
     async def test_no_speech_timeout_starts_after_guard(self) -> None:
         # The mic is silent here: no voice-started, so the timeout fires

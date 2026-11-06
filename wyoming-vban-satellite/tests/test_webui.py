@@ -138,10 +138,23 @@ class WebUITest(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_config_is_not_saved(self) -> None:
         new = copy.deepcopy(self.initial)
-        new["satellites"].append(copy.deepcopy(new["satellites"][0]))  # same port
+        twin = copy.deepcopy(new["satellites"][0])
+        twin["name"] = "Bureau 2"  # same port
+        new["satellites"].append(twin)
         status, body = await self.save(new)
         self.assertEqual(status, 400)
         self.assertIn("unique wyoming_port", body["error"])
+        self.assertEqual(self.supervisor.saved, [])
+
+    async def test_duplicate_names_are_refused(self) -> None:
+        new = copy.deepcopy(self.initial)
+        twin = copy.deepcopy(new["satellites"][0])
+        twin["wyoming_port"] = _free_port()
+        twin["name"] = " " + twin["name"].upper() + " "
+        new["satellites"].append(twin)
+        status, body = await self.save(new)
+        self.assertEqual(status, 400)
+        self.assertIn("Two satellites are named", body["error"])
         self.assertEqual(self.supervisor.saved, [])
 
     async def test_supervisor_refusal_is_reported(self) -> None:
@@ -163,7 +176,7 @@ class WebUITest(unittest.IsolatedAsyncioTestCase):
         finally:
             busy.close()
         self.assertEqual(status, 409)
-        self.assertIn("previous configuration was restored", body["error"])
+        self.assertIn("configuration précédente a été rétablie", body["error"])
         self.assertEqual(self.supervisor.options, self.initial)  # saved back
         self.assertTrue(await self.can_connect(self.port_a))
         self.assertFalse(self.runtime.fatal.is_set())

@@ -370,13 +370,18 @@ function field(obj, key, spec) {
     input.value = key in obj ? obj[key] : def;
     input.addEventListener("change", () => set(input.value));
   } else {
-    input = el("input", { type, placeholder, min, max, step, required: required ? "" : null });
+    // Numbers as text with a decimal keyboard: "0,5" works too (a number
+    // field gives "" for it in some browsers, which erased the value)
+    input = type === "number"
+      ? el("input", { type: "text", inputmode: "decimal", placeholder,
+                      required: required ? "" : null, "data-min": min, "data-max": max })
+      : el("input", { type, placeholder, required: required ? "" : null });
     input.value = key in obj ? obj[key] : "";
     input.addEventListener("input", () => {
       const raw = input.value.trim();
       if (raw === "") set(required ? obj[key] : undefined);
       else if (type === "number") {
-        const number = Number(raw);
+        const number = Number(raw.replace(",", "."));
         if (!Number.isNaN(number)) set(number);
       } else set(input.value);
     });
@@ -687,8 +692,18 @@ function satelliteCard(sat, index) {
     if (card.open) openSatellites.add(index);
     else openSatellites.delete(index);
   });
-  // Name shown in the summary: refresh when the field is left
-  card.querySelector("input")?.addEventListener("change", () => renderConfig());
+  // Name shown in the summary: refreshed when the field is left, without
+  // re-rendering (the next field keeps the focus); debug copies follow
+  let shownName = sat.name;
+  card.querySelector("input")?.addEventListener("change", () => {
+    for (const mirror of options.debug_mirror || []) {
+      if (mirror.satellite === shownName) mirror.satellite = sat.name;
+    }
+    shownName = sat.name;
+    card.querySelector(".sat-name").textContent = sat.name || `Satellite ${index + 1}`;
+    renderGeneral();
+    setDirty();
+  });
   return card;
 }
 
@@ -891,16 +906,17 @@ const STEP_LABELS = {
   far: "À votre place habituelle ou loin (≈ 3 m), lisez la phrase…",
   wake: `Dites « ${WAKE_PHRASE} » 5 fois, en marquant une pause entre chaque…`,
 };
-const calib = { satellite: null, source: null, poll: null, busy: false, audio: null };
+const calib = { satellite: null, source: null, poll: null, busy: false, audio: null,
+                generation: 0 }; // generation: bumped when the calibration is closed
 
 /* Forget the results (steps from `from` on: noise, voice, denoise, autogain, wake). */
 function resetCalib(from = "noise") {
   const order = ["noise", "voice", "denoise", "autogain", "wake"];
   const i = order.indexOf(from);
   if (i <= 0) { calib.noise = null; calib.applied = {}; }
-  if (i <= 1) calib.result = null;
-  if (i <= 2) { calib.denoise = null; calib.noiseChoice = null; }
-  if (i <= 3) { calib.takes = {}; calib.autogain = null; }
+  if (i <= 1) { calib.result = null; delete calib.applied.volume; }
+  if (i <= 2) { calib.denoise = null; calib.noiseChoice = null; delete calib.applied.noise_suppression; }
+  if (i <= 3) { calib.takes = {}; calib.autogain = null; delete calib.applied.auto_gain; }
   calib.wake = null;
 }
 resetCalib();
@@ -918,7 +934,11 @@ async function postJson(url, body) {
   });
   let data = {};
   try { data = await resp.json(); } catch (err) { /* empty answer */ }
-  if (!resp.ok) throw new Error(data.error || `Erreur ${resp.status}`);
+  if (!resp.ok) {
+    const error = new Error(data.error || `Erreur ${resp.status}`);
+    error.expired = !!data.expired;
+    throw error;
+  }
   return data;
 }
 
@@ -963,6 +983,12 @@ function startMeter() {
       try {
         const resp = await fetch(`api/meter/once?${query}`);
         if (resp.ok) renderVu(await resp.json());
+        else if (resp.status >= 400 && resp.status < 500) {
+          stopMeter(); // e.g. saved but not running: no point asking again
+          const box = document.getElementById("calib-vu");
+          if (box) box.replaceChildren(el("p", { class: "help" },
+            "Ce satellite ne tourne pas : enregistrez la configuration ou consultez le journal."));
+        }
       } catch (err) { /* next tick */ }
     }, 100);
   };
@@ -988,6 +1014,8 @@ async function clearRecordings() {
 
 function closeCalibration() {
   stopMeter();
+  calib.generation += 1; // a measure still running is ignored when it ends
+  calib.busy = false;
   clearRecordings();
 }
 
@@ -998,13 +1026,14 @@ function openCalibration() {
   startMeter();
 }
 
-async function countdown(seconds, label) {
-  const box = document.getElementById("calib-progress");
-  for (let left = seconds; left > 0; left--) {
+async function countdown(seconds, label, stopped = () => false) {
+  for (let left = seconds; left > 0 && !stopped(); left--) {
+    const box = document.getElementById("calib-progress");
     if (box) box.replaceChildren(label, " ", el("span", { class: "countdown" }, `${left} s`));
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  if (box) box.textContent = "Analyse…";
+  const box = document.getElementById("calib-progress");
+  if (box && !stopped()) box.textContent = "Analyse…";
 }
 
 /* The settings proposed so far (volume, then steps A and B). */
@@ -1020,34 +1049,48 @@ function proposedSettings() {
 }
 
 async function busy(task) {
+  const generation = calib.generation;
   calib.busy = true;
   renderCalibration();
   try {
-    await task();
+    await task(() => calib.generation !== generation);
   } catch (err) {
-    say(err.message || `Erreur : ${err}`, "error");
+    if (calib.generation === generation) {
+      say(err.message || `Erreur : ${err}`, "error");
+      if (err.expired) resetCalib(); // the server forgot it: start again
+    }
   }
+  if (calib.generation !== generation) return; // closed meanwhile
   calib.busy = false;
   renderCalibration();
 }
 
 function recordStep(step) {
-  return busy(async () => {
+  return busy(async (closed) => {
     const extra = {};
     if (step === "near" || step === "far") extra.noise_suppression = calib.noiseChoice;
-    if (step === "wake") Object.assign(extra, { model: calib.model, proposed: proposedSettings() });
+    if (step === "wake") {
+      // The model is checked before asking to speak
+      await loadWakeModels();
+      if (!calib.models || !calib.models.includes(calib.model)) {
+        throw new Error(calib.modelsError || `Modèle « ${calib.model} » absent d'openWakeWord`);
+      }
+      Object.assign(extra, { model: calib.model, proposed: proposedSettings() });
+    }
+    let failed = false;
     const request = postJson("api/calibration/record", { step, ...extra });
-    request.catch(() => {}); // handled below, after the countdown
-    await countdown(STEP_SECONDS[step], STEP_LABELS[step]);
-    if (step === "wake") document.getElementById("calib-progress").textContent =
+    request.catch(() => { failed = true; }); // stops the countdown at once
+    await countdown(STEP_SECONDS[step], STEP_LABELS[step], () => failed || closed());
+    if (step === "wake" && !failed) document.getElementById("calib-progress").textContent =
       "Envoi à openWakeWord (en temps réel)…";
     const body = await request;
+    if (closed()) return;
     say("");
     if (step === "noise") {
       resetCalib("voice");
       calib.noise = body.noise;
     } else if (step === "voice") {
-      resetCalib("denoise");
+      resetCalib("voice");
       calib.result = body;
       await runDenoise();
       loadWakeModels();
@@ -1075,7 +1118,8 @@ async function runAutogain() {
 
 async function pickNoise(level) {
   calib.noiseChoice = level;
-  if (calib.autogain) await busy(runAutogain);
+  // Once B is applied its takes are deleted: nothing to recompute
+  if (calib.autogain && !("auto_gain" in calib.applied)) await busy(runAutogain);
   else renderCalibration();
 }
 
@@ -1113,9 +1157,22 @@ function applySettings(values, finish = false) {
     const ha = followsHa();
     say(ha ? "Écriture dans Home Assistant…" : "Enregistrement et application…");
     await postJson("api/calibration/apply", { ...values, finish });
-    for (const key of Object.keys(values)) calib.applied[key] = true;
+    for (const [key, value] of Object.entries(values)) calib.applied[key] = value;
     if (finish) resetCalib();
-    if (!ha) await load(); // the saved options hold the new values
+    if (!ha) {
+      // Saved: put the same values in the editor, keeping its other
+      // unsaved changes (a reload would drop them)
+      for (const opts of [saved, options]) {
+        const sat = (opts?.satellites || []).find((s) => s.name === calib.satellite);
+        if (!sat) continue;
+        sat.microphone = sat.microphone || {};
+        for (const [key, value] of Object.entries(values)) {
+          if (value !== null && value !== undefined) sat.microphone[key] = value;
+        }
+      }
+      renderConfig();
+      setDirty();
+    }
     say((ha ? "Écrit dans les entités Home Assistant du satellite ; l'app l'applique dès que Home Assistant le confirme."
             : "Enregistré et appliqué sans redémarrage.") +
         (finish ? " Enregistrements effacés." : ""), "ok");
@@ -1146,11 +1203,12 @@ function resultsCard() {
       ? el("ul", { class: "advice" }, p.advice.map((text) => el("li", {}, text)))
       : el("p", { class: "help" }, "Niveaux corrects : aucun réglage à faire côté appareil."),
     el("div", { class: "row-buttons" },
-      !calib.applied.noise_suppression && playButton("before", "Écouter avant"),
-      !calib.applied.volume && playButton("after", "Écouter après (volume proposé)"),
+      !("noise_suppression" in calib.applied) && playButton("before", "Écouter avant"),
+      !("volume" in calib.applied) && playButton("after", "Écouter après (volume proposé)"),
       el("button", { type: "button", class: "primary", disabled: calib.busy || null,
                      onclick: () => applySettings({ volume: p.volume }) },
-         calib.applied.volume ? `Volume ${p.volume.toFixed(2)} appliqué ✓` : `Appliquer le volume ${p.volume.toFixed(2)}`)));
+         calib.applied.volume === p.volume ? `Volume ${p.volume.toFixed(2)} appliqué ✓`
+                                           : `Appliquer le volume ${p.volume.toFixed(2)}`)));
 }
 
 function denoiseStep() {
@@ -1166,7 +1224,7 @@ function denoiseStep() {
     el("td", { class: r.eats_voice ? "warn" : "" }, dbfs(r.voice_db),
        r.voice_loss_db > 0.5 ? ` (−${r.voice_loss_db.toFixed(0)} dB)` : ""),
     el("td", {}, r.snr_db === null ? "—" : `${r.snr_db.toFixed(0)} dB`),
-    el("td", {}, calib.applied.noise_suppression ? "" : el("button", { type: "button",
+    el("td", {}, "noise_suppression" in calib.applied ? "" : el("button", { type: "button",
        title: `Écouter : ${NOISE_NAMES[r.level]}`, onclick: () => play(`denoise-${r.level}`) }, "▶"))));
   return [
     el("div", { class: "levels-wrap" }, el("table", { class: "levels" },
@@ -1176,7 +1234,7 @@ function denoiseStep() {
     el("div", { class: "row-buttons" },
       el("button", { type: "button", class: "primary", disabled: calib.busy || null,
                      onclick: () => applySettings({ noise_suppression: calib.noiseChoice }) },
-         calib.applied.noise_suppression ? "Réduction de bruit appliquée ✓"
+         calib.applied.noise_suppression === calib.noiseChoice ? "Réduction de bruit appliquée ✓"
            : `Appliquer : ${NOISE_NAMES[calib.noiseChoice]}`)),
   ];
 }
@@ -1200,14 +1258,14 @@ function autogainStep() {
         ? "La voix varie beaucoup avec la distance : le gain automatique la ramène au niveau de la prise proche."
         : "La voix varie peu avec la distance : le volume fixe suffit."),
       g.advice.length ? el("ul", { class: "advice" }, g.advice.map((t) => el("li", {}, t))) : null,
-      !calib.applied.auto_gain && el("div", { class: "row-buttons" },
+      !("auto_gain" in calib.applied) && el("div", { class: "row-buttons" },
         playButton("near-before", "Proche, avant"), playButton("near-after", "Proche, avec gain auto"),
         playButton("far-before", "Loin, avant"), playButton("far-after", "Loin, avec gain auto")),
       el("div", { class: "row-buttons" },
         el("button", { type: "button", class: "primary", disabled: calib.busy || null,
                        onclick: () => applySettings({ auto_gain: g.auto_gain,
                          auto_gain_target_db: g.auto_gain ? g.target_db : null }) },
-           calib.applied.auto_gain ? "Gain automatique appliqué ✓"
+           "auto_gain" in calib.applied ? "Gain automatique appliqué ✓"
              : `Appliquer : gain auto ${gainText(g.auto_gain, g.target_db)}`))],
   ];
 }
@@ -1403,15 +1461,20 @@ revertButton.addEventListener("click", () => {
 });
 
 document.getElementById("export").addEventListener("click", async () => {
-  const resp = await fetch("api/export", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ options: forSave(options) }),
-  });
-  if (!resp.ok) { say("Export impossible", "error"); return; }
-  const link = el("a", { href: URL.createObjectURL(await resp.blob()),
-                         download: "vban-satellite.yaml" });
-  link.click();
-  URL.revokeObjectURL(link.href);
+  try {
+    const resp = await fetch("api/export", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ options: forSave(options) }),
+    });
+    if (!resp.ok) { say("Export impossible", "error"); return; }
+    const link = el("a", { href: URL.createObjectURL(await resp.blob()),
+                           download: "vban-satellite.yaml" });
+    link.click();
+    // Revoked later: right away can cancel the download in some browsers
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+  } catch (err) {
+    say(`Export impossible : ${err}`, "error");
+  }
 });
 
 const importFile = document.getElementById("import-file");
@@ -1420,11 +1483,17 @@ importFile.addEventListener("change", async () => {
   const file = importFile.files[0];
   importFile.value = "";
   if (!file) return;
-  const resp = await fetch("api/import", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ yaml: await file.text() }),
-  });
-  const body = await resp.json();
+  let resp, body;
+  try {
+    resp = await fetch("api/import", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ yaml: await file.text() }),
+    });
+    body = await resp.json();
+  } catch (err) {
+    say(`Import impossible : ${err}`, "error");
+    return;
+  }
   if (!resp.ok) { say(body.error || "Import impossible", "error"); return; }
   options = body.options;
   renderConfig();

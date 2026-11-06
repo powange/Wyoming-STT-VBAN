@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     # TTS output target
     parser.add_argument(
         "--tts-output",
-        choices=["vban", "media_player"],
+        choices=["vban", "media_player", "none"],
         default="vban",
         help="Where TTS responses are played (default: vban)",
     )

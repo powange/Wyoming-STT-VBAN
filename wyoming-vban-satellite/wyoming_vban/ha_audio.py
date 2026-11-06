@@ -139,6 +139,7 @@ class HaAudioSync:
         self._lock = asyncio.Lock()
         self._missing_logged: dict[str, tuple[str, ...]] = {}
         self._retry_s = self.RETRY_MIN_S
+        self._changed_meanwhile = False
         watcher.add_connect_listener(self._on_connect)
 
     def close(self) -> None:
@@ -207,8 +208,10 @@ class HaAudioSync:
         await self._resolve()
 
     def _schedule_resolve(self, delay: float, retry: bool = False) -> None:
-        # The running resolution schedules its own retry (it's still "running")
+        # The running resolution schedules its own retry (it's still
+        # "running"); a change arriving meanwhile makes it run once more
         if not retry and self._resolve_task is not None and not self._resolve_task.done():
+            self._changed_meanwhile = True
             return
 
         async def later() -> None:
@@ -220,6 +223,7 @@ class HaAudioSync:
     async def _resolve(self) -> None:
         """Find the entities, subscribe to their states and read them."""
         async with self._lock:
+            self._changed_meanwhile = False
             try:
                 await self._resolve_locked()
             except (HaUnavailable, HaCommandError) as err:
@@ -233,6 +237,8 @@ class HaAudioSync:
                 self._retry_s = min(self._retry_s * 2, self.RETRY_MAX_S)
             else:
                 self._retry_s = self.RETRY_MIN_S
+                if self._changed_meanwhile and self.watcher.connected:
+                    self._schedule_resolve(self.RESOLVE_DELAY_S, retry=True)
 
     async def _resolve_locked(self) -> None:
         if self._state_sub is not None:

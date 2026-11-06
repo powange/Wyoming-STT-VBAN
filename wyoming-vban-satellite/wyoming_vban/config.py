@@ -188,6 +188,13 @@ class SatelliteConfig:
 
     def normalize(self) -> None:
         """Clean up options and clamp numeric ones to their valid range."""
+        self.name = self.name.strip()
+        for attr in ("tts_vban_address", "tts_media_player", "tts_http_host"):
+            setattr(self, attr, getattr(self, attr).strip())
+        self.vban_receive_stream_name = vban_name(
+            self.vban_receive_stream_name, "microphone.stream_name", self.name)
+        self.tts_vban_stream_name = vban_name(
+            self.tts_vban_stream_name, "vban_output.stream_name", self.name) or "TTS1"
         self.mic_source = self.mic_source.strip() or "vban"
         if self.mic_source not in MIC_SOURCES:
             _LOGGER.warning(
@@ -328,6 +335,19 @@ class SatelliteConfig:
 MIRROR_STREAMS = ("mic_received", "mic_sent", "tts")
 
 
+def vban_name(name: str, what: str, owner: str) -> str:
+    """A VBAN stream name: 16 ASCII characters at most (the protocol's);
+    others never match (receive) or can't be sent."""
+    name = name.strip()
+    clean = name.encode("ascii", "ignore").decode()[:16]
+    if clean != name:
+        _LOGGER.warning(
+            "[%s] %s '%s' changed to '%s': VBAN stream names are 16 ASCII "
+            "characters at most", owner, what, name, clean,
+        )
+    return clean
+
+
 @dataclass
 class DebugMirror:
     """Copy of one satellite audio stream sent as VBAN for debugging."""
@@ -342,7 +362,7 @@ class DebugMirror:
         """VBAN stream names are 16 ASCII chars max: last word of the
         satellite name + short stream suffix, e.g. "Bureau-tx"."""
         if self.stream_name:
-            return self.stream_name[:16]
+            return vban_name(self.stream_name, "debug_mirror stream_name", self.satellite)
         suffix = {"mic_received": "rx", "mic_sent": "tx", "tts": "tts"}[self.stream]
         word = (self.satellite.split() or ["sat"])[-1]
         word = "".join(c for c in word if c.isascii() and c.isalnum()) or "sat"
@@ -394,24 +414,26 @@ def parse_options(options: dict[str, Any]) -> AppOptions:
 
 
 def validate_mirrors(
-    mirrors: list[DebugMirror], satellites: list[SatelliteConfig]
+    mirrors: list[DebugMirror], satellites: list[SatelliteConfig], quiet: bool = False,
 ) -> list[DebugMirror]:
-    """Keep the valid debug mirrors (a wrong one only logs a warning)."""
+    """Keep the valid debug mirrors (a wrong one only logs a warning,
+    unless quiet)."""
     names = {sat.name for sat in satellites}
     valid = []
+    log = _LOGGER.debug if quiet else _LOGGER.warning
     for mirror in mirrors:
         if mirror.satellite not in names:
-            _LOGGER.warning(
+            log(
                 "debug_mirror: unknown satellite '%s' (satellites: %s), ignored",
                 mirror.satellite, ", ".join(sorted(names)),
             )
         elif mirror.stream not in MIRROR_STREAMS:
-            _LOGGER.warning(
+            log(
                 "debug_mirror: unknown stream '%s' (%s), ignored",
                 mirror.stream, ", ".join(MIRROR_STREAMS),
             )
         elif not mirror.address.strip():
-            _LOGGER.warning("debug_mirror: no address for %s, ignored", mirror.satellite)
+            log("debug_mirror: no address for %s, ignored", mirror.satellite)
         else:
             mirror.address = mirror.address.strip()
             valid.append(mirror)
@@ -440,6 +462,20 @@ def validate(satellites: list[SatelliteConfig], strict: bool = False) -> None:
 
     if not satellites:
         raise ConfigError("No satellite configured")
+
+    # Satellites are told apart by name (runners, announcements, HA
+    # entities, calibration): a duplicate would leave an orphan running
+    names: dict[str, str] = {}
+    for sat in satellites:
+        if not sat.name:
+            raise ConfigError("A satellite has an empty name")
+        key = sat.name.casefold()
+        if key in names:
+            raise ConfigError(
+                f"Two satellites are named '{sat.name}': each satellite needs "
+                "its own name."
+            )
+        names[key] = sat.name
 
     wyoming_ports: dict[int, str] = {}
     http_ports: dict[int, str] = {}

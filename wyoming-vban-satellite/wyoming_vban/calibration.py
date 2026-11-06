@@ -87,13 +87,28 @@ class LevelMeter:
         }
 
 
+def remove_dc(pcm: bytes) -> bytes:
+    """The recording without its DC offset (a constant shift, common on
+    ESP32 microphones, that isn't heard but would count as noise)."""
+    if not pcm:
+        return pcm
+    mean = audioop.avg(pcm, WYOMING_WIDTH)
+    if abs(mean) < 2:
+        return pcm
+    # audioop.add saturates (bias would wrap around near full scale)
+    return audioop.add(pcm, audioop.bias(bytes(len(pcm)), WYOMING_WIDTH, -mean), WYOMING_WIDTH)
+
+
 def analyze_noise(pcm: bytes) -> dict[str, float]:
     """Background noise: mean RMS of the recording."""
-    return {"rms_db": round(_db(audioop.rms(pcm, WYOMING_WIDTH)), 1)}
+    return {"rms_db": round(_db(audioop.rms(remove_dc(pcm), WYOMING_WIDTH)), 1)}
 
 
 def analyze_voice(pcm: bytes, noise_db: float) -> dict[str, float]:
-    """Voice: RMS of the spoken frames (louder than the noise), peak, clipping."""
+    """Voice: RMS of the spoken frames (louder than the noise), peak, clipping
+    (on the audio as received)."""
+    clipped = _clipped(pcm)
+    pcm = remove_dc(pcm)
     frames = [pcm[i:i + FRAME_BYTES] for i in range(0, len(pcm) - FRAME_BYTES + 1, FRAME_BYTES)]
     levels = [(_db(audioop.rms(f, WYOMING_WIDTH)), f) for f in frames]
     speech = [f for db, f in levels if db >= noise_db + SPEECH_MARGIN_DB]
@@ -104,7 +119,7 @@ def analyze_voice(pcm: bytes, noise_db: float) -> dict[str, float]:
     return {
         "rms_db": round(_db(audioop.rms(voiced, WYOMING_WIDTH)), 1),
         "peak_db": round(_db(audioop.max(pcm, WYOMING_WIDTH)), 1),
-        "clip_pct": round(100 * _clipped(pcm) / samples, 2),
+        "clip_pct": round(100 * clipped / samples, 2),
         "speech_s": round(len(voiced) / WYOMING_WIDTH / WYOMING_RATE, 1),
     }
 
@@ -169,7 +184,7 @@ def _rms_db(pcm: bytes) -> Optional[float]:
 def frame_classes(raw: bytes, noise_db: float) -> tuple[list[int], list[int]]:
     """Indexes of the spoken frames and of the quiet frames of a take, from
     the received audio (the same frames are then measured after processing)."""
-    levels = [_db(audioop.rms(f, WYOMING_WIDTH)) for f in _frames(raw)]
+    levels = [_db(audioop.rms(f, WYOMING_WIDTH)) for f in _frames(remove_dc(raw))]
     speech = [i for i, db in enumerate(levels) if db >= noise_db + SPEECH_MARGIN_DB]
     if not speech:  # nothing above the noise: the loudest third
         loudest = sorted(range(len(levels)), key=lambda i: levels[i])
@@ -329,6 +344,10 @@ class CalibrationSession:
         if which.startswith("denoise-"):
             return self.denoise_pcm.get(which[len("denoise-"):], b"")
         return self.autogain_pcm.get(which, b"")
+
+    def touch(self) -> None:
+        """Used: the expiry counts from the last action."""
+        self.started = time.monotonic()
 
     @property
     def expired(self) -> bool:

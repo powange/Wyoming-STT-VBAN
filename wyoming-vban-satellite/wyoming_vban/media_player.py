@@ -142,6 +142,6 @@ class MediaPlayerOutput:
                 return True
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             _LOGGER.error(
-                "play_media on %s failed: %s", self.entity_id, err or type(err).__name__,
+                "play_media on %s failed: %s", self.entity_id, str(err) or type(err).__name__,
             )
             return False

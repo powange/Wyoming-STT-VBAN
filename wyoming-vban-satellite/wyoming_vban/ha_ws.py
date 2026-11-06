@@ -71,6 +71,8 @@ class HaStateWatcher:
         # Called (in a task) on each connection, e.g. to subscribe again
         self._connect_listeners: list[Callable[[], Awaitable[None]]] = []
         self._listener_tasks: set[asyncio.Task] = set()
+        # Subscriptions given up after a timeout: undone if HA answers late
+        self._late_subscriptions: set[int] = set()
 
     async def set_entity_ids(self, entity_ids: list[str]) -> None:
         """Watch other media_players: reconnects to subscribe to them."""
@@ -146,10 +148,17 @@ class HaStateWatcher:
                     if not self._resubscribe:
                         _LOGGER.warning("HA WebSocket closed")
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as err:
-                    _LOGGER.warning("HA WebSocket error: %s", err or type(err).__name__)
+                    _LOGGER.warning("HA WebSocket error: %s", str(err) or type(err).__name__)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:  # noqa: BLE001 - e.g. a CLOSE frame where
+                    # JSON was expected (TypeError): never stop reconnecting
+                    _LOGGER.exception("HA WebSocket: unexpected error (%s)",
+                                      str(err) or type(err).__name__)
                 finally:
                     self._ws = None
                     self._subscriptions = {}
+                    self._late_subscriptions = set()
                     for future in self._results.values():
                         if not future.done():
                             future.set_exception(HaUnavailable("connection lost"))
@@ -263,13 +272,20 @@ class HaStateWatcher:
         try:
             return msg_id, await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError:
-            self._subscriptions.pop(msg_id, None)
+            if self._subscriptions.pop(msg_id, None) is not None:
+                self._late_subscriptions.add(msg_id)
             raise HaUnavailable(f"no answer to {command.get('type')}") from None
         except HaCommandError:
             self._subscriptions.pop(msg_id, None)
             raise
         finally:
             self._results.pop(msg_id, None)
+
+    async def _unsubscribe_late(self, sub_id: int) -> None:
+        try:
+            await self.call({"type": "unsubscribe_events", "subscription": sub_id})
+        except (HaUnavailable, HaCommandError) as err:
+            _LOGGER.debug("unsubscribe %d: %s", sub_id, err)
 
     async def unsubscribe(self, sub_id: int) -> None:
         if self._subscriptions.pop(sub_id, None) is None:
@@ -284,6 +300,11 @@ class HaStateWatcher:
             if message.type != aiohttp.WSMsgType.TEXT:
                 break
             msg = message.json()
+            if msg.get("type") == "result" and msg.get("id") in self._late_subscriptions:
+                self._late_subscriptions.discard(msg["id"])
+                if msg.get("success"):  # nobody listens to it any more
+                    self._spawn(self._unsubscribe_late(msg["id"]))
+                continue
             if msg.get("type") == "result":
                 future = self._results.get(msg.get("id"))
                 if future is not None and not future.done():
@@ -303,7 +324,7 @@ class HaStateWatcher:
                     _LOGGER.exception("Error in HA subscription listener")
                 continue
             if (event_type := self._event_sub_ids.get(msg.get("id"))) is not None:
-                data = msg.get("event", {}).get("data") or {}
+                data = (msg.get("event") or {}).get("data") or {}
                 _LOGGER.debug("HA event %s: %s", event_type, data)
                 for callback in self._event_listeners.get(event_type, []):
                     try:
@@ -311,7 +332,7 @@ class HaStateWatcher:
                     except Exception:  # a listener bug must not drop the connection
                         _LOGGER.exception("Error in %s listener", event_type)
                 continue
-            trigger = msg.get("event", {}).get("variables", {}).get("trigger", {})
+            trigger = ((msg.get("event") or {}).get("variables") or {}).get("trigger") or {}
             to_state = trigger.get("to_state") or {}
             entity_id = to_state.get("entity_id") or trigger.get("entity_id")
             if entity_id not in self._history:

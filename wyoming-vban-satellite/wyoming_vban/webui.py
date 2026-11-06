@@ -52,7 +52,12 @@ class SupervisorOptions:
                 headers={"Authorization": f"Bearer {self._token}"},
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
-                body = await resp.json(content_type=None)
+                try:
+                    body = await resp.json(content_type=None)
+                except ValueError:
+                    body = None
+        if not isinstance(body, dict):
+            raise SupervisorError(f"unexpected answer (HTTP {resp.status})")
         if resp.status != 200 or body.get("result") != "ok":
             raise SupervisorError(body.get("message") or f"HTTP {resp.status}")
         return body.get("data")
@@ -84,6 +89,10 @@ class WebUI:
         self.allowed_ips = allowed_ips
         self._runner: Optional[web.AppRunner] = None
         self._sessions: dict[str, CalibrationSession] = {}  # by satellite
+        # One calibration request at a time per satellite (another tab…)
+        self._busy: set[str] = set()
+        # Read, write and apply the options one change at a time
+        self._options_lock = asyncio.Lock()
 
     async def start(self) -> None:
         app = web.Application(middlewares=[self._only_ingress])
@@ -138,16 +147,20 @@ class WebUI:
         try:
             options = (await request.json())["options"]
         except (ValueError, KeyError, TypeError) as err:
-            return web.json_response({"error": f"Invalid request: {err}"}, status=400)
-        return await self._store_and_apply(options)
+            return web.json_response({"error": f"Requête invalide : {err}"}, status=400)
+        if not isinstance(options, dict):
+            return web.json_response({"error": "Requête invalide : options attendues"}, status=400)
+        async with self._options_lock:
+            return await self._store_and_apply(options)
 
     async def _store_and_apply(self, options: dict[str, Any]) -> web.Response:
-        """Validate, save through the Supervisor, then apply."""
+        """Validate, save through the Supervisor, then apply (the caller
+        holds _options_lock)."""
         try:
             parsed = parse_options(copy.deepcopy(options))
             validate(parsed.satellites, strict=True)
-        except (ValueError, KeyError, TypeError) as err:
-            return web.json_response({"error": f"Invalid options: {err}"}, status=400)
+        except (ValueError, KeyError, TypeError, AttributeError) as err:
+            return web.json_response({"error": f"Options invalides : {err}"}, status=400)
         except ConfigError as err:
             return web.json_response({"error": str(err)}, status=400)
 
@@ -170,7 +183,7 @@ class WebUI:
         except (SupervisorError, aiohttp.ClientError, OSError) as err:
             _LOGGER.error("Could not restore the previous options: %s", err)
         return web.json_response(
-            {"error": f"{error}. The previous configuration was restored."},
+            {"error": f"{error}. La configuration précédente a été rétablie."},
             status=409,
         )
 
@@ -178,9 +191,12 @@ class WebUI:
 
     def _runner_of(self, request: web.Request, name: Optional[str] = None) -> SatelliteRunner:
         name = name if name is not None else request.query.get("satellite", "")
-        runner = self.runtime.runners.get(name)
+        runner = self.runtime.runners.get(name) if isinstance(name, str) else None
         if runner is None:
-            raise web.HTTPBadRequest(text="Unknown satellite")
+            raise web.HTTPNotFound(
+                text=json.dumps({"error": f"Satellite « {name} » pas démarré"}),
+                content_type="application/json",
+            )
         return runner
 
     @staticmethod
@@ -196,6 +212,7 @@ class WebUI:
 
     async def _meter_stream(self, request: web.Request) -> web.StreamResponse:
         """Live levels about 10 times a second (Server-Sent Events)."""
+        name = request.query.get("satellite", "")
         runner = self._runner_of(request)
         response = web.StreamResponse(headers={
             "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
@@ -204,10 +221,14 @@ class WebUI:
         await response.prepare(request)
         try:
             while True:
+                # The satellite may have been restarted (new runner) or removed
+                runner = self.runtime.runners.get(name)
+                if runner is None:
+                    break
                 data = json.dumps(self._meter_data(runner))
                 await response.write(f"data: {data}\n\n".encode())
                 await asyncio.sleep(0.1)
-        except (ConnectionResetError, asyncio.CancelledError):
+        except ConnectionResetError:
             pass
         return response
 
@@ -217,45 +238,66 @@ class WebUI:
             del self._sessions[key]
         if create:
             self._sessions[name] = CalibrationSession()
-        return self._sessions.get(name)
+        session = self._sessions.get(name)
+        if session is not None:
+            session.touch()
+        return session
 
     async def _calibration_record(self, request: web.Request) -> web.Response:
         """Record and analyze a step: "noise" (silence), "voice" (the
         sentence), "near" / "far" (auto gain), "wake" (wake word test)."""
-        try:
-            body = await request.json()
-            step = body["step"]
-            name = body["satellite"]
-        except (ValueError, KeyError, TypeError):
-            return web.json_response({"error": "Invalid request"}, status=400)
+        body = await self._json(request)
+        step, name = body.get("step"), body.get("satellite")
+        if not isinstance(step, str) or not isinstance(name, str):
+            return web.json_response({"error": "Requête invalide"}, status=400)
         runner = self._runner_of(request, name)
         if step not in self.STEP_SECONDS:
-            return web.json_response({"error": "Unknown step"}, status=400)
-        session = self._session(name, create=(step == "noise"))
+            return web.json_response({"error": "Étape inconnue"}, status=400)
+        session = self._session(name)
         if step != "noise" and (session is None or session.noise is None):
-            return web.json_response({"error": "Mesurez d'abord le bruit de fond"}, status=400)
+            return web.json_response(
+                {"error": "Mesurez d'abord le bruit de fond", "expired": True}, status=400)
         if step in ("near", "far", "wake") and session.proposal is None:
             return web.json_response({"error": "Faites d'abord la mesure de la voix"}, status=400)
-        assert session is not None
-        if step == "wake":
-            # Before asking for 20 s of speech: is the model there?
-            try:
-                await wake_test.check_model(*self._wake_target(body))
-            except wake_test.WakeTestError as err:
-                return web.json_response({"error": str(err)}, status=502)
-        pcm = await runner.record(self.STEP_SECONDS[step])
-        if len(pcm) < calibration.FRAME_BYTES * 10:
+        if name in self._busy:
             return web.json_response(
-                {"error": "Aucun audio reçu de ce micro pendant la mesure"}, status=409,
-            )
-        if step == "noise":
-            session.noise_pcm = pcm
-            session.noise = calibration.analyze_noise(pcm)
-            return web.json_response({"noise": session.noise})
+                {"error": "Un calibrage est déjà en cours sur ce satellite"}, status=409)
+        try:
+            wake_target = self._wake_target(body) if step == "wake" else None
+            proposed = body.get("proposed") or {}
+            if not isinstance(proposed, dict):
+                raise ValueError("proposed")
+        except (ValueError, TypeError):
+            return web.json_response({"error": "Requête invalide"}, status=400)
+        self._busy.add(name)
+        try:
+            pcm = await runner.record(self.STEP_SECONDS[step])
+            if len(pcm) < calibration.FRAME_BYTES * 10:
+                return web.json_response(
+                    {"error": "Aucun audio reçu de ce micro pendant la mesure"}, status=409,
+                )
+            if step == "noise":
+                # A new calibration, only once the measure worked
+                session = self._session(name, create=True)
+                session.noise_pcm = pcm
+                session.noise = calibration.analyze_noise(pcm)
+                return web.json_response({"noise": session.noise})
+            if self._sessions.get(name) is not session:
+                return web.json_response(
+                    {"error": "Calibrage effacé pendant la mesure", "expired": True}, status=409)
+            return await self._record_step(runner, session, step, pcm, body, wake_target)
+        finally:
+            self._busy.discard(name)
+
+    async def _record_step(
+        self, runner: SatelliteRunner, session: CalibrationSession, step: str,
+        pcm: bytes, body: dict[str, Any], wake_target: Optional[tuple[str, int, str]],
+    ) -> web.Response:
         if step == "voice":
             return web.json_response(await asyncio.to_thread(self._voice_step, runner, session, pcm))
         if step == "wake":
-            return await self._wake_step(runner, session, pcm, body)
+            assert wake_target is not None
+            return await self._wake_step(runner, session, pcm, body, wake_target)
         session.takes[step] = pcm
         level = await asyncio.to_thread(
             calibration.take_level, session.noise_pcm, pcm, session.noise["rms_db"],
@@ -295,7 +337,7 @@ class WebUI:
 
     async def _calibration_denoise(self, request: web.Request) -> web.Response:
         """Step A: the voice take through each noise suppression level."""
-        name = (await self._json(request)).get("satellite", "")
+        name = str((await self._json(request)).get("satellite", ""))
         session = self._session(name)
         if session is None or session.proposal is None:
             return web.json_response({"error": "Faites d'abord la mesure de la voix"}, status=400)
@@ -317,7 +359,7 @@ class WebUI:
     async def _calibration_autogain(self, request: web.Request) -> web.Response:
         """Step B: near / far voice levels -> auto gain on or off."""
         body = await self._json(request)
-        session = self._session(body.get("satellite", ""))
+        session = self._session(str(body.get("satellite", "")))
         if session is None or not {"near", "far"} <= set(session.takes):
             return web.json_response({"error": "Enregistrez d'abord les deux prises"}, status=400)
         noise = self._noise_choice(session, body)
@@ -348,15 +390,19 @@ class WebUI:
 
     @staticmethod
     def _wake_target(body: dict[str, Any]) -> tuple[str, int, str]:
+        """(host, port, model); ValueError / TypeError if invalid."""
+        port = int(body.get("port") or wake_test.DEFAULT_PORT)
+        if not 0 < port < 65536:
+            raise ValueError("port")
         return (
             str(body.get("host") or wake_test.DEFAULT_HOST),
-            int(body.get("port") or wake_test.DEFAULT_PORT),
+            port,
             str(body.get("model") or wake_test.DEFAULT_MODEL),
         )
 
     async def _wake_step(
         self, runner: SatelliteRunner, session: CalibrationSession, raw: bytes,
-        body: dict[str, Any],
+        body: dict[str, Any], wake_target: tuple[str, int, str],
     ) -> web.Response:
         """Step C: the take with the current and the proposed settings,
         sent at the same time to openWakeWord (not stored)."""
@@ -369,8 +415,11 @@ class WebUI:
                 s["volume"], s["auto_gain"], s["auto_gain_target_db"],
             ) for s in (current, proposed)
         ))
-        host, port, model = self._wake_target(body)
+        host, port, model = wake_target
         try:
+            # The page checked the model before the countdown; checked again
+            # (openWakeWord falls back to another model for an unknown name)
+            await wake_test.check_model(host, port, model)
             counts = await asyncio.gather(*(
                 wake_test.count_detections(pcm, host, port, model, self.WAKE_PACE)
                 for pcm in processed
@@ -400,14 +449,28 @@ class WebUI:
             if session.autogain["auto_gain"]:
                 settings["auto_gain_target_db"] = float(session.autogain["target_db"])
         for key in settings:
-            if key in chosen and chosen[key] is not None:
-                settings[key] = type(settings[key])(chosen[key])
+            value = chosen.get(key)
+            if value is None:
+                continue
+            try:
+                if key == "auto_gain":
+                    if isinstance(value, bool):
+                        settings[key] = value
+                elif key == "noise_suppression":
+                    settings[key] = str(value)
+                else:
+                    settings[key] = float(value)
+            except (TypeError, ValueError):
+                pass  # keep the proposal
         if settings["noise_suppression"] not in calibration.NOISE_SUPPRESSION_LEVELS:
             settings["noise_suppression"] = current["noise_suppression"]
         return settings
 
     async def _wake_models(self, request: web.Request) -> web.Response:
-        host, port, _ = self._wake_target(dict(request.query))
+        try:
+            host, port, _ = self._wake_target(dict(request.query))
+        except (ValueError, TypeError):
+            return web.json_response({"error": "Requête invalide"}, status=400)
         try:
             models = await wake_test.list_models(host, port)
         except wake_test.WakeTestError as err:
@@ -419,9 +482,10 @@ class WebUI:
         try:
             body = await request.json()
         except ValueError:
-            raise web.HTTPBadRequest(text="Invalid request") from None
+            body = None
         if not isinstance(body, dict):
-            raise web.HTTPBadRequest(text="Invalid request")
+            raise web.HTTPBadRequest(text=json.dumps({"error": "Requête invalide"}),
+                                     content_type="application/json")
         return body
 
     async def _calibration_audio(self, request: web.Request) -> web.Response:
@@ -452,13 +516,19 @@ class WebUI:
         the app gets them back like any change made in HA. The recordings
         no step needs any more are deleted."""
         body = await self._json(request)
-        name = body.get("satellite", "")
+        name = str(body.get("satellite", ""))
         try:
             values = self._apply_values(body)
         except (ValueError, TypeError):
-            return web.json_response({"error": "Invalid request"}, status=400)
+            return web.json_response({"error": "Requête invalide"}, status=400)
         if not values:
-            return web.json_response({"error": "Nothing to apply"}, status=400)
+            return web.json_response({"error": "Rien à appliquer"}, status=400)
+        async with self._options_lock:
+            return await self._apply_locked(name, values, body)
+
+    async def _apply_locked(
+        self, name: str, values: dict[str, Any], body: dict[str, Any],
+    ) -> web.Response:
         runner = self.runtime.runners.get(name)
         if runner is not None and runner.cfg.mic_follow_ha:
             ha_values = {k: v for k, v in values.items() if k in ("volume", "noise_suppression")}
@@ -479,7 +549,7 @@ class WebUI:
             (s for s in options.get("satellites", []) if s.get("name") == name), None,
         )
         if satellite is None:
-            return web.json_response({"error": "Unknown satellite"}, status=400)
+            return web.json_response({"error": f"Satellite « {name} » inconnu"}, status=400)
         microphone = satellite.setdefault("microphone", {})
         for key, value in values.items():
             microphone[self.APPLY_KEYS[key]] = value
@@ -534,9 +604,9 @@ class WebUI:
             runner = self.runtime.runners[body["satellite"]]
             signal = body["signal"]
         except (ValueError, KeyError, TypeError):
-            return web.json_response({"error": "Unknown satellite"}, status=400)
+            return web.json_response({"error": "Satellite pas démarré"}, status=400)
         if signal not in TEST_SIGNALS:
-            return web.json_response({"error": "Unknown signal"}, status=400)
+            return web.json_response({"error": "Annonce inconnue"}, status=400)
         played = await runner.test(signal)
         return web.json_response({"played": played})
 
@@ -545,7 +615,7 @@ class WebUI:
         try:
             options = (await request.json())["options"]
         except (ValueError, KeyError, TypeError) as err:
-            return web.json_response({"error": f"Invalid request: {err}"}, status=400)
+            return web.json_response({"error": f"Requête invalide : {err}"}, status=400)
         text = yaml.safe_dump(options, allow_unicode=True, sort_keys=False)
         return web.Response(
             text=text, content_type="application/yaml",
@@ -555,15 +625,18 @@ class WebUI:
     async def _import(self, request: web.Request) -> web.Response:
         """YAML → options for the editor (checked, not saved)."""
         try:
-            options = yaml.safe_load((await request.json())["yaml"])
+            text = (await request.json())["yaml"]
+            if not isinstance(text, str):
+                raise ValueError("a YAML text is expected")
+            options = yaml.safe_load(text)
             if not isinstance(options, dict) or not isinstance(
                 options.get("satellites"), list
             ):
                 raise ValueError("a 'satellites' list is expected")
             parsed = parse_options(copy.deepcopy(options))
             validate(parsed.satellites, strict=True)
-        except (yaml.YAMLError, ValueError, KeyError, TypeError) as err:
-            return web.json_response({"error": f"Invalid YAML: {err}"}, status=400)
+        except (yaml.YAMLError, ValueError, KeyError, TypeError, AttributeError) as err:
+            return web.json_response({"error": f"YAML invalide : {err}"}, status=400)
         except ConfigError as err:
             return web.json_response({"error": str(err)}, status=400)
         return web.json_response({"options": options})

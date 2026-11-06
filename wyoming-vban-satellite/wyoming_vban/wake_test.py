@@ -11,9 +11,10 @@ faster would hide the repeated wake words.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
@@ -36,10 +37,22 @@ class WakeTestError(Exception):
     """openWakeWord unreachable, or the model isn't there."""
 
 
+@contextlib.asynccontextmanager
+async def _connect(host: str, port: int) -> AsyncIterator[AsyncTcpClient]:
+    """A connection, given up after TIMEOUT_S (an unreachable host would
+    otherwise wait for the system's TCP timeout, about 2 minutes)."""
+    client = AsyncTcpClient(host, port)
+    await asyncio.wait_for(client.connect(), TIMEOUT_S)
+    try:
+        yield client
+    finally:
+        await client.disconnect()
+
+
 async def list_models(host: str, port: int) -> list[str]:
     """Wake word models of the openWakeWord app."""
     try:
-        async with AsyncTcpClient(host, port) as client:
+        async with _connect(host, port) as client:
             await asyncio.wait_for(client.write_event(Describe().event()), TIMEOUT_S)
             while True:
                 event = await asyncio.wait_for(client.read_event(), TIMEOUT_S)
@@ -50,7 +63,7 @@ async def list_models(host: str, port: int) -> list[str]:
                     return sorted({m.name for w in info.wake for m in w.models})
     except (OSError, asyncio.TimeoutError) as err:
         raise WakeTestError(
-            f"openWakeWord injoignable ({host}:{port}) : {err or type(err).__name__}"
+            f"openWakeWord injoignable ({host}:{port}) : {str(err) or type(err).__name__}"
         ) from err
 
 
@@ -73,7 +86,7 @@ async def count_detections(
     detections: list[Optional[int]] = []
     chunk_bytes = CHUNK_SAMPLES * WYOMING_WIDTH
     try:
-        async with AsyncTcpClient(host, port) as client:
+        async with _connect(host, port) as client:
 
             async def receive() -> None:
                 while True:
@@ -106,11 +119,14 @@ async def count_detections(
                 except asyncio.TimeoutError:
                     pass  # no end event after detections: the tail is over
             finally:
-                reader.cancel()
+                if not reader.done():
+                    reader.cancel()
                 await asyncio.gather(reader, return_exceptions=True)
+            if not reader.cancelled() and reader.exception() is not None:
+                raise OSError(f"lecture : {reader.exception()}")
     except (OSError, asyncio.TimeoutError) as err:
         raise WakeTestError(
-            f"openWakeWord injoignable ({host}:{port}) : {err or type(err).__name__}"
+            f"openWakeWord injoignable ({host}:{port}) : {str(err) or type(err).__name__}"
         ) from err
     _LOGGER.debug("Wake word test: %d detection(s) of %s", len(detections), model)
     return detections

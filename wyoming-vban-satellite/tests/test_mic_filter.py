@@ -103,11 +103,42 @@ class MicFilterTest(unittest.TestCase):
 
         filter_ = MicFilter("medium")
         filter_._speex = Broken()
-        pcm = self.speech(5, 3000)
+        pcm = self.speech(8, 3000)  # 3 s of speech with no sound out
         with self.assertLogs("wyoming_vban.mic_filter", "ERROR"):
             out = run(filter_, pcm)
         self.assertTrue(filter_.bypassed)
         self.assertGreater(db(out[-2 * RATE:]), -40)  # last second: the voice gets through
+
+    def test_quiet_room_with_strong_suppression_is_not_bypassed(self) -> None:
+        # About -63 dBFS of room noise: strong suppression leaves almost
+        # nothing, which is its job, not a broken processor
+        filter_ = MicFilter("strong")
+        run(filter_, noise(8, 25))
+        self.assertFalse(filter_.bypassed)
+
+    def test_auto_gain_after_digital_silence(self) -> None:
+        # A chunk of zeros (VBAN gap, muted mic) must not make the room
+        # noise pass for speech and be raised
+        filter_ = MicFilter(auto_gain=True)
+        run(filter_, bytes(3200))
+        pcm = noise(8, 30)
+        out = run(filter_, pcm)
+        self.assertAlmostEqual(db(out[-RATE * 2:]), db(pcm[-RATE * 2:]), delta=1)
+
+    def test_volume_change_keeps_the_noise_profile(self) -> None:
+        filter_ = MicFilter("medium", auto_gain=True)
+        speex, agc = filter_._speex, filter_._agc
+        filter_.configure("medium", True, 2.0, -20.0)
+        self.assertIs(filter_._speex, speex)
+        self.assertIs(filter_._agc, agc)
+        self.assertEqual(agc.target_db, -20.0)
+
+    def test_dc_removal_near_full_scale(self) -> None:
+        filter_ = MicFilter()
+        run(filter_, audioop.bias(noise(2, 200), 2, 8000))  # learns +8000
+        loud = audioop.bias(tone(0.1, 24000), 2, 8000)  # would wrap with bias()
+        out = filter_.process(loud)
+        self.assertLess(abs(audioop.avg(out, 2)), 1500)  # shifted, not skipped
 
     def test_output_cut_in_10ms_frames(self) -> None:
         filter_ = MicFilter("light", auto_gain=True)

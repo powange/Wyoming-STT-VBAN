@@ -84,7 +84,7 @@ class TtsPhrase:
                         "Cannot synthesize phrase '%s' with %s / %s (%s): the "
                         "built-in sound is played instead. Retrying in %.0fs",
                         self.text, self.engine, self.voice,
-                        err or type(err).__name__, retry,
+                        str(err) or type(err).__name__, retry,
                     )
                 await asyncio.sleep(retry)
                 retry = min(retry * 2, self.RETRY_MAX_S)
@@ -113,7 +113,10 @@ class TtsPhrase:
         ) as resp:
             if resp.status != 200:
                 raise ValueError(f"tts_get_url HTTP {resp.status}: {(await resp.text())[:200]}")
-            path = (await resp.json())["path"]
+            body = await resp.json(content_type=None)
+            if not isinstance(body, dict) or not isinstance(body.get("path"), str):
+                raise ValueError(f"tts_get_url: unexpected answer {str(body)[:200]}")
+            path = body["path"]
         async with session.get(
             f"{self.base_url}{path}", headers=headers, timeout=timeout,
         ) as resp:
@@ -124,17 +127,25 @@ class TtsPhrase:
     def _save(self, wav: bytes) -> None:
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_bytes(wav)
+            # Written aside then renamed: a file cut short by a stop would
+            # otherwise be played (truncated) forever
+            partial = self.cache_path.with_suffix(".part")
+            partial.write_bytes(wav)
+            os.replace(partial, self.cache_path)
         except OSError as err:
             _LOGGER.debug("Phrase not cached (%s): kept in memory only", err)
 
 
-def remove_stale_phrases(phrases: list[TtsPhrase]) -> None:
-    """Delete cached phrases no longer configured (text/engine/voice changed)."""
+def remove_stale_phrases(phrases: list[TtsPhrase], cache_dir: Optional[str] = None) -> None:
+    """Delete cached phrases no longer configured (text/engine/voice changed),
+    in the phrases' folders and in cache_dir (when no phrase is left)."""
     keep = {phrase.cache_path for phrase in phrases}
-    for cache_dir in {phrase.cache_path.parent for phrase in phrases}:
+    folders = {phrase.cache_path.parent for phrase in phrases}
+    if cache_dir is not None:
+        folders.add(Path(cache_dir))
+    for cache_dir_path in folders:
         try:
-            for path in cache_dir.glob(f"{TtsPhrase.CACHE_PREFIX}*.wav"):
+            for path in cache_dir_path.glob(f"{TtsPhrase.CACHE_PREFIX}*.wav"):
                 if path not in keep:
                     path.unlink(missing_ok=True)
                     _LOGGER.debug("Removed stale phrase cache %s", path)

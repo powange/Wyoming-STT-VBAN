@@ -1,5 +1,6 @@
 """VBAN protocol: packet parsing, building, unicast/multicast receive and send."""
 
+import array
 import asyncio
 import audioop
 import logging
@@ -12,6 +13,8 @@ from typing import Callable, Optional
 from .const import (
     DEFAULT_VBAN_PORT,
     VBAN_CODEC_PCM,
+    VBAN_DATATYPE_FLOAT32,
+    VBAN_DATATYPE_FLOAT64,
     VBAN_DATATYPE_INT16,
     VBAN_DATATYPE_INT32,
     VBAN_DATATYPE_UINT8,
@@ -111,16 +114,16 @@ def build_packet(
     frame_counter: int,
     data_format: int = VBAN_DATATYPE_INT16,
 ) -> bytes:
-    """Build a raw VBAN packet from audio payload."""
-    try:
-        sr_index = VBAN_SAMPLE_RATES.index(sample_rate)
-    except ValueError:
-        sr_index = VBAN_SAMPLE_RATES.index(16000)
+    """Build a raw VBAN packet from audio payload. The sample rate must be
+    one of VBAN's (ValueError otherwise: the payload would play at the
+    wrong speed)."""
+    sr_index = VBAN_SAMPLE_RATES.index(sample_rate)
 
     sr_sub = (sr_index & 0x1F) | VBAN_PROTOCOL_AUDIO
     data_format_codec = (data_format & 0x07) | VBAN_CODEC_PCM
 
-    name_bytes = stream_name.encode("ascii")[:16].ljust(16, b"\x00")
+    # Names are made ASCII when the options are read; never fail here
+    name_bytes = stream_name.encode("ascii", "replace")[:16].ljust(16, b"\x00")
     counter_bytes = struct.pack("<I", frame_counter & 0xFFFFFFFF)
 
     header = (
@@ -133,29 +136,68 @@ def build_packet(
     return header + payload
 
 
-def resample_to_wyoming(
-    audio: bytes, packet: VbanPacket
-) -> bytes:
-    """Convert VBAN audio to Wyoming format (16kHz, 16-bit, mono)."""
+def to_mono16(audio: bytes, data_format: int, channels: int) -> bytes:
+    """VBAN samples -> mono 16-bit at the same rate.
+
+    8-bit VBAN is unsigned; float formats are scaled from ±1.0; stereo is
+    averaged (a sum would clip); beyond two channels, the first one is kept.
+    """
+    width = VBAN_DATATYPE_WIDTH.get(data_format, 2)
+    channels = max(1, channels)
+    frame = width * channels
+    audio = audio[: len(audio) // frame * frame]
+    if not audio:
+        return b""
+    if data_format in (VBAN_DATATYPE_FLOAT32, VBAN_DATATYPE_FLOAT64):
+        floats = array.array("f" if data_format == VBAN_DATATYPE_FLOAT32 else "d", audio)
+        if channels > 1:
+            floats = floats[::channels]
+        return array.array(
+            "h", (max(-32768, min(32767, int(s * 32767))) for s in floats)
+        ).tobytes()
     pcm = audio
-    width = packet.sample_width
-    channels = packet.channels
-    rate = packet.sample_rate
-
-    # Convert to mono if needed
-    if channels > 1:
-        pcm = audioop.tomono(pcm, width, 1.0, 1.0)
-
-    # Convert sample width to 16-bit if needed
+    if data_format == VBAN_DATATYPE_UINT8:
+        pcm = audioop.bias(pcm, 1, -128)
+    if channels == 2:
+        pcm = audioop.tomono(pcm, width, 0.5, 0.5)
+    elif channels > 2:
+        pcm = b"".join(pcm[i:i + width] for i in range(0, len(pcm), frame))
     if width != WYOMING_WIDTH:
         pcm = audioop.lin2lin(pcm, width, WYOMING_WIDTH)
+    return pcm
 
-    # Resample to 16kHz if needed
-    if rate != WYOMING_RATE:
-        pcm, _ = audioop.ratecv(
-            pcm, WYOMING_WIDTH, 1, rate, WYOMING_RATE, None
-        )
 
+class WyomingConverter:
+    """VBAN packets -> Wyoming audio (16 kHz mono 16-bit), one stream.
+
+    The resampler state is kept from packet to packet: resampling each
+    packet on its own clicks at every packet and adds samples. It starts
+    again when the stream's format changes.
+    """
+
+    def __init__(self) -> None:
+        self._format: Optional[tuple[int, int, int]] = None
+        self._state = None
+
+    def convert(self, packet: VbanPacket) -> bytes:
+        stream_format = (packet.sample_rate, packet.channels, packet.data_format)
+        if stream_format != self._format:
+            self._format = stream_format
+            self._state = None
+        pcm = to_mono16(packet.payload, packet.data_format, packet.channels)
+        if packet.sample_rate != WYOMING_RATE and pcm:
+            pcm, self._state = audioop.ratecv(
+                pcm, WYOMING_WIDTH, 1, packet.sample_rate, WYOMING_RATE, self._state
+            )
+        return pcm
+
+
+def resample_to_wyoming(audio: bytes, packet: VbanPacket) -> bytes:
+    """Convert one packet's audio to Wyoming format (16kHz, 16-bit, mono),
+    without state: for a stream, use a WyomingConverter."""
+    pcm = to_mono16(audio, packet.data_format, packet.channels)
+    if packet.sample_rate != WYOMING_RATE and pcm:
+        pcm, _ = audioop.ratecv(pcm, WYOMING_WIDTH, 1, packet.sample_rate, WYOMING_RATE, None)
     return pcm
 
 
@@ -257,6 +299,8 @@ class VbanReceiver:
         sock.setblocking(False)
         return sock
 
+    RETRY_S = 5.0  # after a socket error, the socket is created again
+
     async def run(self) -> None:
         """Run the receiver loop. Should be started once at application startup."""
         self._socket = self._create_socket()
@@ -270,9 +314,17 @@ class VbanReceiver:
                 try:
                     data = await loop.sock_recv(self._socket, 2048)
                 except OSError as err:
-                    if self._running:
-                        _LOGGER.error("VBAN receive error: %s", err)
-                    break
+                    if not self._running:
+                        break
+                    # E.g. the network interface went down: try again
+                    _LOGGER.error(
+                        "VBAN receive error on port %d: %s (retrying in %.0fs)",
+                        self.port, err, self.RETRY_S,
+                    )
+                    self._close_socket()
+                    await asyncio.sleep(self.RETRY_S)
+                    self._socket = self._create_socket()
+                    continue
 
                 packet = parse_packet(data)
                 if packet is None:
@@ -307,9 +359,9 @@ class VbanReceiver:
             self._socket = None
 
     def stop(self) -> None:
-        """Stop the receiver (shuts down the socket)."""
+        """Stop the receiver. The socket is closed by run() as it ends (the
+        task is cancelled), not under a pending read."""
         self._running = False
-        self._close_socket()
 
 
 class VbanSender:
@@ -351,6 +403,10 @@ class VbanSender:
         self.port = port
         self.mode = mode
         self.stream_name = stream_name
+        if sample_rate not in VBAN_SAMPLE_RATES:
+            _LOGGER.error("VBAN sender: %d Hz isn't a VBAN rate, sending at %d Hz",
+                          sample_rate, WYOMING_RATE)
+            sample_rate = WYOMING_RATE
         self.sample_rate = sample_rate
         self.channels = channels
         self.volume = volume
@@ -409,6 +465,13 @@ class VbanSender:
 
         self._data_ready = asyncio.Event()
         self._drain_task = asyncio.create_task(self._drain_loop())
+        self._drain_task.add_done_callback(self._drain_done)
+
+    @staticmethod
+    def _drain_done(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            _LOGGER.error("VBAN sender stopped: %s", task.exception(),
+                          exc_info=task.exception())
 
     def send(
         self,
@@ -436,7 +499,7 @@ class VbanSender:
             pcm = audioop.lin2lin(pcm, src_width, WYOMING_WIDTH)
 
         if src_channels > 1 and self.channels == 1:
-            pcm = audioop.tomono(pcm, WYOMING_WIDTH, 1.0, 1.0)
+            pcm = audioop.tomono(pcm, WYOMING_WIDTH, 0.5, 0.5)
             src_channels = 1
 
         if src_rate != self.sample_rate:
@@ -460,20 +523,19 @@ class VbanSender:
 
         # Cap pending buffer to prevent unbounded memory growth if the
         # drain task falls behind (e.g. network issue, huge TTS response).
-        if len(self._pending) + len(pcm) > self._max_pending_bytes:
-            if not self._pending_overflow_logged:
-                _LOGGER.warning(
-                    "TTS send buffer full (%d ms) — dropping audio",
-                    self.MAX_PENDING_MS,
-                )
-                self._pending_overflow_logged = True
-            return
-
-        if (
-            self._pending_overflow_logged
-            and len(self._pending) < self._max_pending_bytes // self.OVERFLOW_RESET_RATIO
-        ):
+        # Once full, drop everything until it has drained a good part: a
+        # later small chunk slipping in would leave a hole in the speech.
+        if self._pending_overflow_logged:
+            if len(self._pending) >= self._max_pending_bytes // self.OVERFLOW_RESET_RATIO:
+                return
             self._pending_overflow_logged = False
+        if len(self._pending) + len(pcm) > self._max_pending_bytes:
+            _LOGGER.warning(
+                "TTS send buffer full (%d ms) — dropping audio",
+                self.MAX_PENDING_MS,
+            )
+            self._pending_overflow_logged = True
+            return
 
         self._pending.extend(pcm)
 
@@ -545,8 +607,13 @@ class VbanSender:
                 try:
                     await asyncio.wait_for(self._data_ready.wait(), timeout=0.5)
                 except asyncio.TimeoutError:
-                    # No new data for 500ms — if we have any data, flush it
-                    if len(self._pending) >= packet_bytes:
+                    # No new data for 500ms — if we have any data, flush it,
+                    # the last partial packet padded with silence
+                    if self._pending:
+                        if len(self._pending) % packet_bytes:
+                            self._pending.extend(
+                                bytes(packet_bytes - len(self._pending) % packet_bytes)
+                            )
                         break
                 if self._socket is None:
                     return
