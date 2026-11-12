@@ -546,6 +546,16 @@ class ApplyValuesTest(unittest.TestCase):
                                               "auto_gain_target_db": -60}),
                          {"volume": 10.0, "auto_gain": True, "auto_gain_target_db": -31})
 
+    def test_end_of_speech_values(self) -> None:
+        from wyoming_vban.webui import WebUI
+        self.assertEqual(
+            WebUI._apply_values({"end_of_speech": True, "end_of_speech_silence_ms": 100,
+                                 "end_of_speech_min_listen_ms": 1200.4}),
+            {"end_of_speech": True, "end_of_speech_silence_ms": 300,
+             "end_of_speech_min_listen_ms": 1200})
+        with self.assertRaises(TypeError):
+            WebUI._apply_values({"end_of_speech": "oui"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,6 +45,9 @@ OPTION_BLOCKS: dict[str, dict[str, str]] = {
         "multicast_group": "vban_receive_multicast_group",
         "multicast_interface": "vban_receive_multicast_interface",
         "stream_name": "vban_receive_stream_name",
+        "end_of_speech": "end_of_speech_enabled",
+        "end_of_speech_silence_ms": "end_of_speech_silence_ms",
+        "end_of_speech_min_listen_ms": "end_of_speech_min_listen_ms",
     },
     "vban_output": {
         "enabled": "tts_vban_enabled",
@@ -164,6 +167,10 @@ class SatelliteConfig:
     # Keep the Cast app open (it closes after 5 min idle; reopening delays
     # the next response): 0.2 s of silence every 4 min while idle
     tts_keep_awake: bool = False
+    # End of speech detected by the app during STT (see end_of_speech.py)
+    end_of_speech_enabled: bool = False
+    end_of_speech_silence_ms: int = 500
+    end_of_speech_min_listen_ms: int = 1000
     followup_enabled: bool = True
     followup_beep: bool = True
     followup_timeout_s: int = 8
@@ -285,6 +292,15 @@ class SatelliteConfig:
             )
             self.mic_mute_tail_ms = tail
 
+        for name, low, high in (("end_of_speech_silence_ms", 300, 2000),
+                                ("end_of_speech_min_listen_ms", 0, 5000)):
+            value = max(low, min(high, int(getattr(self, name))))
+            if value != getattr(self, name):
+                _LOGGER.warning(
+                    "[%s] microphone.%s %s clamped to %d (valid range %d-%d)",
+                    self.name, name, getattr(self, name), value, low, high,
+                )
+                setattr(self, name, value)
         timeout = max(3, min(30, self.followup_timeout_s))
         if timeout != self.followup_timeout_s:
             _LOGGER.warning(

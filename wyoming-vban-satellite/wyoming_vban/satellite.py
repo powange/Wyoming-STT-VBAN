@@ -33,6 +33,7 @@ from wyoming.wake import Detection
 from .const import WYOMING_CHANNELS, WYOMING_RATE, WYOMING_WIDTH
 from .ha_ws import HaStateWatcher
 from .media_player import MediaPlayerOutput, build_wav
+from .end_of_speech import EndOfSpeechDetector, EndOfSpeechSettings
 from .mic_filter import level_db
 from .vban import VbanPacket, VbanReceiver, VbanSender
 
@@ -351,8 +352,12 @@ class VbanSatelliteHandler(AsyncEventHandler):
         waiting_cues: Optional[WaitingCues] = None,
         debug_mirrors: Optional["SatelliteMirrors"] = None,
         clip_recorder: Optional[Callable[[], Optional["ClipRecorder"]]] = None,
+        end_of_speech: Optional[EndOfSpeechSettings] = None,
     ):
         super().__init__(reader, writer)
+        # End of speech detected by the app during STT (shared settings)
+        self._eos_settings = end_of_speech or EndOfSpeechSettings()
+        self._eos = EndOfSpeechDetector()
         self._info = satellite_info
         self._vban_receiver = vban_receiver
         self._vban_sender = vban_sender
@@ -539,7 +544,19 @@ class VbanSatelliteHandler(AsyncEventHandler):
             await self._stop_streaming()
             return True
 
+        if event.type == "transcribe":
+            # STT starts (after the wake word, or a follow-up run): follow
+            # the speech to end it without waiting for HA's VAD
+            if self._eos_settings.enabled and self._streaming and not self._mic_paused:
+                self._eos.arm(self._eos_settings)
+            return True
+
+        if event.type == "voice-stopped":
+            self._eos.disarm()  # HA saw the end first: it ends the STT itself
+            return True
+
         if event.type == "transcript":
+            self._eos.disarm()
             # STT done: a TTS response (or an error) normally follows. TTS
             # audio from now on is this run's response, not an announcement.
             self._awaiting_response = True
@@ -594,6 +611,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return True
 
         if AudioStart.is_type(event.type):
+            self._eos.disarm()
             start = AudioStart.from_event(event)
             self._tts_stream_bytes = 0
             self._tts_format = (start.rate, start.width, start.channels)
@@ -717,6 +735,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 "Error from server: [%s] %s", code, text,
             )
             self._clip_note(close=True, stt_error=code)
+            self._eos.disarm()
             self._last_transcript = ""
             self._stop_thinking()
             if self._driven:
@@ -1165,6 +1184,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # is being sent belong to it, not to the previous run
         previous_seq = self._run_seq
         self._run_seq += 1
+        self._eos.disarm()
         self._clip = None  # a new exchange: the previous clip is complete
         # A wake run's detection timestamp counts from its first audio chunk
         self._wake_run = start_stage == PipelineStage.WAKE
@@ -1399,6 +1419,29 @@ class VbanSatelliteHandler(AsyncEventHandler):
     def _on_response_timeout(self) -> None:
         _LOGGER.info("No response after transcript (empty response?): run over")
         self._run_ended(self._run_seq, reason="no response in time")
+
+    async def _end_of_speech_reached(self) -> None:
+        """The speech is over: end the STT now (audio-stop), not ~1.7 s
+        later with HA's VAD."""
+        eos = self._eos
+        _LOGGER.info(
+            "End of speech: %.1f s of speech, audio-stop after %d ms of silence",
+            eos.speech_s, round(eos.silence_s * 1000),
+        )
+        await self.write_event(AudioStop().event())
+        if self._driven:
+            # The run is HA's until its transcript (or error); the mic waits
+            self._mic_paused = True
+            seq = self._run_seq
+            self._set_watchdog(
+                self.FOLLOWUP_END_TIMEOUT_S,
+                lambda: self._run_ended(seq, reason="end of speech: no transcript"),
+            )
+
+    @property
+    def end_of_speech_floor_db(self) -> Optional[float]:
+        """Background noise the end of speech compares the speech with."""
+        return self._eos.floor_db
 
     def _on_followup_timeout(self) -> None:
         """No speech in time after a question: stop listening."""
@@ -1747,14 +1790,24 @@ class VbanSatelliteHandler(AsyncEventHandler):
                         cut = min(cut, len(pcm)) // WYOMING_WIDTH * WYOMING_WIDTH
                         pcm = bytes(cut) + pcm[cut:]
                     audio_buffer[:] = bytes(len(audio_buffer))  # older, kept for chunking
+                # End of speech: on the real audio sent (not the silence put
+                # in its place: beep, response, waiting sound)
+                eos_end = None
+                if self._eos_settings.enabled and pre_open is None and not self._mic_paused:
+                    if not (time.monotonic() < self._mic_silence_until
+                            or (self._mic_mute is not None and self._mic_mute.is_muted())):
+                        eos_end = self._eos.feed(pcm)
+                if eos_end is not None:
+                    pcm = pcm[:eos_end]  # the audio up to the end of speech
                 audio_buffer.extend(pcm)
                 recorder = self._clip_recorder()  # once per batch, not per chunk
 
-                # Send when we have enough data
-                while len(audio_buffer) >= target_bytes:
+                # Send when we have enough data (all of it at the end of speech)
+                while len(audio_buffer) >= target_bytes or (eos_end is not None and audio_buffer):
+                    size = min(target_bytes, len(audio_buffer))
                     with memoryview(audio_buffer) as view:  # one copy
-                        send_pcm = view[:target_bytes].tobytes()
-                    del audio_buffer[:target_bytes]
+                        send_pcm = view[:size].tobytes()
+                    del audio_buffer[:size]
 
                     # Between runs: don't send
                     if self._mic_paused:
@@ -1838,6 +1891,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                             self._wake_sample0 = recorder.samples_sent
                             self._wake_sample0_pending = False
                         recorder.sent(send_pcm)
+                if eos_end is not None:
+                    await self._end_of_speech_reached()
         except (ConnectionError, asyncio.CancelledError, OSError):
             pass
         except Exception:  # noqa: BLE001 - never stay deaf on a live connection

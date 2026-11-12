@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.14.0
+
+- **New: end of speech detected by the app** (`microphone.end_of_speech`, off by default). Home Assistant ends the speech of a Wyoming satellite about 1.7 s after the last word (measured: 1.68 s on "Éteins la lumière"; the satellite's "end of speech detection" setting doesn't seem to apply). With this on, during speech recognition (after the wake word, or in a follow-up) the app follows the speech on the audio sent to Home Assistant (30 ms windows more than 10 dB above the background noise) and sends `audio-stop` after at least 0.3 s of speech followed by `end_of_speech_silence_ms` of silence (500 ms by default, 300 to 2000), never before `end_of_speech_min_listen_ms` (1000 ms by default) of listening. Home Assistant stays the safety net: with no speech the app sends nothing (HA ends with `stt-no-text-recognized`), and if HA sees the end first the app does nothing more. The beep, the responses and the silence sent instead of the muted microphone aren't counted. Log: `End of speech: X.X s of speech, audio-stop after Y ms of silence`.
+  - The three options are in the `microphone` block (`end_of_speech`, `end_of_speech_silence_ms`, `end_of_speech_min_listen_ms`): a new block would have to be added to every existing configuration, or the Supervisor refuses it.
+  - Settings in the satellite editor and in the **Calibrage** tab ("Fin de parole" card, with the background noise followed live and the level speech must exceed), applied without restart.
+
 ## 3.13.0
 
 Improvements from the analysis of 3.12.1 (fifth and last batch).

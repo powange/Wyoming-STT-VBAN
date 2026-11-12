@@ -29,6 +29,7 @@ from .wake_clips import ClipRecorder, ClipStore
 from .ha_audio import HaAudioSync, HaMicSettings, auto_gain_settings
 from .ha_ws import SUPERVISOR_WS_URL, HaCommandError, HaStateWatcher, HaUnavailable
 from .calibration import CLIP_THRESHOLD, LevelMeter
+from .end_of_speech import EndOfSpeechSettings
 from .calibration import _clipped as calibration_clipped
 from .mic_filter import MicFilter
 from .mirror import SatelliteMirrors
@@ -307,6 +308,10 @@ class SatelliteRunner:
             mic_tail_s=cfg.mic_mute_tail_ms / 1000,
             beep_output=cfg.followup_beep_output,
         )
+        self.end_of_speech = EndOfSpeechSettings(
+            enabled=cfg.end_of_speech_enabled, silence_ms=cfg.end_of_speech_silence_ms,
+            min_listen_ms=cfg.end_of_speech_min_listen_ms,
+        )
         # Last values of the satellite's HA microphone entities (if followed)
         self.ha_mic: Optional[HaMicSettings] = None
         self.mic_filter = MicFilter(*self.mic_settings())
@@ -443,6 +448,7 @@ class SatelliteRunner:
                 media_output=self.media_output,
                 mic_mute=self.mic_mute,
                 followup=self.followup,
+                end_of_speech=self.end_of_speech,
                 exchange_publisher=self.publisher,
                 satellite_name=cfg.name,
                 mic_label="RTSP" if self.rtsp is not None else "VBAN",
@@ -561,6 +567,13 @@ class SatelliteRunner:
             cached = self._platforms[entity_id] = (entry or {}).get("platform", "")
         return cached == "cast"
 
+    def speech_floor_db(self) -> Optional[float]:
+        """Background noise seen by the end of speech (latest connection)."""
+        for handler in list(self.handlers):
+            if handler.is_streaming and handler.end_of_speech_floor_db is not None:
+                return round(handler.end_of_speech_floor_db, 1)
+        return None
+
     def mic_settings(self) -> tuple[str, bool, float, float]:
         """(noise suppression, auto gain, volume, auto gain target dBFS): the
         app's settings, or the HA entities' last valid values if followed."""
@@ -623,6 +636,12 @@ class SatelliteRunner:
         else:
             followup = "off"
         _LOGGER.info("  Follow-up without wake word: %s", followup)
+        _LOGGER.info(
+            "  End of speech by the app: %s",
+            f"on (silence {cfg.end_of_speech_silence_ms} ms, minimum listening "
+            f"{cfg.end_of_speech_min_listen_ms} ms)" if cfg.end_of_speech_enabled
+            else "off (Home Assistant's)",
+        )
         if cfg.tts_output == "media_player":
             _LOGGER.info(
                 "  Media player %s: end margin %d ms, keep awake %s",
@@ -650,6 +669,10 @@ class SatelliteRunner:
         if not cfg.mic_follow_ha:
             self.ha_mic = None  # read again if followed later
         self.mic_filter.configure(*self.mic_settings())
+        # Handlers hold this object: its content changes
+        self.end_of_speech.enabled = cfg.end_of_speech_enabled
+        self.end_of_speech.silence_ms = cfg.end_of_speech_silence_ms
+        self.end_of_speech.min_listen_ms = cfg.end_of_speech_min_listen_ms
         self.followup.beep = cfg.followup_beep
         self.followup.timeout_s = cfg.followup_timeout_s
         if self.followup.enabled != cfg.followup_enabled:

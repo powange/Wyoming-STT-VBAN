@@ -630,7 +630,15 @@ function microphoneSection(mic, satName) {
                   help: "ramène la voix à un niveau régulier" }),
             mic.auto_gain && field(mic, "auto_gain_target_db", { label: "Cible du gain automatique (dBFS)",
                   type: "number", min: -31, max: -3, step: 1, placeholder: "-18",
-                  help: "niveau de voix visé, −31 à −3 (voir l'onglet Calibrage)" }))]));
+                  help: "niveau de voix visé, −31 à −3 (voir l'onglet Calibrage)" }))]),
+    group("Fin de parole", null,
+      field(mic, "end_of_speech", { label: "Détectée par l'app", type: "switch", wide: true, rerender: true,
+            help: "termine l'écoute dès la fin de la phrase au lieu d'attendre Home Assistant (≈ 1,7 s)" }),
+      mic.end_of_speech && grid(
+        field(mic, "end_of_speech_silence_ms", { label: "Silence de fin (ms)", type: "number",
+              min: 300, max: 2000, placeholder: "500", help: "300 à 2000" }),
+        field(mic, "end_of_speech_min_listen_ms", { label: "Écoute minimale (ms)", type: "number",
+              min: 0, max: 5000, placeholder: "1000", help: "0 à 5000, comptée à l'ouverture de l'écoute" }))));
 }
 
 function followupSection(sat, output) {
@@ -1077,6 +1085,57 @@ function renderVu(data) {
     ...vuRow("Après (envoyé à HA)", data.after, true));
   const volume = document.getElementById("calib-volume");
   if (volume) volume.textContent = `Volume du micro actuel : ${data.volume.toFixed(2)}`;
+  const floor = document.getElementById("calib-eos-floor");
+  if (floor) floor.textContent = speechFloorText(data.speech_floor_db);
+}
+
+/* End of speech detected by the app: its settings, with the noise it
+   compares the speech with. */
+const EOS_SPEECH_MARGIN_DB = 10; // speech: this much above the background (the app's)
+
+function speechFloorText(floor) {
+  if (floor !== null && floor !== undefined) {
+    return `Bruit de fond suivi : ${dbfs(floor)} · parole au-dessus de ` +
+           `${dbfs(Math.max(floor, -70) + EOS_SPEECH_MARGIN_DB)}`;
+  }
+  return calib.noise ? `Bruit de fond mesuré (étape 1) : ${dbfs(calib.noise.rms_db)} · ` +
+                       `parole au-dessus de ${dbfs(calib.noise.rms_db + EOS_SPEECH_MARGIN_DB)}`
+                     : "Bruit de fond : suivi en direct quand la fonction est activée.";
+}
+
+function endOfSpeechCard() {
+  const sat = calibSat();
+  if (!sat) return null;
+  const mic = sat.microphone || {};
+  const eos = calib.eos && calib.eos.satellite === calib.satellite ? calib.eos : (calib.eos = {
+    satellite: calib.satellite, enabled: !!mic.end_of_speech,
+    silence: mic.end_of_speech_silence_ms ?? 500, minListen: mic.end_of_speech_min_listen_ms ?? 1000,
+  });
+  const enabled = el("input", { type: "checkbox", role: "switch" });
+  enabled.checked = eos.enabled;
+  enabled.addEventListener("change", () => { eos.enabled = enabled.checked; });
+  const number = (key, min, max, step) => {
+    const input = el("input", { type: "number", min, max, step, value: eos[key] });
+    input.addEventListener("input", () => { eos[key] = Number(input.value); });
+    return input;
+  };
+  return el("div", { class: "card panel" },
+    el("h2", {}, "Fin de parole"),
+    el("p", { class: "help" },
+      "L'app termine l'écoute dès que vous avez fini de parler, au lieu d'attendre la détection " +
+      "de Home Assistant (environ 1,7 s). Home Assistant reste le filet de sécurité."),
+    el("label", { class: "switch wide" }, enabled, el("span", { class: "track" }),
+       el("span", {}, el("span", { class: "name" }, "Détectée par l'app"))),
+    el("div", { class: "grid" },
+      el("label", {}, "Silence de fin (ms, 300 à 2000)", number("silence", 300, 2000, 50)),
+      el("label", {}, "Écoute minimale (ms, 0 à 5000)", number("minListen", 0, 5000, 100))),
+    el("p", { class: "help", id: "calib-eos-floor" }, speechFloorText(null)),
+    el("button", { type: "button", disabled: calib.busy || null, onclick: () => {
+      const silence = Math.round(Math.min(2000, Math.max(300, eos.silence || 500)));
+      const minListen = Math.round(Math.min(5000, Math.max(0, eos.minListen ?? 1000)));
+      applySettings({ end_of_speech: eos.enabled, end_of_speech_silence_ms: silence,
+                      end_of_speech_min_listen_ms: minListen });
+    } }, "Appliquer"));
 }
 
 function stopMeter() {
@@ -1301,7 +1360,8 @@ const playButton = (which, text) =>
    entities if the satellite follows them, otherwise to the app's options. */
 function applySettings(values, finish = false) {
   return busy(async () => {
-    const ha = followsHa();
+    // (the end of speech settings are the app's, never HA entities)
+    const ha = followsHa() && Object.keys(values).some((k) => !k.startsWith("end_of_speech"));
     say(ha ? "Écriture dans Home Assistant…" : "Enregistrement et application…");
     await postJson("api/calibration/apply", { ...values, finish });
     for (const [key, value] of Object.entries(values)) calib.applied[key] = value;
@@ -1521,7 +1581,8 @@ function renderCalibration() {
           "Barre : niveau RMS · trait : crête · repère : cible de la voix (−20 dBFS) · " +
           "contour rouge : écrêtage. Le calibrage ne coupe jamais le son envoyé à Home Assistant.")),
       resultsCard(),
-      summaryCard()),
+      summaryCard(),
+      endOfSpeechCard()),
     el("div", { class: "card panel steps" },
       el("h2", {}, "Assistant de calibrage"),
       step("1. Bruit de fond",

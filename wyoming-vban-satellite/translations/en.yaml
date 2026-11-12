@@ -58,6 +58,15 @@ configuration:
           stream_name:
             name: VBAN stream name
             description: Stream routed to this satellite (empty = any stream not claimed by another satellite on the port)
+          end_of_speech:
+            name: End of speech detected by the app
+            description: During speech recognition, the app ends the listening itself after silence_ms of silence following the speech (Home Assistant's own detection waits about 1.7 s on Wyoming satellites). Home Assistant stays the safety net; with no speech at all it ends the listening itself (default off)
+          end_of_speech_silence_ms:
+            name: End of speech - silence (ms)
+            description: Silence after the speech that ends the listening, 300 to 2000 (default 500)
+          end_of_speech_min_listen_ms:
+            name: End of speech - minimum listening (ms)
+            description: The listening is never ended earlier than this after it opened, 0 to 5000 (default 1000)
       vban_output:
         name: VBAN output
         description: Responses sent as a VBAN stream (leave empty if unused)

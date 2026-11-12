@@ -58,6 +58,15 @@ configuration:
           stream_name:
             name: Nom du flux VBAN
             description: Flux dirige vers ce satellite (vide = tout flux non reclame par un autre satellite du port)
+          end_of_speech:
+            name: Fin de parole detectee par l'app
+            description: Pendant la reconnaissance vocale, l'app termine elle-meme l'ecoute apres silence_ms de silence suivant la parole (la detection de Home Assistant attend environ 1,7 s sur les satellites Wyoming). Home Assistant reste le filet de securite ; sans aucune parole, il termine l'ecoute lui-meme (desactive par defaut)
+          end_of_speech_silence_ms:
+            name: Fin de parole - silence (ms)
+            description: Silence apres la parole qui termine l'ecoute, 300 a 2000 (500 par defaut)
+          end_of_speech_min_listen_ms:
+            name: Fin de parole - ecoute minimale (ms)
+            description: L'ecoute n'est jamais terminee avant ce delai apres son ouverture, 0 a 5000 (1000 par defaut)
       vban_output:
         name: Sortie VBAN
         description: Reponses envoyees en flux VBAN (laisser vide si inutilise)

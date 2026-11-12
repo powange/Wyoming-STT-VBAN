@@ -7,6 +7,7 @@ schema), then applied without restarting the app.
 
 import asyncio
 import copy
+import dataclasses
 import json
 import logging
 import math
@@ -228,6 +229,8 @@ class WebUI:
             "before": runner.meter_in.stats(),
             "after": runner.meter_out.stats(),
             "volume": runner.mic_filter.volume,
+            "end_of_speech": dataclasses.asdict(runner.end_of_speech),
+            "speech_floor_db": runner.speech_floor_db(),
         }
 
     async def _meter_once(self, request: web.Request) -> web.Response:
@@ -582,7 +585,14 @@ class WebUI:
     APPLY_KEYS = {
         "volume": "volume", "noise_suppression": "noise_suppression",
         "auto_gain": "auto_gain", "auto_gain_target_db": "auto_gain_target_db",
+        "end_of_speech": "end_of_speech",
+        "end_of_speech_silence_ms": "end_of_speech_silence_ms",
+        "end_of_speech_min_listen_ms": "end_of_speech_min_listen_ms",
     }
+    # Not HA entities: always saved in the app's options
+    END_OF_SPEECH_KEYS = frozenset({
+        "end_of_speech", "end_of_speech_silence_ms", "end_of_speech_min_listen_ms",
+    })
 
     async def _calibration_apply(self, request: web.Request) -> web.Response:
         """Write microphone settings of a satellite: any of volume,
@@ -607,7 +617,8 @@ class WebUI:
         self, name: str, values: dict[str, Any], body: dict[str, Any],
     ) -> web.Response:
         runner = self.runtime.runners.get(name)
-        if runner is not None and runner.cfg.mic_follow_ha:
+        if (runner is not None and runner.cfg.mic_follow_ha
+                and not set(values) <= self.END_OF_SPEECH_KEYS):
             ha_values = {k: v for k, v in values.items() if k in ("volume", "noise_suppression")}
             if "auto_gain" in values:  # HA: 0 = off, N = aim at -N dBFS
                 target = values.get("auto_gain_target_db", runner.mic_settings_applied()[3])
@@ -663,6 +674,14 @@ class WebUI:
             if values["auto_gain"] and body.get("auto_gain_target_db") is not None:
                 values["auto_gain_target_db"] = int(round(
                     number("auto_gain_target_db", *AUTO_GAIN_TARGET_RANGE)))
+        if body.get("end_of_speech") is not None:
+            if not isinstance(body["end_of_speech"], bool):
+                raise TypeError("end_of_speech")
+            values["end_of_speech"] = body["end_of_speech"]
+        for key, low, high in (("end_of_speech_silence_ms", 300, 2000),
+                               ("end_of_speech_min_listen_ms", 0, 5000)):
+            if body.get(key) is not None:
+                values[key] = int(round(number(key, low, high)))
         return values
 
     def _forget(self, name: str, applied: dict[str, Any], finish: Any) -> None:

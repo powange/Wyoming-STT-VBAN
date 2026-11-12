@@ -134,6 +134,18 @@ applied, when leaving the tab, or after 15 minutes.
 The status tab shows the background noise before and after clean-up; a
 `mic_sent` debug copy lets you listen to the result.
 
+End of speech detected by the app (any source). Home Assistant's own
+detection ends the speech about 1.7 s after the last word on a Wyoming
+satellite (its "end of speech detection" setting of the satellite doesn't
+seem to apply to them):
+
+- **end_of_speech**: `true` to let the app end the listening itself (default `false`). During speech recognition (after the wake word, or in a follow-up), it follows the speech on the audio sent to Home Assistant: 30 ms windows more than 10 dB above the background noise. Once there has been at least 0.3 s of speech, then `end_of_speech_silence_ms` of silence, it sends `audio-stop`: Home Assistant transcribes right away. With no speech at all nothing is sent (Home Assistant ends with `stt-no-text-recognized`), and if Home Assistant sees the end first, the app does nothing more. The beep, the responses and the silence sent instead of the microphone (muted while a response plays) aren't counted. Log: `End of speech: 1.5 s of speech, audio-stop after 510 ms of silence`.
+- **end_of_speech_silence_ms**: silence after the speech that ends the listening, 300–2000 ms (default 500). Raise it if you pause in your sentences and get cut.
+- **end_of_speech_min_listen_ms**: the listening is never ended earlier than this after it opened, 0–5000 ms (default 1000).
+
+The **Calibrage** tab shows these settings with the background noise the app
+compares the speech with, and applies them without a restart.
+
 VBAN source:
 
 - **vban_port**: UDP port to listen on (e.g. 6980)
