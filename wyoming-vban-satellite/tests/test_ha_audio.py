@@ -4,10 +4,15 @@ Run from wyoming-vban-satellite/:  python3 -m unittest discover tests
 (needs the app requirements: wyoming, aiohttp, pyspeex-noise)
 """
 
+import os
+
+# Satellites started here must not be announced on the LAN (Home Assistant
+# would discover each of them)
+os.environ["VBAN_SATELLITE_NO_ZEROCONF"] = "1"
+
 import asyncio
 import audioop
 import math
-import os
 import socket
 import tempfile
 import unittest

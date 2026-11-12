@@ -6,6 +6,7 @@ sockets) per satellite.
 """
 
 import logging
+import os
 import socket
 from typing import Optional
 
@@ -15,6 +16,9 @@ _LOGGER = logging.getLogger(__name__)
 
 SERVICE_TYPE = "_wyoming._tcp.local."
 MDNS_TARGET_IP = "224.0.0.251"
+# Set by the tests: their satellites must not be announced on the network
+# (Home Assistant would offer to add each of them)
+NO_ZEROCONF_ENV = "VBAN_SATELLITE_NO_ZEROCONF"
 
 
 def local_ip() -> str:
@@ -35,6 +39,9 @@ class Discovery:
     async def register(self, name: str, port: int) -> str:
         """Announce a satellite; returns its service name. Raises on failure
         (no multicast route yet, name conflict…)."""
+        if os.environ.get(NO_ZEROCONF_ENV):
+            _LOGGER.debug("Zeroconf off (%s): %s not announced", NO_ZEROCONF_ENV, name)
+            return f"{name}.{SERVICE_TYPE}"
         info = AsyncServiceInfo(
             SERVICE_TYPE, f"{name}.{SERVICE_TYPE}",
             addresses=[socket.inet_aton(local_ip())], port=port,

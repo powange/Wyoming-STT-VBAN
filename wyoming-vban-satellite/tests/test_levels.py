@@ -4,6 +4,12 @@ Run from wyoming-vban-satellite/:  python3 -m unittest discover tests
 (needs the app requirements: wyoming, aiohttp)
 """
 
+import os
+
+# Satellites started here must not be announced on the LAN (Home Assistant
+# would discover each of them)
+os.environ["VBAN_SATELLITE_NO_ZEROCONF"] = "1"
+
 import math
 import random
 import struct
