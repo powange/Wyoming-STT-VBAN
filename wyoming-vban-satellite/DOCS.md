@@ -231,8 +231,9 @@ When Home Assistant gives no spoken response (an empty answer), the app sees
 the satellite's state go back to idle in Home Assistant and listens for the
 wake word again at once (after 60 s if Home Assistant can't be reached).
 
-The follow-up run starts together with the beep, but the listening only
-opens once the beep has really played:
+The follow-up run (Home Assistant's listening, transcription stage) only
+starts once the beep has really played, so the satellite shows `listening`
+in Home Assistant exactly while you can answer:
 
 - VBAN output: when the beep has been sent, plus `beep_latency_ms`;
 - media player: when Home Assistant shows it playing then no longer playing
@@ -243,9 +244,15 @@ opens once the beep has really played:
 - at most 4 s after the beep: if the microphone doesn't come back, the
   listening opens anyway (warning in the log).
 
-Until then, the microphone audio is replaced by silence: neither the beep
-nor the end of the response reaches the transcription. The no-speech
-timeout starts at that opening. Log: `Follow-up: beep played, mic back after
+Until then, no microphone audio is sent: neither the beep nor the end of
+the response reaches the transcription. The audio of the first ~300 ms
+after the opening (while Home Assistant starts the run) is kept and sent
+first. The no-speech timeout starts at that opening, for the app and for
+Home Assistant. If Home Assistant ends the follow-up run itself (its end of
+speech detection, an error), the satellite goes back to the wake word at
+once. And whatever happens, a satellite left without any run for 5 s while
+connected and not muted listens for the wake word again (warning in the
+log). Log: `Follow-up: beep played, mic back after
 2.65 s, listening for 3 s`.
 
 How it works: Home Assistant does not tell Wyoming satellites to continue

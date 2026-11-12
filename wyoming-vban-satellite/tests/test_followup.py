@@ -75,6 +75,9 @@ class FakeVbanSender:
     async def wait_sent(self, max_wait: float = 300.0) -> None:
         pass
 
+    def pending_seconds(self) -> float:
+        return 0.0
+
 
 class FakePublisher:
     """Records fired HA events."""
@@ -221,6 +224,32 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         await self.respond("Il est 9 heures.")
         self.assertEqual((await self.next_run()).start_stage, "wake")
 
+    async def test_ha_ends_the_follow_up_run(self) -> None:
+        await self.next_run()
+        await self.respond("Quelle pièce ?")
+        self.assertEqual((await self.next_run()).start_stage, "asr")
+        handler = self.handlers[-1]
+        handler.on_assist_state("listening")
+        with self.assertLogs("wyoming_vban.satellite", "INFO") as logs:
+            handler.on_assist_state("idle")  # HA ended the listening
+            run = await self.next_run(timeout=1.0)
+        self.assertIsNotNone(run)
+        self.assertEqual(run.start_stage, "wake")
+        self.assertTrue(any("Home Assistant ended the run while listening" in line
+                            for line in logs.output))
+
+    async def test_no_run_for_5_s_listens_again(self) -> None:
+        await self.next_run()
+        handler = self.handlers[-1]
+        handler._mic_paused = True  # a run ended and nothing started the next one
+        with unittest.mock.patch.multiple(
+            VbanSatelliteHandler, IDLE_GUARD_S=1.0, IDLE_GUARD_CHECK_S=0.2,
+        ), self.assertLogs("wyoming_vban.satellite", "WARNING") as logs:
+            run = await self.next_run(timeout=3.0)
+        self.assertIsNotNone(run)
+        self.assertEqual(run.start_stage, "wake")
+        self.assertTrue(any("No run for" in line for line in logs.output))
+
     async def test_at_most_three_follow_ups(self) -> None:
         await self.next_run()
         stages = []
@@ -302,15 +331,26 @@ class FollowupBeepTest(FollowupTest):
             ))
             await asyncio.sleep(0.016)
 
-    async def _events_after_asr_run(self, seconds: float, mic=None) -> list:
-        """[(time from the ASR run, True/False loud chunk, or "audio-stop")];
-        mic(t_run) starts the microphone feed."""
+    async def _asr_run(self, seconds: float, mic=None) -> tuple[float, list, int]:
+        """Question answered, then the follow-up's ASR run. Returns (time
+        from the response to the ASR run, [(time from the run, loud chunk or
+        "audio-stop")], loud chunks sent before the run). mic() starts with
+        the response."""
         await self.next_run()
         await self.respond("Quelle lumière ?")
-        run = await self.next_run()
-        self.assertEqual(run.start_stage, "asr")
-        t_run = time.monotonic()
+        t_resp = time.monotonic()
         feed = asyncio.create_task(mic()) if mic else None
+        early_loud = 0
+        while True:  # until the ASR run: nothing of the mic may reach HA
+            event = await asyncio.wait_for(self.ha.read_event(), 8)
+            # (chunks of the wake run still queued are read right away)
+            late = time.monotonic() - t_resp > 0.2
+            if event.type == "audio-chunk" and any(event.payload) and late:
+                early_loud += 1
+            if event.type == "run-pipeline":
+                self.assertEqual(RunPipeline.from_event(event).start_stage, "asr")
+                break
+        t_run = time.monotonic()
         events = []
         while (left := t_run + seconds - time.monotonic()) > 0:
             try:
@@ -324,51 +364,110 @@ class FollowupBeepTest(FollowupTest):
         if feed:
             feed.cancel()
             await asyncio.gather(feed, return_exceptions=True)
-        return events
+        return t_run - t_resp, events, early_loud
 
-    def _cut_mic_feed(self):
-        """The mic flows during the response, then the satellite cuts it
-        (like an Atom while it plays)."""
-        self.feed = asyncio.create_task(self._mic(0.3))
+    def _stop_time(self, events) -> float:
+        stops = [t for t, kind in events if kind == "audio-stop"]
+        self.assertTrue(stops)
+        return stops[0]
 
-    async def test_mic_cut_then_back_2_4_s_after_the_beep(self) -> None:
-        self._cut_mic_feed()
-        await self.feed
-        events = await self._events_after_asr_run(4.5, lambda: self._mic(3.0, delay=2.4))
-        opened = 2.4 + self.followup.mic_tail_s
-        loud = [t for t, kind in events if kind is True]
-        # Nothing heard before the mic came back (+ tail): no beep, no response end
-        self.assertTrue(loud)
-        self.assertGreaterEqual(min(loud), opened - 0.05)
-        self.assertTrue(all(kind is not True for t, kind in events if t < opened - 0.05))
-        # The no-speech timeout counts from the opening, not from the run
-        stop = [t for t, kind in events if kind == "audio-stop"]
-        self.assertTrue(stop)
-        self.assertGreaterEqual(stop[0], opened + self.followup.timeout_s - 0.1)
+    async def test_mic_cut_then_back_2_4_s_after_the_response(self) -> None:
+        # The mic flows, then the satellite cuts it while playing (like an Atom)
+        await self._mic(0.3)
+        waited, events, early = await self._asr_run(
+            2.0, lambda: self._mic(3.0, delay=2.4))
+        # HA gets the ASR run only once the mic is back (+ tail): no beep, no
+        # end of the response before it
+        self.assertGreaterEqual(waited, 2.4 + self.followup.mic_tail_s - 0.1)
+        self.assertEqual(early, 0)
+        self.assertTrue(any(kind is True for _, kind in events))
+        # The no-speech timeout counts from the run, for HA and for us
+        self.assertGreaterEqual(self._stop_time(events), self.followup.timeout_s - 0.1)
 
     async def test_mic_never_cut(self) -> None:
         mic = asyncio.create_task(self._mic(6.0))  # flows all along
         try:
-            events = await self._events_after_asr_run(1.5)
+            waited, events, early = await self._asr_run(1.0)
         finally:
             mic.cancel()
             await asyncio.gather(mic, return_exceptions=True)
-        opened = VbanSatelliteHandler.BEEP_LATENCY_VBAN_S + self.followup.mic_tail_s
+        # Response played (VBAN latency), beep + latency + tail, then the run
+        opened = (VbanSatelliteHandler.VBAN_PLAYBACK_LATENCY_S
+                  + VbanSatelliteHandler.BEEP_LATENCY_VBAN_S + self.followup.mic_tail_s)
+        self.assertGreaterEqual(waited, opened - 0.1)
+        self.assertLess(waited, opened + 0.5)
+        self.assertEqual(early, 0)
         loud = [t for t, kind in events if kind is True]
         self.assertTrue(loud)
-        self.assertGreaterEqual(min(loud), opened - 0.05)
-        self.assertLess(min(loud), opened + 0.3)
+        self.assertLess(min(loud), 0.5)  # the opening's audio, held during HA's grace
 
     async def test_mic_never_back_opens_at_the_limit(self) -> None:
-        self._cut_mic_feed()
-        await self.feed
+        await self._mic(0.3)
         with unittest.mock.patch.object(VbanSatelliteHandler, "FOLLOWUP_OPEN_MAX_S", 1.5):
             with self.assertLogs("wyoming_vban.satellite", "WARNING") as logs:
-                events = await self._events_after_asr_run(2.5)
+                waited, events, _ = await self._asr_run(1.5)
         self.assertTrue(any("listening anyway" in line for line in logs.output))
-        stop = [t for t, kind in events if kind == "audio-stop"]
-        self.assertTrue(stop)
-        self.assertGreaterEqual(stop[0], 1.5 + self.followup.timeout_s - 0.1)
+        self.assertGreaterEqual(waited, 1.5)
+        self.assertGreaterEqual(self._stop_time(events), self.followup.timeout_s - 0.1)
+
+
+class FakeMediaOutput:
+    """A Cast speaker without state over HA: timings from the WAV length."""
+
+    entity_id = "media_player.nest"
+    state_watcher = None
+
+    def __init__(self) -> None:
+        self.published: list[float] = []  # time each WAV was published
+
+    def publish(self, wav: bytes) -> str:
+        self.published.append(time.monotonic())
+        return f"http://127.0.0.1/tts/{len(self.published)}.wav"
+
+    async def play(self, url: str) -> bool:
+        return True
+
+
+class FollowupMediaPlayerTest(FollowupTest):
+    """Follow-up on a media player with 1.5 s of playback latency."""
+
+    followup = FollowupSettings(enabled=True, beep=True, timeout_s=1.0, beep_latency_s=1.5)
+
+    async def next_run(self, timeout: float = 8.0):
+        # (each playback waits for its length plus 1.5 s)
+        return await super().next_run(timeout)
+
+    def make_handler(self, reader, writer) -> VbanSatelliteHandler:
+        self.media = getattr(self, "media", None) or FakeMediaOutput()
+        return VbanSatelliteHandler(
+            reader, writer, self.info, self.receiver, None, media_output=self.media,
+            followup=self.followup, exchange_publisher=self.publisher,
+            satellite_name="Bureau", waiting_cues=self.waiting_cues,
+        )
+
+    async def test_asr_run_only_after_the_beep(self) -> None:
+        await self.next_run()
+        await self.respond("Quelle lumière ?")
+        run = await self.next_run(timeout=8)
+        t_run = time.monotonic()
+        self.assertEqual(run.start_stage, "asr")
+        # Response then beep published; the run only once the beep has played
+        self.assertEqual(len(self.media.published), 2)
+        beep_at = self.media.published[1]
+        self.assertGreaterEqual(
+            t_run - beep_at,
+            VbanSatelliteHandler.BEEP_SECONDS + 1.5 + self.followup.mic_tail_s - 0.1,
+        )
+        # The user has the whole timeout_s to answer, counted from the run
+        self.assertIsNotNone(await self.next_event("audio-stop", timeout=3))
+        self.assertGreaterEqual(time.monotonic() - t_run, self.followup.timeout_s - 0.1)
+
+    # (the base class's VBAN-output tests don't apply here)
+    async def test_question_reply_is_played_before_next_run(self) -> None:
+        pass
+
+    async def test_announcement_does_not_start_a_run(self) -> None:
+        pass
 
 
 THINKING = Cue.tones(THINKING_NOTES, 0.15)
@@ -620,6 +719,12 @@ class FollowupDisabledTest(FollowupTest):
         pass
 
     async def test_announcement_text_does_not_decide_the_follow_up(self) -> None:
+        pass
+
+    async def test_ha_ends_the_follow_up_run(self) -> None:
+        pass
+
+    async def test_no_run_for_5_s_listens_again(self) -> None:
         pass
 
 

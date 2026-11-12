@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.11.1
+
+- **Fix (follow-up without wake word)**: Home Assistant ended the follow-up's listening before the app opened it, then the satellite stopped listening at all. The ASR run was sent with the beep, so Home Assistant's end of speech detection only got silence and stopped after about 0.8 s, while the app waited for the beep to play (1.5 s on a Nest Mini); nothing then brought the satellite back to the wake word.
+  - The `run-pipeline start=asr` is now sent when the listening really opens (beep played, microphone back): `timeout_s` starts at the same moment for the app and for Home Assistant, and `assist_satellite` shows `listening` exactly while the user can answer (`responding` then `idle` during the response and the beep). No microphone audio is sent before; the first ~300 ms after the opening, while Home Assistant starts the run, are kept and sent at the head of the run.
+  - If Home Assistant ends a follow-up run itself (back to idle after listening, or an error), the app cancels its wait and goes back to the wake word right away: `Follow-up: Home Assistant ended the run while listening (…)`.
+  - Safety net: a satellite connected and not muted with no run for 5 s (and nothing under way to start one) listens for the wake word again, with a warning in the log.
+
 ## 3.11.0
 
 - **Wake word clips are validated by hand, one by one.** Nothing is classified automatically, in either direction; only validated clips (good or false) go to WakeForge's inbox.

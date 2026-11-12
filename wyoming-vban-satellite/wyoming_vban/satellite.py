@@ -400,6 +400,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # before the grace period after RunPipeline.
         self._mic_paused = False
         self._mic_resume_at = 0.0
+        # Follow-up: audio of the grace period after RunPipeline, sent first
+        self._hold_grace_audio = False
+        self._grace_audio: list[bytes] = []
+        # HA's assist_satellite showed "listening" for the current run
+        self._assist_listening_seen = False
+        self._run_started_at = 0.0
+        self._idle_guard_task: Optional[asyncio.Task] = None
+        self._vban_end_task: Optional[asyncio.Task] = None
         # Follow-up: mic audio received before this time is replaced by
         # silence (until the listening really opens)
         self._mic_guard_until = 0.0
@@ -450,6 +458,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
             # Don't start streaming yet — wait for the next Describe
             # which HA sends inside _run_pipeline_loop
             self._subscribe_to_vban()
+            if self._idle_guard_task is None or self._idle_guard_task.done():
+                self._idle_guard_task = asyncio.create_task(self._idle_guard())
             if self._was_paused:
                 # Resumed (unmuted): if no Describe follows, start anyway
                 self._was_paused = False
@@ -620,6 +630,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 self._playback_task.add_done_callback(_PLAYBACK_TASKS.discard)
             elif self._vban_sender:
                 task = asyncio.create_task(self._run_ended_after_vban(seq))
+                self._vban_end_task = task
                 _PLAYBACK_TASKS.add(task)
                 task.add_done_callback(_PLAYBACK_TASKS.discard)
             elif seq is not None:
@@ -642,6 +653,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
             if self._driven:
                 # The run is over (no response). Start the next one once HA
                 # has finished ending it; an error never leads to a follow-up.
+                if (self._followup_active and not self._awaiting_response
+                        and not self._followup_timed_out):
+                    _LOGGER.info(
+                        "Follow-up: Home Assistant ended the run %s listening (error %s)",
+                        "before" if self._mic_guard_until > time.monotonic() else "while", code,
+                    )
+                    self._followup_timed_out = True
                 self._awaiting_response = False
                 self._expect_followup = False
                 self._run_ended(self._run_seq, delay=self.ERROR_RESTART_DELAY_S)
@@ -1059,6 +1077,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._stop_thinking()
         self._mic_paused = False
         self._mic_resume_at = time.monotonic() + self.STREAM_GRACE_S
+        self._hold_grace_audio = start_stage == PipelineStage.ASR
+        self._grace_audio = []
+        self._assist_listening_seen = False
+        self._run_started_at = time.monotonic()
         if start_stage == PipelineStage.WAKE:  # no beep guard outside follow-ups
             self._mic_guard_until = 0.0
         _LOGGER.info(
@@ -1178,8 +1200,20 @@ class VbanSatelliteHandler(AsyncEventHandler):
         """State of this satellite's assist_satellite entity in HA (follow-up
         mode): back to idle after a transcript with no response coming
         means HA ended the run (empty response) — no need to wait for
-        RESPONSE_TIMEOUT_S."""
-        if not (self._driven and self._awaiting_response and state == "idle"):
+        RESPONSE_TIMEOUT_S. In a follow-up, idle after "listening" means
+        HA ended the listening (e.g. its end of speech detection)."""
+        if not self._driven:
+            return
+        if state == "listening" and not self._mic_paused:
+            self._assist_listening_seen = True
+            return
+        if (
+            state == "idle" and self._followup_active and not self._awaiting_response
+            and not self._mic_paused and self._assist_listening_seen
+        ):
+            self._followup_ended_by_ha("assist_satellite back to idle")
+            return
+        if not (self._awaiting_response and state == "idle"):
             return
         if time.monotonic() - self._last_transcript_at < 0.5:
             return  # the state before the transcript, arriving late
@@ -1188,6 +1222,78 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._awaiting_response = False
         self._last_transcript = ""
         self._stop_thinking()
+        self._run_ended(self._run_seq)
+
+    # Safety net: never left without listening
+
+    IDLE_GUARD_S = 5.0  # no run (and nothing pending) this long: listen again
+    IDLE_GUARD_CHECK_S = 1.0
+
+    def _without_run(self) -> bool:
+        """Connected, not muted, yet no run listens and nothing is under way
+        that will start one."""
+        if not (self._server_ready and self._is_running) or self.writer.is_closing():
+            return False
+        if not self._streaming:
+            return not (self._restart_task and not self._restart_task.done())
+        if not self._driven:
+            return False  # HA restarts its runs itself
+        if not self._mic_paused:
+            return False  # a run is open
+        pending = (
+            self._next_run_task, self._playback_task, self._vban_end_task, self._restart_task,
+        )
+        busy = (
+            any(t is not None and not t.done() for t in pending)
+            or self._tts_receiving or self._awaiting_response or self._cue_playing()
+            or (self._vban_sender is not None and self._vban_sender.pending_seconds() > 0)
+        )
+        return not busy
+
+    async def _idle_guard(self) -> None:
+        since: Optional[float] = None
+        try:
+            while self._is_running:
+                await asyncio.sleep(self.IDLE_GUARD_CHECK_S)
+                if not self._without_run():
+                    since = None
+                    continue
+                now = time.monotonic()
+                since = since or now
+                if now - since < self.IDLE_GUARD_S:
+                    continue
+                since = None
+                _LOGGER.warning(
+                    "No run for %.0f s while connected: listening for the wake word again",
+                    self.IDLE_GUARD_S,
+                )
+                await self._listen_again()
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 - the safety net must say it fell
+            _LOGGER.exception("Listening safety net stopped")
+
+    async def _listen_again(self) -> None:
+        try:
+            if not self._streaming:
+                await self._send_pipeline_and_stream()
+                return
+            self._cancel_followup_tasks()
+            self._followup_count = 0
+            await self._send_run_pipeline(PipelineStage.WAKE)
+        except (ConnectionError, OSError) as err:
+            _LOGGER.debug("Listening again failed: %s", err)
+
+    def _followup_ended_by_ha(self, why: str) -> None:
+        """HA ended the follow-up run while we waited for the beep or
+        listened: stop waiting, back to the wake word."""
+        _LOGGER.info(
+            "Follow-up: Home Assistant ended the run %s listening (%s)",
+            "before" if self._mic_guard_until > time.monotonic() else "while", why,
+        )
+        self._cancel_watchdog()
+        self._expect_followup = False
+        self._followup_timed_out = True  # (no "done" log: it didn't finish)
         self._run_ended(self._run_seq)
 
     def _on_response_timeout(self) -> None:
@@ -1250,14 +1356,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 _LOGGER.info(
                     "Follow-up: response is a question → listening without wake word"
                 )
-                # Start the ASR run right away, together with the beep, so HA
-                # is ready as soon as the user answers. The mic is silenced
-                # until the beep has really played, then the no-speech
-                # timeout starts.
+                # The ASR run starts when the listening really opens (beep
+                # played, mic back): a run started with the beep got only
+                # silence and HA ended it before the user could answer.
+                # Until then no run is open: the mic audio isn't sent.
                 self._followup_active = True
                 self._mic_guard_until = time.monotonic() + 3600  # until opened
                 try:
-                    await self._send_run_pipeline(PipelineStage.ASR)
                     await self._open_after_beep()
                 finally:
                     # Also when cancelled (an error for this run) or the beep
@@ -1300,6 +1405,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 capped, self.FOLLOWUP_OPEN_MAX_S,
             )
         self._mic_guard_until = time.monotonic()  # what came before is dropped
+        # Now HA listens too: its no-speech end and ours start together
+        await self._send_run_pipeline(PipelineStage.ASR)
         _LOGGER.info(
             "Follow-up: %s, mic back after %.2f s, listening for %g s",
             "beep played" if played is not None else "no beep",
@@ -1536,10 +1643,23 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     if self._mic_paused:
                         continue
 
-                    # Right after RunPipeline: let HA process it first
+                    # Right after RunPipeline: let HA process it first. A
+                    # follow-up keeps that audio (the answer may start right
+                    # away) and sends it at the head of the run.
                     now = time.monotonic()
                     if now < self._mic_resume_at:
+                        if self._hold_grace_audio:
+                            self._grace_audio.append(send_pcm)
                         continue
+                    if self._grace_audio:
+                        held, self._grace_audio = self._grace_audio, []
+                        for audio in held:
+                            await self.write_event(AudioChunk(
+                                rate=WYOMING_RATE, width=WYOMING_WIDTH,
+                                channels=WYOMING_CHANNELS, audio=audio,
+                            ).event())
+                            if self._mirrors:
+                                self._mirrors.mic_sent(audio)
 
                     # A waiting sound is playing: don't capture it
                     if now < self._mic_silence_until:
@@ -1677,7 +1797,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if self._subscribed:
             self._vban_receiver.unsubscribe(self._on_vban_audio)
             self._subscribed = False
-        for task in (self._resume_task, self._transcript_expiry, self._switch_task):
+        for task in (self._resume_task, self._transcript_expiry, self._switch_task,
+                     self._idle_guard_task):
             if task and not task.done():
                 task.cancel()
         # HA closed its side: close ours (the socket would stay half open)
