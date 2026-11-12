@@ -142,6 +142,13 @@ def build_packet(
     return header + payload
 
 
+def _first_channel(audio: bytes, width: int, frame: int) -> bytes:
+    out = bytearray(len(audio) // frame * width)
+    for byte in range(width):
+        out[byte::width] = audio[byte::frame]
+    return bytes(out)
+
+
 def to_mono16(audio: bytes, data_format: int, channels: int) -> bytes:
     """VBAN samples -> mono 16-bit at the same rate.
 
@@ -154,23 +161,23 @@ def to_mono16(audio: bytes, data_format: int, channels: int) -> bytes:
     audio = audio[: len(audio) // frame * frame]
     if not audio:
         return b""
+    if channels > 2:  # the first channel, by strided copies (in C)
+        audio = _first_channel(audio, width, frame)
+        channels = 1
     if data_format in (VBAN_DATATYPE_FLOAT32, VBAN_DATATYPE_FLOAT64):
         floats = array.array("f" if data_format == VBAN_DATATYPE_FLOAT32 else "d", audio)
-        if channels == 2:
-            floats = [(a + b) / 2 for a, b in zip(floats[::2], floats[1::2])]
-        elif channels > 2:
-            floats = floats[::channels]
-        # NaN (s != s) as silence, ±inf clipped
-        return array.array(
-            "h", (0 if s != s else int(max(-1.0, min(1.0, s)) * 32767) for s in floats)
-        ).tobytes()
+        # One Python pass (no numpy here): NaN (s != s) as silence, ±inf
+        # clipped; the two channels are then averaged by audioop
+        pcm = array.array("h", [
+            0 if s != s else 32767 if s >= 1.0 else -32767 if s <= -1.0 else int(s * 32767)
+            for s in floats
+        ]).tobytes()
+        return audioop.tomono(pcm, WYOMING_WIDTH, 0.5, 0.5) if channels == 2 else pcm
     pcm = audio
     if data_format == VBAN_DATATYPE_UINT8:
         pcm = audioop.bias(pcm, 1, -128)
     if channels == 2:
         pcm = audioop.tomono(pcm, width, 0.5, 0.5)
-    elif channels > 2:
-        pcm = b"".join(pcm[i:i + width] for i in range(0, len(pcm), frame))
     if width != WYOMING_WIDTH:
         pcm = audioop.lin2lin(pcm, width, WYOMING_WIDTH)
     return pcm
@@ -626,10 +633,6 @@ class VbanSender:
         if self._socket is None or len(self._pending) < packet_bytes:
             return False
 
-        with memoryview(self._pending) as view:
-            chunk = view[:packet_bytes].tobytes()
-        del self._pending[:packet_bytes]
-
         # The header only changes with the stream name (and the counter)
         if self._header_name != self.stream_name:
             self._header = build_packet(
@@ -638,13 +641,16 @@ class VbanSender:
                 frame_counter=0, data_format=VBAN_DATATYPE_INT16,
             )[:-4]
             self._header_name = self.stream_name
-        packet = self._header + struct.pack("<I", self._frame_counter) + chunk
-
         try:
             target = self._target.get(self.address, self.port)
             if target is None:
                 raise OSError(f"{self.address} not resolved")
-            self._socket.sendto(packet, target)
+            # Sent from the buffer as is: no packet assembled in memory
+            with memoryview(self._pending) as view:
+                self._socket.sendmsg(
+                    [self._header, struct.pack("<I", self._frame_counter),
+                     view[:packet_bytes]], [], 0, target,
+                )
         except OSError as err:
             self._target.invalidate()
             # Rate-limit send-error logs to avoid spam on persistent failures
@@ -654,6 +660,8 @@ class VbanSender:
                 _LOGGER.error("VBAN send error: %s", err)
                 self._last_send_error_log = now
             return False
+        finally:
+            del self._pending[:packet_bytes]  # sent or lost: never sent twice
 
         self._frame_counter = (self._frame_counter + 1) & 0xFFFFFFFF
         return True
@@ -690,7 +698,10 @@ class VbanSender:
                 ):
                     break
                 try:
-                    await asyncio.wait_for(self._data_ready.wait(), timeout=0.5)
+                    if not self._pending:  # nothing to flush: sleep until data
+                        await self._data_ready.wait()
+                    else:
+                        await asyncio.wait_for(self._data_ready.wait(), timeout=0.5)
                 except asyncio.TimeoutError:
                     # No new data for 500ms — if we have any data, flush it,
                     # the last partial packet padded with silence

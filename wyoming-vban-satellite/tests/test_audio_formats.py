@@ -73,7 +73,7 @@ class ConversionTest(unittest.TestCase):
     def test_float_stereo_averaged_nan_silent(self) -> None:
         stereo = array.array("f", [0.5, 0.0, float("nan"), 0.5, float("inf"), 1.0]).tobytes()
         self.assertEqual(list(array.array("h", to_mono16(stereo, VBAN_DATATYPE_FLOAT32, 2))),
-                         [8191, 0, 32767])
+                         [8191, 8191, 32767])  # NaN: silence, the other side kept
 
     def test_12_and_10_bit_formats_refused(self) -> None:
         from wyoming_vban.vban import parse_packet
@@ -87,6 +87,11 @@ class ConversionTest(unittest.TestCase):
     def test_more_channels_keep_the_first(self) -> None:
         four = struct.pack("<8h", 1, 2, 3, 4, 5, 6, 7, 8)
         self.assertEqual(list(array.array("h", to_mono16(four, VBAN_DATATYPE_INT16, 4))), [1, 5])
+        three_24 = b"".join(v.to_bytes(3, "little", signed=True) for v in (256, 9, 9, -512, 9, 9))
+        self.assertEqual(list(array.array("h", to_mono16(three_24, 2, 3))), [1, -2])
+        floats = array.array("f", [0.5, 0.9, 0.9, -0.5, 0.9, 0.9]).tobytes()
+        self.assertEqual(list(array.array("h", to_mono16(floats, VBAN_DATATYPE_FLOAT32, 3))),
+                         [16383, -16383])
 
 
 class SenderTest(unittest.IsolatedAsyncioTestCase):
@@ -351,6 +356,26 @@ class CommandLineTest(unittest.TestCase):
         finally:
             sys.argv = argv
         self.assertEqual((cfg.name, cfg.wake_clips), ("X", True))
+
+
+class CueCacheTest(unittest.TestCase):
+    def test_unchanged_sound_not_read_again(self) -> None:
+        import os
+        from unittest import mock
+        from wyoming_vban.media_player import build_wav
+        from wyoming_vban.runtime import _load_cue
+        from wyoming_vban.satellite import Cue
+        with tempfile.TemporaryDirectory() as folder:
+            path = f"{folder}/bip.wav"
+            Path(path).write_bytes(build_wav(bytes(3200), 16000, 2, 1))
+            with mock.patch.object(Cue, "from_wav", wraps=Cue.from_wav) as read:
+                first = _load_cue(path, None)
+                self.assertIs(_load_cue(path, None), first)
+                self.assertEqual(read.call_count, 1)
+                Path(path).write_bytes(build_wav(bytes(6400), 16000, 2, 1))
+                os.utime(path, ns=(1, 1))  # another date: read again
+                self.assertAlmostEqual(_load_cue(path, None).duration, 0.2, places=2)
+                self.assertEqual(read.call_count, 2)
 
 
 if __name__ == "__main__":

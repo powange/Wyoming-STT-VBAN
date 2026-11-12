@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.12.5
+
+Performance points from the analysis of 3.12.1 (fourth batch). No change of behaviour.
+
+- **Mot-clé tab**: the review asks for the head of the queue only (20 clips, skipped ones last, ordered by the app) instead of up to 500 with their waveforms after each decision; the list shows 100 clips with "Afficher plus". A key, a play or a choice only redraws what changed (the whole tab was rebuilt, up to ~70,000 elements), and a waveform is one SVG path instead of one element per bar.
+- **Status tab**: updated in place (the level bars now move smoothly), not polled while the browser tab is hidden, and the next request waits for the previous answer (no pile-up over a slow Ingress). The level meter's fallback polling is every 200 ms instead of 100 ms.
+- **Auto gain**: the background level is sorted again every 250 ms instead of at every chunk, and the level after the gain is deduced instead of measured again.
+- **Microphone levels**: each packet is measured once (level and meter), without allocating a buffer of zeros to remove the DC offset.
+- **VBAN**: the first channel of a multichannel stream is taken by strided copies in C; float streams are converted in one pass (stereo then averaged by audioop). The debug copies reuse their VBAN header, the VBAN output sends its packets from the buffer without assembling them, and senders no longer wake up twice a second with nothing to send.
+- **Home Assistant**: a registry change of an unrelated number / select (name, icon…) no longer re-reads the whole device and entity registries, and the microphone entities' subscription is kept when they don't change. The state of a speaker not yet seen comes from a subscription to that entity only (get_states sent every state of HA).
+- **Wake word clips**: loading the clips (up to 20,000 descriptions), the purges and the updates after a detection (transcript, response) run in a thread, not in the loop that streams the microphone. Playing a clip looks it up directly instead of sorting them all.
+- **Announcements**: an unchanged sound file isn't read (nor logged) again at each configuration change.
+- **Audio loop**: the "before the listening opened" check and the clip recorder lookup are done once per batch, not per chunk.
+
 ## 3.12.4
 
 Fixes from the analysis of 3.12.1 (third batch: all the remaining bugs).

@@ -358,14 +358,26 @@ class HaStateWatcher:
         changes = self._history.get(entity_id)
         if changes:
             return changes[-1].state
+        # This entity only (get_states would send every state of HA): its
+        # current state comes first on a subscription, then it is closed
+        current: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def on_event(event: dict[str, Any]) -> None:
+            if not current.done():
+                state = ((event.get("a") or {}).get(entity_id) or {}).get("s")
+                current.set_result(state)
+
         try:
-            states = await self.call({"type": "get_states"})
+            sub_id = await self.subscribe(
+                {"type": "subscribe_entities", "entity_ids": [entity_id]}, on_event)
         except (HaUnavailable, HaCommandError):
             return None
-        for state in states or []:
-            if state.get("entity_id") == entity_id:
-                return state.get("state")
-        return None
+        try:
+            return await asyncio.wait_for(current, 5.0)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            await self.unsubscribe(sub_id)
 
     async def _notify(self) -> None:
         async with self._changed:

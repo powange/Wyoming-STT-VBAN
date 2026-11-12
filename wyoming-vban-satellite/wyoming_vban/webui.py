@@ -712,9 +712,17 @@ class WebUI:
         if store is None:
             return web.json_response({"enabled": False, "clips": [], "counts": {}})
         clips = store.list(request.query.get("satellite", ""), request.query.get("status", ""))
+        limit = self._limit(request, 100, 2000)
         return web.json_response({
-            "enabled": True, "clips": clips[:500], "total": len(clips), "counts": store.counts(),
+            "enabled": True, "clips": clips[:limit], "total": len(clips), "counts": store.counts(),
         })
+
+    @staticmethod
+    def _limit(request: web.Request, default: int, most: int) -> int:
+        try:
+            return max(1, min(most, int(request.query.get("limit", default))))
+        except ValueError:
+            return default
 
     async def _clips_review(self, request: web.Request) -> web.Response:
         """The review queue: unsorted clips, "probablement faux" first, then
@@ -723,15 +731,25 @@ class WebUI:
         if store is None:
             return web.json_response({"enabled": False, "queue": []})
         queue = store.review_queue(request.query.get("satellite", ""))
+        # Only the head is shown: the clips skipped (the page's order) go
+        # after the others, then the first ones are sent
+        skipped = [i for i in request.query.get("skipped", "").split(",") if i][-200:]
+        if skipped:
+            rank = {clip_id: n for n, clip_id in enumerate(skipped)}
+            queue = ([c for c in queue if c["id"] not in rank]
+                     + sorted((c for c in queue if c["id"] in rank), key=lambda c: rank[c["id"]]))
+        first = request.query.get("first", "")
+        if first:
+            queue = [c for c in queue if c["id"] == first] + [c for c in queue if c["id"] != first]
         return web.json_response({
-            "enabled": True, "queue": queue[:500], "to_review": len(queue),
-            "done_today": store.done_today(),
+            "enabled": True, "queue": queue[:self._limit(request, 20, 500)],
+            "to_review": len(queue), "done_today": store.done_today(),
         })
 
     async def _clips_audio(self, request: web.Request) -> web.Response:
         store = self._clip_store()
         clip_id = request.query.get("id", "")
-        if not clip_id.replace("-", "").isalnum() or clip_id not in {c["id"] for c in store.list()}:
+        if not clip_id.replace("-", "").isalnum() or not store.has(clip_id):
             raise web.HTTPNotFound(text="Extrait inconnu")
         return web.FileResponse(store.wav_path(clip_id), headers={"Cache-Control": "no-store"})
 

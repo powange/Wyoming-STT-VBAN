@@ -227,6 +227,9 @@ class ClipStore:
         self._changed()
         return dict(info)
 
+    def has(self, clip_id: str) -> bool:
+        return clip_id in self._clips  # (one dict lookup: atomic)
+
     @_locked
     def list(self, satellite: str = "", status: str = "") -> list[dict[str, Any]]:
         clips = [

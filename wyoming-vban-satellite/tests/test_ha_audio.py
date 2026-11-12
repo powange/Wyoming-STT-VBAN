@@ -308,5 +308,48 @@ class FollowHaEntitiesTest(unittest.IsolatedAsyncioTestCase):
                                      self.filter.auto_gain_target_db) == (4.2, "light", -16.0))
 
 
+class HaTrafficTest(unittest.IsolatedAsyncioTestCase):
+    def test_registry_events_filtered(self) -> None:
+        import types
+        from wyoming_vban.ha_audio import HaAudioSync
+        calls = []
+        sync = types.SimpleNamespace(
+            _owners={VOLUME: ("Bureau", "volume")}, REGISTRY_KEYS=HaAudioSync.REGISTRY_KEYS,
+            RESOLVE_DELAY_S=1.0, _schedule_resolve=lambda delay: calls.append(delay))
+
+        def event(**data) -> int:
+            calls.clear()
+            HaAudioSync._on_entity_registry(sync, {"data": data})
+            return len(calls)
+
+        self.assertEqual(event(action="update", entity_id=VOLUME, changes={"icon": "x"}), 1)
+        self.assertEqual(event(action="update", entity_id="number.autre",
+                               changes={"name": "x", "icon": None}), 0)  # not ours
+        self.assertEqual(event(action="update", entity_id="number.autre",
+                               changes={"device_id": "d"}), 1)  # could become ours
+        self.assertEqual(event(action="create", entity_id="select.nouveau"), 1)
+        self.assertEqual(event(action="create", entity_id="light.salon"), 0)
+
+    async def test_state_of_one_entity_only(self) -> None:
+        from wyoming_vban.ha_ws import HaStateWatcher
+        os.environ["SUPERVISOR_TOKEN"] = "token"
+        ha = FakeHomeAssistant()
+        await ha.start()
+        watcher = HaStateWatcher([], url=ha.url)
+        task = asyncio.create_task(watcher.run())
+        try:
+            for _ in range(50):
+                if watcher.connected:
+                    break
+                await asyncio.sleep(0.05)
+            self.assertEqual(await watcher.state_of(VOLUME), "2.5")
+            self.assertEqual(ha.subscribed_entities, [VOLUME])  # not get_states
+            self.assertIsNone(await watcher.state_of("media_player.inconnu"))
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await ha.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

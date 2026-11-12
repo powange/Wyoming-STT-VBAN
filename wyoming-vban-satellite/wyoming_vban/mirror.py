@@ -13,6 +13,7 @@ import audioop
 import ipaddress
 import logging
 import socket
+import struct
 import time
 from typing import Optional
 
@@ -45,6 +46,8 @@ class RawMirror:
         self._counter = 0
         self._last_error_log = 0.0
         self._target = UdpTarget()
+        self._header = b""  # VBAN header without its frame counter
+        self._header_key: Optional[tuple[int, int, int, int]] = None
 
     def open(self) -> None:
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -54,21 +57,22 @@ class RawMirror:
     def on_packet(self, packet: VbanPacket) -> None:
         if self._socket is None:
             return
-        data = build_packet(
-            payload=packet.payload,
-            stream_name=self.stream_name,
-            sample_rate=packet.sample_rate,
-            channels=packet.channels,
-            samples_per_frame=packet.samples_per_frame,
-            frame_counter=self._counter,
-            data_format=packet.data_format,
-        )
+        key = (packet.sample_rate, packet.channels, packet.samples_per_frame,
+               packet.data_format)
+        if key != self._header_key:  # the header only changes with the format
+            self._header = build_packet(
+                payload=b"", stream_name=self.stream_name, sample_rate=packet.sample_rate,
+                channels=packet.channels, samples_per_frame=packet.samples_per_frame,
+                frame_counter=0, data_format=packet.data_format,
+            )[:-4]
+            self._header_key = key
+        counter = struct.pack("<I", self._counter)
         self._counter = (self._counter + 1) & 0xFFFFFFFF
         try:
             target = self._target.get(self.address, self.port)
             if target is None:
                 raise OSError(f"{self.address} not resolved")
-            self._socket.sendto(data, target)
+            self._socket.sendmsg([self._header, counter, packet.payload], [], 0, target)
         except OSError as err:
             self._target.invalidate()
             now = time.monotonic()

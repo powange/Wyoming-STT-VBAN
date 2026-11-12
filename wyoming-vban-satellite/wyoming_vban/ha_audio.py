@@ -126,6 +126,11 @@ class HaAudioSync:
     """
 
     RESOLVE_DELAY_S = 1.0  # registry events come in bursts
+    # Registry fields that find an entity (see resolve_entities)
+    REGISTRY_KEYS = frozenset({
+        "device_id", "entity_id", "platform", "translation_key", "unique_id",
+        "disabled_by", "original_name",
+    })
     RETRY_MIN_S = 5.0  # HA connected but not answering: tried again later
     RETRY_MAX_S = 60.0
 
@@ -227,8 +232,16 @@ class HaAudioSync:
         a number / select that could be one, is worth reading the registries."""
         data = event.get("data") or {}
         ids = {data.get("entity_id") or "", data.get("old_entity_id") or ""}
-        if ids & set(self._owners) or any(
-            i.split(".", 1)[0] in ("number", "select") for i in ids if i
+        if ids & set(self._owners):
+            self._schedule_resolve(self.RESOLVE_DELAY_S)
+            return
+        if not any(i.split(".", 1)[0] in ("number", "select") for i in ids if i):
+            return
+        # Another number / select: only a change that could make it one of
+        # ours (a new one, its device, its id…), not e.g. its name or icon
+        changes = data.get("changes")
+        if data.get("action") != "update" or not isinstance(changes, dict) or (
+            set(changes) & self.REGISTRY_KEYS
         ):
             self._schedule_resolve(self.RESOLVE_DELAY_S)
 
@@ -266,11 +279,9 @@ class HaAudioSync:
                     self._schedule_resolve(self.RESOLVE_DELAY_S, retry=True)
 
     async def _resolve_locked(self) -> None:
-        if self._state_sub is not None:
-            await self.watcher.unsubscribe(self._state_sub)
-            self._state_sub = None
         wanted = sorted(set(self.names) | set(self.state_names))
         if not wanted:
+            await self._unsubscribe_states()
             self.entities, self._owners = {}, {}
             return
         devices = await self.watcher.call({"type": "config/device_registry/list"})
@@ -283,10 +294,14 @@ class HaAudioSync:
                    or (s == "assist_state" and name in self.state_names)}
             for name, found in found_all.items()
         }
-        self._owners = {
+        owners = {
             entity_id: (name, setting)
             for name, found in self.entities.items() for setting, entity_id in found.items()
         }
+        # Same entities, still subscribed: nothing to do (the subscription
+        # already follows their states)
+        unchanged = owners == self._owners and self._state_sub is not None
+        self._owners = owners
         for name in self.names:
             missing = tuple(s for s in MIC_SETTINGS if s not in self.entities.get(name, {}))
             if missing and self._missing_logged.get(name) != missing:
@@ -296,6 +311,9 @@ class HaAudioSync:
                     "integration under this name?", name, ", ".join(missing),
                 )
             self._missing_logged[name] = missing
+        if unchanged:
+            return
+        await self._unsubscribe_states()
         if not self._owners:
             return
         # Only these entities: their current states come first ("a"), then
@@ -304,6 +322,11 @@ class HaAudioSync:
             {"type": "subscribe_entities", "entity_ids": sorted(self._owners)},
             self._on_entities,
         )
+
+    async def _unsubscribe_states(self) -> None:
+        if self._state_sub is not None:
+            sub_id, self._state_sub = self._state_sub, None
+            await self.watcher.unsubscribe(sub_id)
 
     def _on_entities(self, event: dict[str, Any]) -> None:
         changed = set()

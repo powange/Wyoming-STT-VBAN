@@ -45,7 +45,7 @@ def _db(value: float) -> float:
     return 20 * math.log10(max(value, 1) / FULL_SCALE)
 
 
-def _clipped(pcm: bytes) -> int:
+def _clipped(pcm: bytes) -> int:  # (also used by the runtime)
     """Number of samples at full scale (positive or negative): 16-bit little
     endian, so the high bytes are every second byte."""
     high = pcm[1: len(pcm) // WYOMING_WIDTH * WYOMING_WIDTH: WYOMING_WIDTH]
@@ -69,7 +69,10 @@ class LevelMeter:
         samples = len(pcm) // WYOMING_WIDTH
         rms = audioop.rms(pcm, WYOMING_WIDTH)
         peak = audioop.max(pcm, WYOMING_WIDTH)
-        clipped = _clipped(pcm) if peak >= CLIP_THRESHOLD else 0
+        self.add_measured(samples, rms, peak, _clipped(pcm) if peak >= CLIP_THRESHOLD else 0)
+
+    def add_measured(self, samples: int, rms: float, peak: int, clipped: int) -> None:
+        """A chunk already measured (the satellite measures each packet once)."""
         now = time.monotonic()
         self._chunks.append((now, rms * rms * samples, samples, peak, clipped))
         while self._chunks and now - self._chunks[0][0] > self.HISTORY_S:

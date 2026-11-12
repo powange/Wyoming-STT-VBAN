@@ -28,7 +28,8 @@ from .discovery import Discovery
 from .wake_clips import ClipRecorder, ClipStore
 from .ha_audio import HaAudioSync, HaMicSettings, auto_gain_settings
 from .ha_ws import SUPERVISOR_WS_URL, HaCommandError, HaStateWatcher, HaUnavailable
-from .calibration import LevelMeter
+from .calibration import CLIP_THRESHOLD, LevelMeter
+from .calibration import _clipped as calibration_clipped
 from .mic_filter import MicFilter
 from .mirror import SatelliteMirrors
 from .media_player import MediaPlayerOutput, build_wav, detect_local_ip
@@ -77,11 +78,23 @@ def _build_zeroconf_name(satellite_name: str, port: int) -> str:
     return f"{safe_name}-{port}"
 
 
+# Sounds read: path -> ((modification time, size), sound). Each change of
+# configuration builds every satellite's announcements again: an unchanged
+# file isn't read (nor logged) again
+_CUE_CACHE: dict[str, tuple[tuple[int, int], Cue]] = {}
+
+
 def _load_cue(path: str, default: Optional[Cue]) -> Optional[Cue]:
     """WAV file if configured and readable, otherwise the default sound."""
     if path:
         try:
+            stat = os.stat(path)
+            key = (stat.st_mtime_ns, stat.st_size)
+            cached = _CUE_CACHE.get(path)
+            if cached is not None and cached[0] == key:
+                return cached[1]
             cue = Cue.from_wav(path)
+            _CUE_CACHE[path] = (key, cue)
             _LOGGER.info("  Sound %s: %.2fs", path, cue.duration)
             if cue.duration > 1.0:
                 _LOGGER.warning(
@@ -671,10 +684,22 @@ class SatelliteRunner:
                 _LOGGER.exception("Calibration audio tap failed: removed")
                 self._taps.remove(tap)
         if pcm16:
+            # Measured once (level and vu-meter) without the DC offset; the
+            # peak comes from the extremes, no zero buffer is allocated
             dc = audioop.avg(pcm16, 2)
-            centered = audioop.add(pcm16, audioop.bias(bytes(len(pcm16)), 2, -dc), 2)
-            self.meter_in.add(centered)
+            low, high = audioop.minmax(pcm16, 2)
+            if dc and -32768 <= low - dc and high - dc <= 32767:
+                centered = audioop.bias(pcm16, 2, -dc)  # (wraps around otherwise)
+            elif dc:
+                centered = audioop.add(pcm16, audioop.bias(bytes(len(pcm16)), 2, -dc), 2)
+            else:
+                centered = pcm16
             rms = audioop.rms(centered, 2)
+            peak = min(32767, max(high - dc, dc - low))
+            self.meter_in.add_measured(
+                len(pcm16) // 2, rms, peak,
+                calibration_clipped(pcm16) if max(high, -low) >= CLIP_THRESHOLD else 0,
+            )
             self._levels.append((now, _db(rms / 32768), abs(dc) / 32768))
         self._expire_levels(now)
         self.mic_feed.dispatch(packet, pcm16)
@@ -932,14 +957,16 @@ class AppRuntime:
 
     # Wake word clips
 
-    def _sync_clips(self, options: AppOptions, purge: bool = True) -> None:
+    async def _sync_clips(self, options: AppOptions, purge: bool = True) -> None:
         """Open (or close) the clip store, give each satellite its recorder
         (purged with the new limits unless purge is False: see _clean_up)."""
         if not options.wake_clips_enabled:
             self.clip_store = None
         elif self.clip_store is None:
             try:
-                self.clip_store = ClipStore(
+                # (reads every clip's description: not in the event loop)
+                self.clip_store = await asyncio.to_thread(
+                    ClipStore,
                     self.clips_root, self.clips_inbox,
                     options.wake_clips_retention_days, options.wake_clips_max,
                     # (called from the thread writing a clip, too)
@@ -953,7 +980,7 @@ class AppRuntime:
             self.clip_store.retention_days = options.wake_clips_retention_days
             self.clip_store.max_clips = options.wake_clips_max
             if purge:
-                self.clip_store.purge()
+                await asyncio.to_thread(self.clip_store.purge)
         for runner in self._runners.values():
             self._attach_clips(runner)
         # The review notification follows its option (and the clips' one)
@@ -1205,7 +1232,7 @@ class AppRuntime:
         self.options = options
         logging.getLogger().setLevel(logging.DEBUG if options.debug_logging else logging.INFO)
         _LOGGER.info("Starting %d satellite(s)", len(options.satellites))
-        self._sync_clips(options)
+        await self._sync_clips(options)
         cues = self._build_cues(options)
         self._sync_phrases(cues)
         remove_legacy_cache()
@@ -1291,7 +1318,7 @@ class AppRuntime:
                 await asyncio.wait_for(self._change_failed.wait(), self.STARTUP_CHECK_S)
             except asyncio.TimeoutError:
                 _LOGGER.info("New configuration applied")
-                self._clean_up()
+                await self._clean_up()
                 return None
             error = self.failure
             _LOGGER.error("New configuration failed (%s): restoring the previous one", error)
@@ -1306,13 +1333,13 @@ class AppRuntime:
         finally:
             self._changing = False
 
-    def _clean_up(self) -> None:
+    async def _clean_up(self) -> None:
         """A change is confirmed: clips beyond the new limits, phrases no
-        longer used."""
+        longer used (files: not in the event loop)."""
         try:
             if self.clip_store is not None:
-                self.clip_store.purge()
-            remove_stale_phrases(self._used_phrases, self.cache_dir)
+                await asyncio.to_thread(self.clip_store.purge)
+            await asyncio.to_thread(remove_stale_phrases, self._used_phrases, self.cache_dir)
         except OSError as err:
             _LOGGER.error("Clean-up after the change: %s", err)
 
@@ -1350,7 +1377,7 @@ class AppRuntime:
         logging.getLogger().setLevel(logging.DEBUG if new.debug_logging else logging.INFO)
         # Files are deleted once the change is confirmed (_clean_up): not
         # by a configuration that is refused and rolled back
-        self._sync_clips(new, purge=False)
+        await self._sync_clips(new, purge=False)
         self.publisher.enabled = new.publish_exchanges
         self._sync_phrases(cues, clean=False)
         await self._set_watcher(self._needs_watcher(new, cues), new)

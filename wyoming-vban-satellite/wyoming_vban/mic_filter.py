@@ -61,6 +61,12 @@ class AutoGain:
         self.gain_db = 0.0
         self._levels: collections.deque[tuple[float, float]] = collections.deque()
         self._audio_s = 0.0  # audio time, so offline processing works too
+        # The background, sorted again every FLOOR_EVERY_S (not every chunk)
+        self._floor: Optional[float] = None
+        self._floor_at = -math.inf
+        self.out_db: Optional[float] = None  # level of the last chunk out
+
+    FLOOR_EVERY_S = 0.25
 
     @property
     def floor_db(self) -> Optional[float]:
@@ -77,7 +83,9 @@ class AutoGain:
             self._levels.append((self._audio_s, level))
             while self._audio_s - self._levels[0][0] > self.FLOOR_WINDOW_S:
                 self._levels.popleft()
-        floor = self.floor_db
+        if self._audio_s - self._floor_at >= self.FLOOR_EVERY_S or self._floor is None:
+            self._floor, self._floor_at = self.floor_db, self._audio_s
+        floor = self._floor
         if floor is not None and level > floor + self.SPEECH_MARGIN_DB:
             target = min(self.MAX_GAIN_DB, max(self.MIN_GAIN_DB, self.target_db - level))
             if target > self.gain_db:
@@ -85,7 +93,10 @@ class AutoGain:
             else:
                 self.gain_db = max(target, self.gain_db - self.DOWN_DB_PER_S * seconds)
         if abs(self.gain_db) < 0.1:
+            self.out_db = level
             return pcm
+        # Deduced, not measured again (clipping aside: a status figure)
+        self.out_db = min(0.0, level + self.gain_db)
         # audioop.mul clips at full scale instead of wrapping around
         return audioop.mul(pcm, WYOMING_WIDTH, 10 ** (self.gain_db / 20))
 
@@ -193,7 +204,9 @@ class MicFilter:
             return raw
         if pcm:
             now = time.monotonic()
-            self._levels.append((now, _db(pcm)))
+            # (the auto gain, last step, knows the level it outputs)
+            out_db = self._agc.out_db if self._agc is not None else None
+            self._levels.append((now, out_db if out_db is not None else _db(pcm)))
             while self._levels and now - self._levels[0][0] > self.STATS_WINDOW_S:
                 self._levels.popleft()
         return pcm

@@ -66,6 +66,13 @@ def _as_satellite(method):
 
     return wrapper
 
+def _update_clip(store, clip_id: str, fields: dict) -> None:
+    try:
+        store.update(clip_id, **fields)
+    except OSError as err:
+        _LOGGER.error("Wake word clip not updated: %s", err)
+
+
 # Media player playbacks outlive their handler (HA may reconnect while a
 # response plays); keep strong references so they aren't garbage-collected.
 _PLAYBACK_TASKS: "set[asyncio.Task]" = set()
@@ -1254,10 +1261,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         clip["meta"].update(fields)
         recorder = self._clip_recorder()
         if clip["id"] is not None and recorder is not None:
-            try:
-                recorder.store.update(clip["id"], **fields)
-            except OSError as err:
-                _LOGGER.error("Wake word clip not updated: %s", err)
+            # Files written in a thread: not in the loop that streams the mic
+            task = asyncio.create_task(asyncio.to_thread(
+                _update_clip, recorder.store, clip["id"], fields))
+            _PLAYBACK_TASKS.add(task)
+            task.add_done_callback(_PLAYBACK_TASKS.discard)
         if close:
             self._clip = None
 
@@ -1713,7 +1721,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     # Take what else is waiting in one go (fewer wake-ups)
                     while not self._audio_queue.empty():
                         items.append(self._audio_queue.get_nowait())
-                    pre_open = [t < self._mic_guard_until for t, _ in items]
+                    # Oldest first: if the first one isn't early, none is
+                    guard = self._mic_guard_until
+                    pre_open = [t < guard for t, _ in items] if items[0][0] < guard else None
                     pcm = b"".join(audio for _, audio in items)
                 except asyncio.TimeoutError:
                     timeouts += 1
@@ -1737,7 +1747,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                         if not filter_error_logged:
                             _LOGGER.exception("Microphone clean-up failed: raw audio sent")
                             filter_error_logged = True
-                if any(pre_open):
+                if pre_open is not None and any(pre_open):
                     # Received before the follow-up listening opened (beep,
                     # end of the response): HA gets silence instead. Still
                     # processed above, so the clean-up keeps its state.
@@ -1749,6 +1759,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                         pcm = bytes(cut) + pcm[cut:]
                     audio_buffer[:] = bytes(len(audio_buffer))  # older, kept for chunking
                 audio_buffer.extend(pcm)
+                recorder = self._clip_recorder()  # once per batch, not per chunk
 
                 # Send when we have enough data
                 while len(audio_buffer) >= target_bytes:
@@ -1834,7 +1845,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     await self.write_event(chunk.event())
                     if self._mirrors:
                         self._mirrors.mic_sent(send_pcm)
-                    if (recorder := self._clip_recorder()) is not None:
+                    if recorder is not None:
                         if self._wake_sample0_pending:
                             self._wake_sample0 = recorder.samples_sent
                             self._wake_sample0_pending = False

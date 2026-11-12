@@ -426,6 +426,21 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(([c["id"] for c in body["queue"]], body["to_review"], body["done_today"]),
                          ([second], 1, 1))
 
+    async def test_review_sends_the_head_of_the_queue(self) -> None:
+        store = self.runtime.clip_store
+        ids = [store.add("Salon", "dis_moi_jarvis-6", chunk(500)) for _ in range(25)]
+        async with self.http.get(self.url("/api/wake_clips/review")) as resp:
+            body = await resp.json()
+        self.assertEqual((len(body["queue"]), body["to_review"]), (20, 25))
+        self.assertEqual(body["queue"][0]["id"], ids[0])  # oldest first
+        query = f"skipped={ids[0]}&first={ids[24]}&limit=500"
+        async with self.http.get(self.url(f"/api/wake_clips/review?{query}")) as resp:
+            queue = [c["id"] for c in (await resp.json())["queue"]]
+        self.assertEqual((queue[0], queue[1], queue[-1]), (ids[24], ids[1], ids[0]))
+        async with self.http.get(self.url("/api/wake_clips?limit=5")) as resp:
+            body = await resp.json()
+        self.assertEqual((len(body["clips"]), body["total"]), (5, 25))
+
     async def test_review_notification_over_20(self) -> None:
         sent = []
 
