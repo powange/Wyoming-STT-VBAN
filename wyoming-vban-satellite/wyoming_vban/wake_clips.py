@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -76,10 +77,6 @@ def suggest(meta: dict[str, Any]) -> tuple[str, str]:
     return "a_verifier", "pas de réponse"
 
 
-def suggestion(meta: dict[str, Any]) -> str:
-    return suggest(meta)[0]
-
-
 def _db(value: float) -> float:
     return round(20 * math.log10(max(value, 1) / 32768), 1)
 
@@ -93,6 +90,19 @@ def peaks(pcm: bytes, count: int = 120) -> list[float]:
             for i in range(0, len(pcm) - WYOMING_WIDTH + 1, step)][:count]
 
 
+def _locked(method):
+    """One clip store call at a time: clips are added and sorted in worker
+    threads while the event loop lists and updates them."""
+
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    wrapper.__name__ = method.__name__
+    wrapper.__doc__ = method.__doc__
+    return wrapper
+
+
 class ClipStore:
     """Clips in the app's data folder; sorted ones mirrored to the inbox."""
 
@@ -101,6 +111,7 @@ class ClipStore:
         retention_days: int = 30, max_clips: int = 2000,
         on_change: Optional[Any] = None,
     ):
+        self._lock = threading.RLock()
         self.on_change = on_change  # called after a clip is added or sorted
         self.root = Path(root)
         self.inbox = Path(inbox)
@@ -135,6 +146,7 @@ class ClipStore:
 
     # Clips
 
+    @_locked
     def add(self, satellite: str, wake_word: str, pcm: bytes, **meta: Any) -> str:
         """A new clip (16 kHz mono 16-bit); returns its id."""
         now = time.time()
@@ -164,6 +176,7 @@ class ClipStore:
             except Exception:  # noqa: BLE001 - a notification must not lose the clip
                 _LOGGER.exception("Wake word clips: change callback failed")
 
+    @_locked
     def update(self, clip_id: str, **fields: Any) -> None:
         """What followed the detection (transcript, response, STT error)."""
         info = self._clips.get(clip_id)
@@ -175,6 +188,7 @@ class ClipStore:
         if info["status"] in INBOX_FOLDERS:
             self._write_manifest(wake_word_folder(info["wake_word"]))
 
+    @_locked
     def classify(self, clip_id: str, status: str) -> dict[str, Any]:
         """Sort a clip; the inbox follows (moved when changed, removed when
         ignored or unsorted). KeyError / ValueError if unknown."""
@@ -186,31 +200,32 @@ class ClipStore:
         self._write_meta(info)
         self._sync_inbox(info)
         self._changed()
-        return info
+        return dict(info)
 
-    def last(self, satellite: str) -> Optional[dict[str, Any]]:
-        clips = [c for c in self._clips.values() if c["satellite"] == satellite]
-        return max(clips, key=lambda c: c["time"]) if clips else None
-
+    @_locked
     def list(self, satellite: str = "", status: str = "") -> list[dict[str, Any]]:
         clips = [
             c for c in self._clips.values()
             if (not satellite or c["satellite"] == satellite)
             and (not status or c["status"] == status)
         ]
-        return sorted(clips, key=lambda c: c["time"], reverse=True)
+        # Copies: the caller reads them outside the lock
+        return [dict(c) for c in sorted(clips, key=lambda c: c["time"], reverse=True)]
 
+    @_locked
     def review_queue(self, satellite: str = "") -> list[dict[str, Any]]:
         """Unsorted clips to validate by hand: the "probablement faux" first,
         then the oldest first."""
         clips = self.list(satellite, "non_classe")
         return sorted(clips, key=lambda c: (c["suggestion"] != "probablement_faux", c["time"]))
 
+    @_locked
     def done_today(self) -> int:
         start = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
         return sum(1 for c in self._clips.values()
                    if c["status"] != "non_classe" and (c.get("classified_at") or 0) >= start)
 
+    @_locked
     def report_false(self, satellite: str = "") -> Optional[dict[str, Any]]:
         """"That wasn't for you" from Home Assistant: the satellite's last
         clip is flagged for the review (not classified: it is still to be
@@ -221,6 +236,7 @@ class ClipStore:
         self.update(clips[0]["id"], reported_false=True)
         return clips[0]
 
+    @_locked
     def counts(self) -> dict[str, dict[str, dict[str, int]]]:
         """day -> satellite -> {bon, faux, non_classe, ignore}."""
         days: dict[str, dict[str, dict[str, int]]] = {}
@@ -233,6 +249,7 @@ class ClipStore:
 
     # Retention
 
+    @_locked
     def purge(self) -> None:
         """Older than retention_days: unsorted and ignored clips go (sorted
         ones are training data). Over max_clips: unsorted first, then

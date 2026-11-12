@@ -198,7 +198,7 @@
   .meters .label, .meters .value { font-size: 12px; color: var(--muted); }
   .meters .value { min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
   .meter { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
-  .meter > div { height: 100%; background: var(--accent); transition: width .3s; }
+  .meter > div { height: 100%; background: var(--accent); }
   .meter.clean > div { background: var(--ok); }
   .dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
   .dot.on { background: var(--ok); }
@@ -493,7 +493,7 @@ function testButton(sat, signal) {
         });
         const body = await resp.json();
         if (!resp.ok) {
-          say(body.error === "Unknown satellite"
+          say(body.error === "Satellite pas démarré"
               ? `« ${name} » ne tourne pas encore : enregistrez d'abord.`
               : body.error || `Erreur ${resp.status}`, "error");
         } else if (!body.played.length) say("Rien à jouer (désactivé, ou pas de sortie).");
@@ -1782,7 +1782,12 @@ document.addEventListener("keydown", (event) => {
   } else if (clip && key === " ") {
     playClip(clip);
   } else if (clip && { b: 1, f: 1, i: 1 }[key]) {
-    classifyClip(clip, { b: "bon", f: "faux", i: "ignore" }[key]);
+    // Like the buttons: only a clip that has been heard is validated
+    if (!wake.listened.has(clip.id)) {
+      say("Écoutez l'extrait avant de le classer (Espace).", "error");
+    } else {
+      classifyClip(clip, { b: "bon", f: "faux", i: "ignore" }[key]);
+    }
   } else {
     return;
   }

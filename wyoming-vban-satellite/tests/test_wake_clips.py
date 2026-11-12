@@ -22,7 +22,7 @@ from wyoming.wake import Detection
 
 from test_followup import FollowupTest
 from wyoming_vban.satellite import FollowupSettings, VbanSatelliteHandler
-from wyoming_vban.wake_clips import ClipRecorder, ClipStore, suggest, suggestion, wake_word_folder
+from wyoming_vban.wake_clips import ClipRecorder, ClipStore, suggest, wake_word_folder
 
 RATE = 16000
 CHUNK = 1024  # samples, like the satellite's chunks to HA
@@ -89,10 +89,10 @@ class StoreTest(StoreCase):
         return self.store.add(satellite, "dis_moi_jarvis-6", chunk(1000) * 47, **meta)
 
     def test_suggestion(self) -> None:
-        self.assertEqual(suggestion({"transcript": ""}), "probablement_faux")
-        self.assertEqual(suggestion({"transcript": "*bip*"}), "probablement_faux")
-        self.assertEqual(suggestion({"transcript": "..."}), "probablement_faux")
-        self.assertEqual(suggestion({"stt_error": "stt-no-text-recognized"}),
+        self.assertEqual(suggest({"transcript": ""})[0], "probablement_faux")
+        self.assertEqual(suggest({"transcript": "*bip*"})[0], "probablement_faux")
+        self.assertEqual(suggest({"transcript": "..."})[0], "probablement_faux")
+        self.assertEqual(suggest({"stt_error": "stt-no-text-recognized"})[0],
                          "probablement_faux")
         self.assertEqual(suggest({"transcript": "allume la lumière", "response": "C'est fait."}),
                          ("probablement_bon", "phrase normale"))
@@ -103,8 +103,8 @@ class StoreTest(StoreCase):
         self.assertEqual(suggest({"transcript": "le chien", "response": "Désolé, je n'ai pas compris."}),
                          ("probablement_faux", "conversation captée"))
         self.assertEqual(suggest({"transcript": "*bip*"})[1], "bip capté")
-        self.assertEqual(suggestion({"transcript": "allume la lumière"}), "a_verifier")  # no response
-        self.assertEqual(suggestion({"transcript": None}), "a_verifier")
+        self.assertEqual(suggest({"transcript": "allume la lumière"})[0], "a_verifier")  # no response
+        self.assertEqual(suggest({"transcript": None})[0], "a_verifier")
         self.assertEqual(suggest({"transcript": "allume", "response": "Ok.", "reported_false": True}),
                          ("probablement_faux", "signalé faux depuis Home Assistant"))
 
@@ -187,6 +187,30 @@ class StoreTest(StoreCase):
         ids = {c["id"] for c in self.store.list()}
         self.assertEqual(ids, {kept})  # sorted clips are training data
 
+    def test_threads_and_loop_together(self) -> None:
+        # Clips added in worker threads while the list is read (B4)
+        import threading
+        errors = []
+
+        def writer() -> None:
+            try:
+                for _ in range(40):
+                    self.add()
+            except Exception as err:  # noqa: BLE001
+                errors.append(err)
+
+        threads = [threading.Thread(target=writer) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        while any(t.is_alive() for t in threads):
+            self.store.list()
+            self.store.counts()
+            self.store.review_queue()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.store.list()), 120)
+
     def test_reloaded_from_disk(self) -> None:
         clip_id = self.add(transcript="bonjour")
         again = ClipStore(str(self.store.root), str(self.inbox))
@@ -219,7 +243,7 @@ class CaptureTest(FollowupTest):
     async def feed_mic(self, seconds: float) -> None:
         from wyoming_vban.vban import VbanPacket
         for i in range(int(seconds / 0.016)):
-            self.receiver.callback(VbanPacket(
+            self.receiver.feed(VbanPacket(
                 sample_rate=16000, samples_per_frame=256, channels=1, data_format=1,
                 codec=0, stream_name="AtomBureau", frame_counter=i,
                 payload=b"\x00\x10" * 256))

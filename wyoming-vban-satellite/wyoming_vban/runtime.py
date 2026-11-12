@@ -22,6 +22,7 @@ from .config import (
     SatelliteConfig,
     validate_mirrors,
 )
+from .const import WYOMING_CHANNELS, WYOMING_RATE, WYOMING_WIDTH
 from .discovery import Discovery
 from .wake_clips import ClipRecorder, ClipStore
 from .ha_audio import HaAudioSync, HaMicSettings, auto_gain_settings
@@ -52,16 +53,12 @@ from .vban import VbanPacket, VbanReceiver, VbanSender, WyomingConverter
 
 _LOGGER = logging.getLogger(__name__)
 
-WYOMING_RATE_FOR_SILENCE = 16000
 
-# Name of the satellite owning the current task, prefixed to log lines
-# (defined with the handlers, which set it in the calls they receive)
-_SATELLITE_NAME = SATELLITE_NAME
 
 
 class SatelliteLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        name = _SATELLITE_NAME.get()
+        name = SATELLITE_NAME.get()
         record.satellite = f"[{name}] " if name else ""
         return True
 
@@ -213,7 +210,7 @@ class MicFeed:
     def __init__(self) -> None:
         self._callbacks: list[Callable[[VbanPacket, bytes], None]] = []
 
-    def subscribe(self, callback: Callable[[VbanPacket, bytes], None], stream_name: str = "") -> None:
+    def subscribe(self, callback: Callable[[VbanPacket, bytes], None]) -> None:
         if callback in self._callbacks:
             return
         if self._callbacks:
@@ -330,7 +327,7 @@ class SatelliteRunner:
         return self.task
 
     async def _run_rtsp(self) -> None:
-        _SATELLITE_NAME.set(self.cfg.name)
+        SATELLITE_NAME.set(self.cfg.name)
         assert self.rtsp is not None
         await self.rtsp.run()
 
@@ -362,7 +359,7 @@ class SatelliteRunner:
     async def _run(self) -> None:
         """Run until cancelled (former run_satellite)."""
         cfg = self.cfg
-        _SATELLITE_NAME.set(cfg.name)
+        SATELLITE_NAME.set(cfg.name)
         if self.rtsp is not None:
             _LOGGER.info(
                 "Starting: Wyoming port %d, microphone from camera stream %s",
@@ -427,7 +424,6 @@ class SatelliteRunner:
                 vban_receiver=self.mic_feed,
                 vban_sender=self.vban_sender,
                 media_output=self.media_output,
-                vban_stream_name=cfg.vban_receive_stream_name,
                 mic_mute=self.mic_mute,
                 followup=self.followup,
                 exchange_publisher=self.publisher,
@@ -506,8 +502,8 @@ class SatelliteRunner:
     # Cast keep awake
 
     KEEP_AWAKE_EVERY_S = 240.0  # Cast closes its app after 5 min idle
-    SILENCE_WAV = build_wav(bytes(int(WYOMING_RATE_FOR_SILENCE * 0.2) * 2),
-                            WYOMING_RATE_FOR_SILENCE, 2, 1)
+    SILENCE_WAV = build_wav(bytes(int(WYOMING_RATE * 0.2) * WYOMING_WIDTH),
+                            WYOMING_RATE, WYOMING_WIDTH, WYOMING_CHANNELS)
 
     async def _keep_cast_awake(self) -> None:
         """media_player.keep_awake: a short silence every 4 min while the
@@ -556,11 +552,11 @@ class SatelliteRunner:
         self.mic_filter.configure(*self.mic_settings())
         if self.mic_settings_applied() == before:
             return
-        token = _SATELLITE_NAME.set(self.cfg.name)
+        token = SATELLITE_NAME.set(self.cfg.name)
         try:
             _LOGGER.info("HA → microphone: %s", self._describe_mic())
         finally:
-            _SATELLITE_NAME.reset(token)
+            SATELLITE_NAME.reset(token)
 
     def mic_settings_applied(self) -> tuple[str, bool, float, float]:
         f = self.mic_filter
@@ -626,12 +622,12 @@ class SatelliteRunner:
         self._unsubscribe()
         await self.mirrors.reconfigure(mirrors)
         self._subscribe()
-        token = _SATELLITE_NAME.set(cfg.name)
+        token = SATELLITE_NAME.set(cfg.name)
         try:
             _LOGGER.info("Settings applied without restart")
             self._log_settings()
         finally:
-            _SATELLITE_NAME.reset(token)
+            SATELLITE_NAME.reset(token)
 
     # Status and tests
 
@@ -809,10 +805,6 @@ class AppRuntime:
         self.ha_ws_url = SUPERVISOR_WS_URL
         self.discovery = Discovery()  # one mDNS responder for all satellites
         self.publisher = ExchangePublisher(False, None)
-
-    @property
-    def watcher(self) -> Optional[HaStateWatcher]:
-        return self._watcher
 
     @property
     def phrases(self) -> list[TtsPhrase]:
@@ -1193,10 +1185,6 @@ class AppRuntime:
             self.publisher.watcher = None
             self._stopping = False
 
-    async def reload(self, options: AppOptions) -> Optional[str]:
-        """Restart everything with new options (see apply)."""
-        return await self._change(options, self._restart_all)
-
     async def apply(self, options: AppOptions) -> tuple[Optional[str], list[str]]:
         """Apply new (validated) options, restarting only what must be.
 
@@ -1274,10 +1262,6 @@ class AppRuntime:
         except Exception:  # noqa: BLE001 - fall back to a full restart
             _LOGGER.exception("Error while restoring the previous configuration")
         return False
-
-    async def _restart_all(self, options: AppOptions) -> None:
-        await self.stop()
-        await self.start(options)
 
     async def _apply_changes(self, new: AppOptions, done: list[str]) -> None:
         old = self.options

@@ -49,10 +49,19 @@ def _free_tcp_port() -> int:
 
 
 class FakeReceiver:
+    """The satellite's microphone feed: packets converted once, like MicFeed."""
+
     callback = None
 
-    def subscribe(self, callback, stream_name="") -> None:
+    def __init__(self) -> None:
+        from wyoming_vban.vban import WyomingConverter
+        self.converter = WyomingConverter()
+
+    def subscribe(self, callback) -> None:
         self.callback = callback
+
+    def feed(self, packet) -> None:
+        self.callback(packet, self.converter.convert(packet))
 
     def unsubscribe(self, callback) -> None:
         pass
@@ -310,6 +319,20 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.start_stage, "wake")
         self.assertTrue(any("No run for" in line for line in logs.output))
 
+    async def test_speech_then_nothing_from_ha_ends_the_run(self) -> None:
+        # The user speaks, then HA ends the run without telling us: a long
+        # watchdog (not the no-speech one) brings the wake word back
+        self.enterContext(unittest.mock.patch.object(
+            VbanSatelliteHandler, "RESPONSE_TIMEOUT_S", 0.8))
+        await self.next_run()
+        await self.respond("Quelle pièce ?")
+        self.assertEqual((await self.next_run()).start_stage, "asr")
+        with self.assertLogs("wyoming_vban.satellite", "WARNING") as logs:
+            await self.ha.write_event(VoiceStarted().event())
+            run = await self.next_run(timeout=2.0)
+        self.assertEqual(run.start_stage, "wake")
+        self.assertTrue(any("no transcript" in line for line in logs.output))
+
     async def test_at_most_three_follow_ups(self) -> None:
         await self.next_run()
         stages = []
@@ -384,7 +407,7 @@ class FollowupBeepTest(FollowupTest):
         """Loud microphone audio, in real time (after delay)."""
         await asyncio.sleep(delay)
         for i in range(int(seconds / 0.016)):
-            self.receiver.callback(VbanPacket(
+            self.receiver.feed(VbanPacket(
                 sample_rate=16000, samples_per_frame=256, channels=1,
                 data_format=1, codec=0, stream_name="AtomBureau",
                 frame_counter=i, payload=b"\x00\x40" * 256,
@@ -430,6 +453,22 @@ class FollowupBeepTest(FollowupTest):
         stops = [t for t, kind in events if kind == "audio-stop"]
         self.assertTrue(stops)
         return stops[0]
+
+    async def test_error_while_waiting_for_the_beep(self) -> None:
+        await self.next_run()
+        await self.respond("Quelle pièce ?")
+        # Response played (0.4 s), then beep + 0.4 s + 0.25 s: no run open
+        await asyncio.sleep(0.6)
+        with self.assertLogs("wyoming_vban.satellite", "INFO") as logs:
+            await self.ha.write_event(Error(text="late", code="stt-no-text-recognized").event())
+            run = await self.next_run()
+        self.assertEqual(run.start_stage, "asr")
+        self.assertTrue(any("while no run is open: ignored" in line for line in logs.output))
+        handler = self.handlers[-1]
+        self.assertFalse(handler._followup_timed_out)
+        # Speaking now isn't cut at timeout_s
+        await self.ha.write_event(VoiceStarted().event())
+        self.assertIsNone(await self.next_event("audio-stop", timeout=self.followup.timeout_s + 0.4))
 
     async def test_mic_cut_then_back_2_4_s_after_the_response(self) -> None:
         # The mic flows, then the satellite cuts it while playing (like an Atom)
@@ -937,6 +976,9 @@ class FollowupDisabledTest(FollowupTest):
         pass
 
     async def test_ha_idle_doesnt_close_the_follow_up(self) -> None:
+        pass
+
+    async def test_speech_then_nothing_from_ha_ends_the_run(self) -> None:
         pass
 
     async def test_ha_error_ends_the_follow_up_run(self) -> None:

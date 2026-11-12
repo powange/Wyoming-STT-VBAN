@@ -68,6 +68,27 @@ def speech(seconds: float, amplitude: float, background: float = 100) -> bytes:
     return bytes(out)
 
 
+async def count_detections(pcm: bytes, host: str, port: int, model: str, pace: float = 1.0):
+    """wake_test.count_detections_live() for a recording, fed at `pace` (0:
+    as fast as possible)."""
+    queue: asyncio.Queue = asyncio.Queue()
+    chunk = wake_test.CHUNK_SAMPLES * 2
+
+    async def feed() -> None:
+        for offset in range(0, len(pcm), chunk):
+            queue.put_nowait(pcm[offset:offset + chunk])
+            if pace:
+                await asyncio.sleep(wake_test.CHUNK_SAMPLES / 16000 * pace)
+        queue.put_nowait(None)
+
+    feeder = asyncio.create_task(feed())
+    try:
+        return await wake_test.count_detections_live(queue, host, port, model)
+    finally:
+        feeder.cancel()
+        await asyncio.gather(feeder, return_exceptions=True)
+
+
 class AnalysisTest(unittest.TestCase):
     def test_noise_and_voice(self) -> None:
         noise_stats = analyze_noise(noise(5, 100))
@@ -254,7 +275,7 @@ class WakeWordTest(unittest.IsolatedAsyncioTestCase):
         pcm = noise(3, 300)
         for count in range(6):
             self.oww.detections = count
-            found = await wake_test.count_detections(
+            found = await count_detections(
                 pcm, "127.0.0.1", self.oww.port, "dis_moi_jarvis-6", pace=0)
             self.assertEqual(len(found), count)
         self.assertEqual(self.oww.names[-1], ["dis_moi_jarvis-6"])
@@ -270,7 +291,7 @@ class WakeWordTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(wake_test.WakeTestError):
             await wake_test.list_models("127.0.0.1", _free_port())
         with self.assertRaises(wake_test.WakeTestError):
-            await wake_test.count_detections(b"\0" * 3200, "127.0.0.1", _free_port(),
+            await count_detections(b"\0" * 3200, "127.0.0.1", _free_port(),
                                              "dis_moi_jarvis-6", pace=0)
 
 

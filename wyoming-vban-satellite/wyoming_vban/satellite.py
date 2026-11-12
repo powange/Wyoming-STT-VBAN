@@ -33,7 +33,7 @@ from wyoming.wake import Detection
 from .const import WYOMING_CHANNELS, WYOMING_RATE, WYOMING_WIDTH
 from .ha_ws import HaStateWatcher
 from .media_player import MediaPlayerOutput, build_wav
-from .vban import VbanPacket, VbanReceiver, VbanSender, WyomingConverter
+from .vban import VbanPacket, VbanReceiver, VbanSender
 
 if TYPE_CHECKING:
     from .mic_filter import MicFilter
@@ -117,9 +117,9 @@ def make_tones(rate: int, notes: list[tuple[float, float]], volume: float) -> by
 
 
 @functools.lru_cache(maxsize=4)
-def make_beep(rate: int, seconds: float = 0.15, freq: float = 880.0) -> bytes:
+def make_beep(rate: int, seconds: float = 0.15) -> bytes:
     """Follow-up beep: one 880 Hz note (computed once per rate)."""
-    return make_tones(rate, [(freq, seconds)], 0.3)
+    return make_tones(rate, [(880.0, seconds)], 0.3)
 
 
 @functools.lru_cache(maxsize=2)
@@ -205,14 +205,14 @@ def notify_search(data: dict) -> None:
     """jarvis_recherche HA event: play the search sound where a response is
     being prepared (the event doesn't say which satellite asked)."""
     for handler in list(_THINKING_HANDLERS):
-        handler.on_search(data)
+        handler.on_search()
 
 
 def notify_vision(data: dict) -> None:
     """jarvis_vision HA event: say the vision phrase where a response is
     being prepared (the event doesn't say which satellite asked)."""
     for handler in list(_THINKING_HANDLERS):
-        handler.on_vision(data)
+        handler.on_vision()
 
 
 class MicMute:
@@ -325,7 +325,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
         vban_receiver: VbanReceiver,
         vban_sender: Optional[VbanSender],
         media_output: Optional[MediaPlayerOutput] = None,
-        vban_stream_name: str = "",
         mic_mute: Optional[MicMute] = None,
         followup: Optional[FollowupSettings] = None,
         exchange_publisher: Optional[HaStateWatcher] = None,
@@ -339,8 +338,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
         super().__init__(reader, writer)
         self._info = satellite_info
         self._vban_receiver = vban_receiver
-        # VBAN stream routed to this satellite ("" = any unclaimed stream)
-        self._vban_stream_name = vban_stream_name
         self._vban_sender = vban_sender
         # When set, TTS goes to a HA media_player; VBAN is only a fallback.
         self._media_output = media_output
@@ -355,7 +352,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # Max ~500ms of buffering: at 16kHz VBAN packets (~16ms each), 32 slots
         # (time received, audio)
         self._audio_queue: asyncio.Queue[tuple[float, bytes]] = asyncio.Queue(maxsize=32)
-        self._converter = WyomingConverter()  # packets not converted by a MicFeed
         self._streaming = False
         self._streaming_task: Optional[asyncio.Task] = None
         self._subscribed = False
@@ -436,9 +432,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # Follow-up: audio of the grace period after RunPipeline, sent first
         self._hold_grace_audio = False
         self._grace_audio: list[bytes] = []
-        # HA's assist_satellite showed "listening" for the current run
-        self._assist_listening_seen = False
-        self._run_started_at = 0.0
         self._idle_guard_task: Optional[asyncio.Task] = None
         self._vban_end_task: Optional[asyncio.Task] = None
         # Follow-up: mic audio received before this time is replaced by
@@ -541,13 +534,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return True
 
         if event.type == "voice-started":
-            # Speech in a follow-up run (once listening): no more timeout
-            if (
-                self._followup_active
-                and not self._followup_timed_out
-                and time.monotonic() >= self._mic_guard_until
-            ):
-                self._cancel_watchdog()
+            # Speech in a follow-up run: no more no-speech timeout, but a
+            # long one still ends a run HA would end without telling us
+            # (otherwise nothing brings the satellite back: deaf)
+            if self._followup_active and not self._followup_timed_out and not self._mic_paused:
+                self._set_watchdog(self.RESPONSE_TIMEOUT_S, self._on_speech_without_end)
             return True
 
         if Synthesize.is_type(event.type):
@@ -701,13 +692,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._last_transcript = ""
             self._stop_thinking()
             if self._driven:
+                if self._run_ended_seq == self._run_seq:
+                    # No run open (e.g. waiting for the beep): the end of an
+                    # earlier one, not of the follow-up about to open
+                    _LOGGER.info("Error [%s] while no run is open: ignored", code)
+                    return True
                 # The run is over (no response). Start the next one once HA
                 # has finished ending it; an error never leads to a follow-up.
                 if (self._followup_active and not self._awaiting_response
                         and not self._followup_timed_out):
                     _LOGGER.info(
-                        "Follow-up: Home Assistant ended the run %s listening (error %s)",
-                        "before" if self._mic_guard_until > time.monotonic() else "while", code,
+                        "Follow-up: Home Assistant ended the run while listening (error %s)",
+                        code,
                     )
                     self._followup_timed_out = True
                 self._awaiting_response = False
@@ -803,7 +799,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._announce("thinking", self._cues.thinking)
 
     @_as_satellite
-    def on_search(self, data: dict) -> None:
+    def on_search(self) -> None:
         """jarvis_recherche: the response needs an internet search."""
         if self._thinking and self._cues.search and not self._search_announced:
             self._search_announced = True
@@ -811,7 +807,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._announce("search", self._cues.search)
 
     @_as_satellite
-    def on_vision(self, data: dict) -> None:
+    def on_vision(self) -> None:
         """jarvis_vision: the response needs a camera look."""
         if self._thinking and self._cues.vision and not self._vision_announced:
             self._vision_announced = True
@@ -1102,7 +1098,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
     def _subscribe_to_vban(self) -> None:
         """Subscribe this handler to VBAN audio packets."""
         if not self._subscribed:
-            self._vban_receiver.subscribe(self._on_vban_audio, self._vban_stream_name)
+            self._vban_receiver.subscribe(self._on_vban_audio)
             self._subscribed = True
 
     async def _send_pipeline_and_stream(self, reason: str = "Home Assistant ready") -> None:
@@ -1159,8 +1155,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._mic_resume_at = time.monotonic() + self.STREAM_GRACE_S
         self._hold_grace_audio = start_stage == PipelineStage.ASR
         self._grace_audio = []
-        self._assist_listening_seen = False
-        self._run_started_at = time.monotonic()
         if start_stage == PipelineStage.WAKE:  # no beep guard outside follow-ups
             self._mic_guard_until = 0.0
         _LOGGER.info(
@@ -1377,6 +1371,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
         except (ConnectionError, OSError) as err:
             _LOGGER.debug("Listening again failed: %s", err)
 
+    def _on_speech_without_end(self) -> None:
+        _LOGGER.warning(
+            "Follow-up: no transcript %.0f s after speech started: run over",
+            self.RESPONSE_TIMEOUT_S,
+        )
+        self._run_ended(self._run_seq, reason="follow-up: speech without transcript")
+
     def _on_response_timeout(self) -> None:
         _LOGGER.info("No response after transcript (empty response?): run over")
         self._run_ended(self._run_seq, reason="no response in time")
@@ -1443,14 +1444,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 # silence and HA ended it before the user could answer.
                 # Until then no run is open: the mic audio isn't sent.
                 self._followup_active = True
-                self._mic_guard_until = time.monotonic() + 3600  # until opened
-                try:
-                    await self._open_after_beep()
-                finally:
-                    # Also when cancelled (an error for this run) or the beep
-                    # failed: never leave the mic silenced for an hour
-                    if self._mic_guard_until > time.monotonic() + self.FOLLOWUP_OPEN_MAX_S:
-                        self._mic_guard_until = time.monotonic()
+                self._followup_timed_out = False
+                await self._open_after_beep()
                 return
 
             if expect:
@@ -1828,9 +1823,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 pass
             _LOGGER.info("Audio streaming stopped (total chunks sent: %d)", chunks_sent)
 
-    def _on_vban_audio(self, packet: VbanPacket, pcm: Optional[bytes] = None) -> None:
-        """Microphone audio — enqueue it. pcm: the packet already converted
-        (the satellite's MicFeed), otherwise converted here."""
+    def _on_vban_audio(self, packet: VbanPacket, pcm: bytes) -> None:
+        """Microphone audio — enqueue it. pcm: the packet converted to
+        16 kHz mono 16-bit (once per packet, by the satellite's MicFeed)."""
         now = time.monotonic()
         if now - self._last_mic_at > self.MIC_GAP_S:
             self._mic_back.set()  # the stream (re)starts
@@ -1847,9 +1842,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if not self._streaming:
             return
-
-        if pcm is None:
-            pcm = self._converter.convert(packet)
 
         try:
             self._audio_queue.put_nowait((now, pcm))

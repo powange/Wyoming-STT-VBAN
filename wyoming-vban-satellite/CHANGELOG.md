@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.12.2
+
+Fixes from the analysis of 3.12.1 (first batch), and dead code removed.
+
+- **Follow-up: never left deaf after speaking.** Speech in a follow-up cancelled its no-speech timeout without anything replacing it: if Home Assistant then ended the run without a transcript nor an error, the satellite stayed deaf until a reconnection. A 60 s watchdog now ends such a run (`Follow-up: no transcript 60 s after speech started: run over`).
+- **Follow-up: an error while waiting for the beep no longer spoils it.** An error from Home Assistant while no run is open (e.g. the end of the previous one, while the beep plays) is now ignored (`Error [...] while no run is open: ignored`); it marked the coming follow-up as over, which then cut the answer at `timeout_s`.
+- **Wake word clips**: the clip store is used one call at a time (clips are written in worker threads while the page lists them): no more error 500 or mixed manifest when a detection comes while the Mot-clé tab loads.
+- **Wake word clips, list mode**: the B, F, I keys now also require the clip to have been heard, like the buttons.
+- **VBAN receiver**: when its socket can't be created again after a network error (multicast interface not back yet), it keeps retrying instead of stopping the whole app. A port taken by another program is still reported as a configuration error.
+- **Command line**: `python -m wyoming_vban` crashed at start since 3.10.0 (no `--wake-clips` option); added, and a future option without its argument keeps its default.
+- The test button's "satellite not running yet" message shows again.
+- Dead code removed: unused conversion and packet helpers, `reload`, the runtime's `watcher` property, `ClipStore.last`, follow-up attributes no longer read, the handler's fallback conversion (the satellite's feed always converts), unused parameters, duplicated constants and session purge.
+
 ## 3.12.1
 
 - **Fix (follow-up without wake word, regression of 3.12.0)**: Home Assistant cancelled the follow-up 0.3 s after it opened and went back to the wake word. Cause: about 2 s after a response should have finished playing, Home Assistant forces its satellite to `idle` by itself (its TTS timeout, in case `played` never comes), whatever run is going on. Since 3.11.1 the app took that `idle` for "Home Assistant ended the follow-up" and sent `run-pipeline start=wake`, which cancelled the listening. 3.12.0 opened the follow-up earlier (estimated end of the response on Cast), right before that timeout.

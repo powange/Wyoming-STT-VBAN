@@ -5,6 +5,7 @@ Run from wyoming-vban-satellite/:  python3 -m unittest discover tests
 """
 
 import array
+import asyncio
 import audioop
 import dataclasses
 import math
@@ -33,6 +34,12 @@ def packet(payload: bytes, rate=16000, channels=1, data_format=VBAN_DATATYPE_INT
     return VbanPacket(sample_rate=rate, samples_per_frame=len(payload) // 2 or 1,
                       channels=channels, data_format=data_format, codec=0,
                       stream_name="Mic", frame_counter=0, payload=payload)
+
+
+def _free_udp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 class ConversionTest(unittest.TestCase):
@@ -166,6 +173,35 @@ class RangeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(resp.headers["Accept-Ranges"], "bytes")
         finally:
             await output.stop()
+
+
+class ReceiverRetryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_multicast_interface_missing_doesnt_stop_the_receiver(self) -> None:
+        from wyoming_vban.vban import VbanReceiver
+        receiver = VbanReceiver(port=_free_udp_port(), mode="multicast",
+                                multicast_group="239.0.0.1", multicast_interface="192.0.2.123")
+        receiver.RETRY_S = 0.1
+        with self.assertLogs("wyoming_vban.vban", "ERROR") as logs:
+            task = asyncio.create_task(receiver.run())
+            await asyncio.sleep(0.5)
+        self.assertFalse(task.done())  # still trying, the app goes on
+        self.assertTrue(any("can't open its socket" in line for line in logs.output))
+        receiver.stop()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+class CommandLineTest(unittest.TestCase):
+    def test_every_option_has_a_value(self) -> None:
+        import sys
+        from wyoming_vban.__main__ import _config_from_args, parse_args
+        argv = sys.argv
+        sys.argv = ["wyoming_vban", "--name", "X"]
+        try:
+            cfg = _config_from_args(parse_args())
+        finally:
+            sys.argv = argv
+        self.assertEqual((cfg.name, cfg.wake_clips), ("X", True))
 
 
 if __name__ == "__main__":

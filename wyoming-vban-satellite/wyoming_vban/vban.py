@@ -3,6 +3,7 @@
 import array
 import asyncio
 import audioop
+import errno
 import logging
 import socket
 import struct
@@ -46,10 +47,6 @@ class VbanPacket:
     stream_name: str
     frame_counter: int
     payload: bytes
-
-    @property
-    def sample_width(self) -> int:
-        return VBAN_DATATYPE_WIDTH.get(self.data_format, 2)
 
 
 def parse_packet(data: bytes) -> Optional[VbanPacket]:
@@ -192,15 +189,6 @@ class WyomingConverter:
         return pcm
 
 
-def resample_to_wyoming(audio: bytes, packet: VbanPacket) -> bytes:
-    """Convert one packet's audio to Wyoming format (16kHz, 16-bit, mono),
-    without state: for a stream, use a WyomingConverter."""
-    pcm = to_mono16(audio, packet.data_format, packet.channels)
-    if packet.sample_rate != WYOMING_RATE and pcm:
-        pcm, _ = audioop.ratecv(pcm, WYOMING_WIDTH, 1, packet.sample_rate, WYOMING_RATE, None)
-    return pcm
-
-
 class VbanReceiver:
     """Async VBAN packet receiver with pub/sub model, one per UDP port.
 
@@ -287,12 +275,16 @@ class VbanReceiver:
             except OSError:
                 pass
 
-        sock.bind(("", self.port))
-
+        try:
+            sock.bind(("", self.port))
+            if self.mode == "multicast" and self.multicast_group:
+                group = socket.inet_aton(self.multicast_group)
+                mreq = group + socket.inet_aton(self.multicast_interface or "0.0.0.0")
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except OSError:
+            sock.close()
+            raise
         if self.mode == "multicast" and self.multicast_group:
-            group = socket.inet_aton(self.multicast_group)
-            mreq = group + socket.inet_aton(self.multicast_interface or "0.0.0.0")
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
             _LOGGER.info(
                 "Joined multicast group %s on port %d (interface %s)",
                 self.multicast_group, self.port, self.multicast_interface or "default",
@@ -307,10 +299,27 @@ class VbanReceiver:
 
     RETRY_S = 5.0  # after a socket error, the socket is created again
 
+    async def _open_socket(self) -> None:
+        """Create the socket, retrying while the network isn't ready (e.g.
+        multicast before the interface is up). A port taken by another
+        program is a configuration error: raised (the change is undone)."""
+        while True:
+            try:
+                self._socket = self._create_socket()
+                return
+            except OSError as err:
+                if err.errno == errno.EADDRINUSE:
+                    raise
+                _LOGGER.error(
+                    "VBAN receiver on port %d can't open its socket: %s (retrying in %.0fs)",
+                    self.port, err, self.RETRY_S,
+                )
+                await asyncio.sleep(self.RETRY_S)
+
     async def run(self) -> None:
         """Run the receiver loop. Should be started once at application startup."""
-        self._socket = self._create_socket()
         self._running = True
+        await self._open_socket()
 
         loop = asyncio.get_running_loop()
         _LOGGER.info("VBAN receiver started (port=%d mode=%s)", self.port, self.mode)
@@ -329,7 +338,7 @@ class VbanReceiver:
                     )
                     self._close_socket()
                     await asyncio.sleep(self.RETRY_S)
-                    self._socket = self._create_socket()
+                    await self._open_socket()
                     continue
 
                 packet = parse_packet(data)

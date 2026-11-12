@@ -13,7 +13,6 @@ faster would hide the repeated wake words.
 import asyncio
 import contextlib
 import logging
-import time
 from typing import AsyncIterator, Optional
 
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
@@ -136,28 +135,3 @@ async def count_detections_live(
         ) from err
     _LOGGER.debug("Wake word test: %d detection(s) of %s", len(detections), model)
     return detections
-
-
-async def count_detections(
-    pcm: bytes, host: str, port: int, model: str, pace: float = 1.0,
-) -> list[Optional[int]]:
-    """count_detections_live() for a recording, fed at `pace` (1.0 is real
-    time, needed with openWakeWord; 0 for tests)."""
-    queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
-    chunk_bytes = CHUNK_SAMPLES * WYOMING_WIDTH
-
-    async def feed() -> None:
-        start = time.monotonic()
-        for i, offset in enumerate(range(0, len(pcm), chunk_bytes)):
-            queue.put_nowait(pcm[offset:offset + chunk_bytes])
-            if pace:
-                due = start + (i + 1) * CHUNK_SAMPLES / WYOMING_RATE * pace
-                await asyncio.sleep(max(0.0, due - time.monotonic()))
-        queue.put_nowait(None)
-
-    feeder = asyncio.create_task(feed())
-    try:
-        return await count_detections_live(queue, host, port, model)
-    finally:
-        feeder.cancel()
-        await asyncio.gather(feeder, return_exceptions=True)

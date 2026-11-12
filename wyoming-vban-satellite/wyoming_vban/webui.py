@@ -252,12 +252,14 @@ class WebUI:
         return response
 
     def _session(self, name: str, create: bool = False) -> Optional[CalibrationSession]:
-        """The satellite's calibration (expired ones are deleted)."""
-        for key in [k for k, v in self._sessions.items() if v.expired]:
-            del self._sessions[key]
+        """The satellite's calibration, unless expired (the others are
+        deleted every minute by _purge_sessions)."""
         if create:
             self._sessions[name] = CalibrationSession()
         session = self._sessions.get(name)
+        if session is not None and session.expired:
+            del self._sessions[name]
+            return None
         if session is not None:
             session.touch()
         return session

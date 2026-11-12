@@ -132,6 +132,10 @@ def parse_args() -> argparse.Namespace:
         "--followup-beep-output", choices=["media_player", "vban"], default="media_player",
         help="Where the follow-up beep plays",
     )
+    parser.add_argument(
+        "--wake-clips", action=argparse.BooleanOptionalAction, default=True,
+        help="Keep this satellite's wake word clips (when the app keeps them)",
+    )
 
     # Microphone clean-up
     parser.add_argument(
@@ -195,9 +199,12 @@ def parse_args() -> argparse.Namespace:
 
 def _config_from_args(args: argparse.Namespace) -> SatelliteConfig:
     """Single-satellite configuration from command-line options."""
+    # (a field without its option keeps its default: a new option can't
+    # break the command line)
     values = {
         field.name: getattr(args, field.name)
         for field in dataclasses.fields(SatelliteConfig)
+        if hasattr(args, field.name)
     }
     return SatelliteConfig(**values)
 
