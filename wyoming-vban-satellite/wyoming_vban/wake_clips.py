@@ -197,8 +197,8 @@ class ClipStore:
         info = self._clips[clip_id]
         info["status"] = status
         info["classified_at"] = time.time() if status != "non_classe" else None
-        self._write_meta(info)
         self._sync_inbox(info)
+        self._write_meta(info)  # (with the sha256 the inbox copy gave it)
         self._changed()
         return dict(info)
 
@@ -255,23 +255,27 @@ class ClipStore:
         ones are training data). Over max_clips: unsorted first, then
         ignored, then the oldest sorted ones."""
         limit = time.time() - self.retention_days * 86400
+        manifests: set[str] = set()  # rewritten once at the end, not per clip
         for clip in list(self._clips.values()):
             if clip["time"] < limit and clip["status"] in ("non_classe", "ignore"):
-                self._delete(clip)
+                self._delete(clip, manifests)
         excess = len(self._clips) - self.max_clips
-        if excess <= 0:
-            return
-        order = {"non_classe": 0, "ignore": 1, "faux": 2, "bon": 2}
-        for clip in sorted(self._clips.values(), key=lambda c: (order[c["status"]], c["time"]))[:excess]:
-            self._delete(clip)
+        if excess > 0:
+            order = {"non_classe": 0, "ignore": 1, "faux": 2, "bon": 2}
+            ranked = sorted(self._clips.values(), key=lambda c: (order[c["status"]], c["time"]))
+            for clip in ranked[:excess]:
+                self._delete(clip, manifests)
+        for wake_word in manifests:
+            self._write_manifest(wake_word)
 
-    def _delete(self, clip: dict[str, Any]) -> None:
+    def _delete(self, clip: dict[str, Any], manifests: set[str]) -> None:
         self._clips.pop(clip["id"], None)
         for path in (self.wav_path(clip["id"]), self.root / f"{clip['id']}.json"):
             path.unlink(missing_ok=True)
         if clip["status"] in INBOX_FOLDERS:
             clip["status"] = "ignore"  # removed from the inbox too
-            self._sync_inbox(clip)
+            self._sync_inbox(clip, write_manifest=False)
+            manifests.add(wake_word_folder(clip["wake_word"]))
 
     # WakeForge inbox
 
@@ -280,7 +284,7 @@ class ClipStore:
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(info["time"]))
         return f"{satellite}_{stamp}_{info['id'][-6:]}"
 
-    def _sync_inbox(self, info: dict[str, Any]) -> None:
+    def _sync_inbox(self, info: dict[str, Any], write_manifest: bool = True) -> None:
         folder = self.inbox / wake_word_folder(info["wake_word"])
         name = self._inbox_name(info)
         try:
@@ -293,10 +297,14 @@ class ClipStore:
                 target = folder / INBOX_FOLDERS[info["status"]]
                 target.mkdir(parents=True, exist_ok=True)
                 wav = self.wav_path(info["id"]).read_bytes()
+                # Hashed once, from the bytes in hand: the manifest reuses it
+                # (it re-read and hashed every sorted file at each change)
+                info["sha256"] = hashlib.sha256(wav).hexdigest()
                 (target / f"{name}.wav").write_bytes(wav)
                 (target / f"{name}.json").write_text(json.dumps(
                     self._public(info), ensure_ascii=False, indent=1), encoding="utf-8")
-            self._write_manifest(wake_word_folder(info["wake_word"]))
+            if write_manifest:
+                self._write_manifest(wake_word_folder(info["wake_word"]))
         except OSError as err:
             _LOGGER.error("WakeForge inbox %s not updated: %s", folder, err)
 
@@ -315,10 +323,13 @@ class ClipStore:
             if info["status"] not in INBOX_FOLDERS or wake_word_folder(info["wake_word"]) != wake_word:
                 continue
             path = f"{INBOX_FOLDERS[info['status']]}/{self._inbox_name(info)}.wav"
-            try:
-                digest = hashlib.sha256((folder / path).read_bytes()).hexdigest()
-            except OSError:
-                continue
+            digest = info.get("sha256")
+            if digest is None:  # sorted before 3.12.3: hashed once, then kept
+                try:
+                    digest = info["sha256"] = hashlib.sha256((folder / path).read_bytes()).hexdigest()
+                    self._write_meta(info)
+                except OSError:
+                    continue
             entries.append({
                 "path": path, "status": info["status"], "sha256": digest,
                 "satellite": info["satellite"],

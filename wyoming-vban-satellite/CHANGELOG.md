@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.12.3
+
+- **Faster sorting of wake word clips**: WakeForge's `manifest.json` re-read and re-hashed every sorted clip at each change (about 190 MB read per click with 2000 clips). Each clip is now hashed once, from the bytes copied to the inbox, and the hash is kept with it; a purge rewrites the manifest once instead of once per deleted clip. One classification with 1000 sorted clips: about 100 ms → 11 ms (more on slower storage). Clips sorted before are hashed once more, then kept.
+
 ## 3.12.2
 
 Fixes from the analysis of 3.12.1 (first batch), and dead code removed.

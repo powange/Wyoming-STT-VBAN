@@ -187,6 +187,35 @@ class StoreTest(StoreCase):
         ids = {c["id"] for c in self.store.list()}
         self.assertEqual(ids, {kept})  # sorted clips are training data
 
+    def test_classifying_hashes_only_that_clip(self) -> None:
+        import hashlib
+        import unittest.mock
+        for _ in range(30):
+            self.store.classify(self.add(), "bon")
+        new = self.add()
+        real = hashlib.sha256
+        with unittest.mock.patch("wyoming_vban.wake_clips.hashlib.sha256",
+                                 side_effect=real) as sha:
+            self.store.classify(new, "faux")
+        self.assertEqual(sha.call_count, 1)  # not the 30 others again
+        manifest = json.loads((self.inbox / "dis_moi_jarvis" / "manifest.json").read_text())
+        self.assertEqual(len(manifest["clips"]), 31)
+        entry = next(c for c in manifest["clips"] if c["status"] == "faux")
+        on_disk = (self.inbox / "dis_moi_jarvis" / entry["path"]).read_bytes()
+        self.assertEqual(entry["sha256"], hashlib.sha256(on_disk).hexdigest())
+
+    def test_purge_writes_the_manifest_once(self) -> None:
+        import unittest.mock
+        for _ in range(10):
+            self.store.classify(self.add(), "bon")
+        self.store.max_clips = 2
+        with unittest.mock.patch.object(self.store, "_write_manifest",
+                                        wraps=self.store._write_manifest) as write:
+            self.store.purge()
+        self.assertEqual(write.call_count, 1)
+        manifest = json.loads((self.inbox / "dis_moi_jarvis" / "manifest.json").read_text())
+        self.assertEqual(len(manifest["clips"]), 2)
+
     def test_threads_and_loop_together(self) -> None:
         # Clips added in worker threads while the list is read (B4)
         import threading
