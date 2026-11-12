@@ -6,6 +6,7 @@ Run from wyoming-vban-satellite/:  python3 -m unittest discover tests
 """
 
 import asyncio
+import logging
 import socket
 import struct
 import time
@@ -103,7 +104,7 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         self.sender = FakeVbanSender()
         self.receiver = FakeReceiver()
         self.publisher = FakePublisher()
-        port = _free_tcp_port()
+        port = self.port = _free_tcp_port()
         self.server = AsyncServer.from_uri(f"tcp://127.0.0.1:{port}")
         self.handlers: list[VbanSatelliteHandler] = []
 
@@ -226,19 +227,76 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         await self.respond("Il est 9 heures.")
         self.assertEqual((await self.next_run()).start_stage, "wake")
 
-    async def test_ha_ends_the_follow_up_run(self) -> None:
+    async def test_ha_idle_doesnt_close_the_follow_up(self) -> None:
+        # HA forces "idle" ~2 s after a response should have played (its TTS
+        # timeout), even during the follow-up: the listening goes on
+        self.enterContext(unittest.mock.patch.object(self.followup, "timeout_s", 5.0))
         await self.next_run()
-        await self.respond("Quelle pièce ?")
+        await self.respond("Tu confirmes ?")
         self.assertEqual((await self.next_run()).start_stage, "asr")
         handler = self.handlers[-1]
         handler.on_assist_state("listening")
         with self.assertLogs("wyoming_vban.satellite", "INFO") as logs:
-            handler.on_assist_state("idle")  # HA ended the listening
+            handler.on_assist_state("idle")
+            self.assertIsNone(await self.next_run(timeout=0.3))  # no wake run
+        self.assertTrue(any("listening goes on" in line for line in logs.output))
+        # The answer is still taken
+        await self.ha.write_event(VoiceStarted().event())
+        await self.respond("C'est fait.", transcript="Je confirme")
+        self.assertEqual((await self.next_run()).start_stage, "wake")
+        self.assertEqual(self.publisher.events[-1][1]["transcript"], "Je confirme")
+
+    async def test_ha_error_ends_the_follow_up_run(self) -> None:
+        await self.next_run()
+        await self.respond("Quelle pièce ?")
+        self.assertEqual((await self.next_run()).start_stage, "asr")
+        with self.assertLogs("wyoming_vban.satellite", "INFO") as logs:
+            await self.ha.write_event(Error(text="stream failed", code="stt-stream-failed").event())
             run = await self.next_run(timeout=1.0)
-        self.assertIsNotNone(run)
         self.assertEqual(run.start_stage, "wake")
-        self.assertTrue(any("Home Assistant ended the run while listening" in line
+        self.assertTrue(any("Home Assistant ended the run while listening (error" in line
                             for line in logs.output))
+        self.assertTrue(any("reason: previous run over: error stt-stream-failed" in line
+                            for line in logs.output))
+
+    async def test_follow_up_right_after_ha_reconnects(self) -> None:
+        await self.next_run()
+        await self.ha.disconnect()  # e.g. the app restarted, HA reconnects
+        await asyncio.sleep(0.2)
+        self.ha = AsyncTcpClient("127.0.0.1", self.port)
+        await self.ha.connect()
+        for event in (Describe(), RunSatellite(), Describe()):
+            await self.ha.write_event(event.event())
+        run = await self.next_run()
+        self.assertEqual((run.start_stage, run.restart_on_end), ("wake", False))
+        await self.respond("Quelle lumière ?")
+        self.assertEqual((await self.next_run()).start_stage, "asr")
+        self.assertIsNone(await self.next_run(timeout=self.followup.timeout_s * 0.8))
+
+    async def test_logs_from_ha_calls_carry_the_satellite(self) -> None:
+        from wyoming_vban.satellite import SATELLITE_NAME
+        names = []
+
+        class Capture(logging.Filter):
+            def filter(self, record):
+                names.append(SATELLITE_NAME.get())
+                return True
+
+        self.enterContext(unittest.mock.patch.object(self.followup, "timeout_s", 5.0))
+        await self.next_run()
+        await self.respond("Tu confirmes ?")
+        await self.next_run()
+        capture = Capture()
+        logger = logging.getLogger("wyoming_vban.satellite")
+        level = logger.level
+        logger.setLevel(logging.INFO)
+        logger.addFilter(capture)
+        try:
+            self.handlers[-1].on_assist_state("idle")  # called from the HA WebSocket
+        finally:
+            logger.removeFilter(capture)
+            logger.setLevel(level)
+        self.assertEqual(names, ["Bureau"])
 
     async def test_no_run_for_5_s_listens_again(self) -> None:
         await self.next_run()
@@ -554,6 +612,22 @@ class CastEndTest(FollowupTest):
         self.assertGreaterEqual(delay, 0.1 + 0.6 - 0.05)
         self.assertLess(delay, 1.5)
 
+    async def test_follow_up_stays_open_while_the_nest_shows_playing(self) -> None:
+        # The beep shown "playing" for 30 s, and HA's TTS timeout forcing
+        # "idle" during the follow-up (15:02 on 12/11)
+        self.media.state_watcher.late_s = 30.0
+        await self.next_run()
+        await self.respond("Tu confirmes ?")
+        self.assertEqual((await self.next_run()).start_stage, "asr")
+        handler = self.handlers[-1]
+        handler.on_assist_state("listening")
+        handler.on_assist_state("idle")
+        self.assertIsNone(await self.next_run(timeout=self.followup.timeout_s * 0.8))
+        await self.ha.write_event(VoiceStarted().event())
+        await self.respond("C'est fait.", transcript="Je confirme")
+        await self.next_run()  # the next run, once the answer's response has played
+        self.assertEqual(self.publisher.events[-1][1]["transcript"], "Je confirme")
+
     async def test_late_end_is_logged(self) -> None:
         self.media.state_watcher.late_s = 2.5
         await self.next_run()
@@ -862,7 +936,16 @@ class FollowupDisabledTest(FollowupTest):
     async def test_announcement_text_does_not_decide_the_follow_up(self) -> None:
         pass
 
-    async def test_ha_ends_the_follow_up_run(self) -> None:
+    async def test_ha_idle_doesnt_close_the_follow_up(self) -> None:
+        pass
+
+    async def test_ha_error_ends_the_follow_up_run(self) -> None:
+        pass
+
+    async def test_follow_up_right_after_ha_reconnects(self) -> None:
+        pass
+
+    async def test_logs_from_ha_calls_carry_the_satellite(self) -> None:
         pass
 
     async def test_no_run_for_5_s_listens_again(self) -> None:

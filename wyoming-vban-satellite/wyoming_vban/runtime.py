@@ -3,7 +3,6 @@
 import asyncio
 import audioop
 import collections
-import contextvars
 import dataclasses
 import logging
 import math
@@ -32,6 +31,7 @@ from .mic_filter import MicFilter
 from .mirror import SatelliteMirrors
 from .media_player import MediaPlayerOutput, build_wav, detect_local_ip
 from .satellite import (
+    SATELLITE_NAME,
     LISTEN_END_NOTES,
     SEARCH_NOTES,
     THINKING_NOTES,
@@ -55,11 +55,8 @@ _LOGGER = logging.getLogger(__name__)
 WYOMING_RATE_FOR_SILENCE = 16000
 
 # Name of the satellite owning the current task, prefixed to log lines
-# (all satellites run in one process). Tasks inherit it from the task
-# that created them.
-_SATELLITE_NAME: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "satellite_name", default=""
-)
+# (defined with the handlers, which set it in the calls they receive)
+_SATELLITE_NAME = SATELLITE_NAME
 
 
 class SatelliteLogFilter(logging.Filter):

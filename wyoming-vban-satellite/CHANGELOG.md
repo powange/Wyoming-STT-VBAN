@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.12.1
+
+- **Fix (follow-up without wake word, regression of 3.12.0)**: Home Assistant cancelled the follow-up 0.3 s after it opened and went back to the wake word. Cause: about 2 s after a response should have finished playing, Home Assistant forces its satellite to `idle` by itself (its TTS timeout, in case `played` never comes), whatever run is going on. Since 3.11.1 the app took that `idle` for "Home Assistant ended the follow-up" and sent `run-pipeline start=wake`, which cancelled the listening. 3.12.0 opened the follow-up earlier (estimated end of the response on Cast), right before that timeout.
+  - An open follow-up now only ends with the end of speech, an error from Home Assistant, or `timeout_s`; an `idle` during it is logged (`Follow-up: Home Assistant shows idle while listening (its TTS timeout?): the listening goes on`) and ignored.
+  - The "empty response" detection (idle after a transcript) ignores an `idle` that may be that timeout.
+- **Logs**: every `run-pipeline` sent says why, e.g. `Sent run-pipeline: start=wake … (reason: previous run over: error stt-no-text-recognized)` or `(reason: safety net: no run)`. Lines from calls made by the Home Assistant WebSocket or a configuration change now carry the satellite's name (`[Bureau]`): they had none, so a filter on the satellite hid them (here the `start=wake` that cancelled the follow-up).
+
 ## 3.12.0
 
 - **Fix (follow-up on a Cast speaker)**: the beep came seconds after a question when the Nest reported the end of the response late (after reopening its Cast app: 9.4 s of "playing" for 4.1 s of audio), because the app waited for it to go back to idle. A response is now over at the first of: the end reported, or "playing" + the WAV's length + `media_player.end_margin_ms` (600 ms by default); without "playing", as before. Same for the beep on the media player. The log says `Media player reported end X.X s after the estimated end` when the speaker is more than 1 s late, to tune the margin.

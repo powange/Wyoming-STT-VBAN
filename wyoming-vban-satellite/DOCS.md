@@ -251,9 +251,10 @@ Until then, no microphone audio is sent: neither the beep nor the end of
 the response reaches the transcription. The audio of the first ~300 ms
 after the opening (while Home Assistant starts the run) is kept and sent
 first. The no-speech timeout starts at that opening, for the app and for
-Home Assistant. If Home Assistant ends the follow-up run itself (its end of
-speech detection, an error), the satellite goes back to the wake word at
-once. And whatever happens, a satellite left without any run for 5 s while
+Home Assistant. If Home Assistant ends the follow-up run with an error, the satellite goes
+back to the wake word at once. The `idle` state alone never closes an open
+follow-up: Home Assistant sets it by itself about 2 s after a response
+should have finished playing, whatever run is going on. And whatever happens, a satellite left without any run for 5 s while
 connected and not muted listens for the wake word again (warning in the
 log). Log: `Follow-up: beep played, mic back after
 2.65 s, listening for 3 s`.

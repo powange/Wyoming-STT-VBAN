@@ -3,6 +3,7 @@
 import asyncio
 import audioop
 import collections
+import contextvars
 import functools
 import logging
 import math
@@ -41,6 +42,29 @@ if TYPE_CHECKING:
     from .tts_phrase import TtsPhrase
 
 _LOGGER = logging.getLogger(__name__)
+
+# Name of the satellite owning the current task, prefixed to log lines
+# (all satellites run in one process). Tasks inherit it from the task
+# that created them.
+SATELLITE_NAME: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "satellite_name", default=""
+)
+
+
+def _as_satellite(method):
+    """For the handler methods called from elsewhere (the HA WebSocket, a
+    configuration change): their logs, and the tasks they start, carry the
+    satellite's name (otherwise a filter on it hides them)."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        token = SATELLITE_NAME.set(self._satellite_name or SATELLITE_NAME.get())
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            SATELLITE_NAME.reset(token)
+
+    return wrapper
 
 # Media player playbacks outlive their handler (HA may reconnect while a
 # response plays); keep strong references so they aren't garbage-collected.
@@ -388,7 +412,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # "pipeline running" flag), so there must never be two runs.
         self._followup = followup or FollowupSettings(enabled=False)
         self._driven = self._followup.enabled
+        # HA forces its satellite state to idle about 2 s after a response
+        # should have finished (its TTS timeout): until then, "idle" isn't
+        # a run end
+        self._ha_tts_idle_until = 0.0
+        self._tts_stream_bytes = 0
+        self._tts_stream_rate = (WYOMING_RATE, WYOMING_WIDTH, WYOMING_CHANNELS)
         self._run_seq = 0  # increments with each RunPipeline we send
+        self._next_run_reason = ""  # why the last run ended (logged with the next)
         self._run_ended_seq = 0  # last run whose end was handled
         self._awaiting_response = False  # transcript received in this run
         self._response_audio = False  # incoming TTS is this run's response
@@ -546,6 +577,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if AudioStart.is_type(event.type):
             start = AudioStart.from_event(event)
+            self._tts_stream_bytes = 0
+            self._tts_stream_rate = (start.rate, start.width, start.channels)
             _LOGGER.info(
                 "Receiving TTS audio from server: %dHz, %d-bit, %dch",
                 start.rate, start.width * 8, start.channels,
@@ -585,6 +618,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if AudioChunk.is_type(event.type):
             chunk = AudioChunk.from_event(event)  # parsed once
+            self._tts_stream_bytes += len(chunk.audio)
             if self._mirrors:
                 self._mirrors.tts(chunk.audio, chunk.rate, chunk.width, chunk.channels)
             if self._media_output:
@@ -606,6 +640,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if AudioStop.is_type(event.type):
             _LOGGER.debug("TTS audio finished")
+            rate, width, channels = self._tts_stream_rate
+            duration = self._tts_stream_bytes / max(1, rate * width * channels)
+            # HA's TTS timeout: about duration + 2 s after the audio was sent
+            self._ha_tts_idle_until = time.monotonic() + duration + 3.0
             if self._response_audio and not self._has_output():
                 _LOGGER.info("Response not played (output: none)")
             self._tts_receiving = False
@@ -617,7 +655,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 if self._mic_mute:
                     self._mic_mute.end_response(self._tts_generation)
                 if seq is not None:
-                    self._run_ended(seq)
+                    self._run_ended(seq, reason="response empty")
             elif self._media_output:
                 pcm, self._tts_pcm = bytes(self._tts_pcm), bytearray()
                 # A newer response replaces one still waiting to report
@@ -633,7 +671,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     self._play_on_media_player(
                         pcm, *self._tts_format, self._tts_generation,
                         on_played=(
-                            (lambda: self._run_ended(seq)) if seq is not None else None
+                            (lambda: self._run_ended(seq, reason="response played"))
+                            if seq is not None else None
                         ),
                     )
                 )
@@ -645,7 +684,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 _PLAYBACK_TASKS.add(task)
                 task.add_done_callback(_PLAYBACK_TASKS.discard)
             elif seq is not None:
-                self._run_ended(seq)
+                self._run_ended(seq, reason="response not played (no output)")
             return True
 
         if event.type == "ping":
@@ -673,7 +712,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     self._followup_timed_out = True
                 self._awaiting_response = False
                 self._expect_followup = False
-                self._run_ended(self._run_seq, delay=self.ERROR_RESTART_DELAY_S)
+                self._run_ended(self._run_seq, delay=self.ERROR_RESTART_DELAY_S,
+                                reason=f"error {code}")
                 return True
             # After an error (duplicate_wake_up_detected, stt-no-text-recognized,
             # wake_word_detection_aborted...), HA ends the pipeline and does NOT
@@ -717,7 +757,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             await asyncio.sleep(1.0)
             if self._server_ready and self._is_running and not self._streaming:
                 _LOGGER.info("Resumed without Describe: starting the pipeline")
-                await self._send_pipeline_and_stream()
+                await self._send_pipeline_and_stream("resumed without Describe")
         except (ConnectionError, OSError, asyncio.CancelledError):
             pass
 
@@ -762,6 +802,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if self._thinking and self._cues.thinking:
             self._announce("thinking", self._cues.thinking)
 
+    @_as_satellite
     def on_search(self, data: dict) -> None:
         """jarvis_recherche: the response needs an internet search."""
         if self._thinking and self._cues.search and not self._search_announced:
@@ -769,6 +810,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._replace_thinking()
             self._announce("search", self._cues.search)
 
+    @_as_satellite
     def on_vision(self, data: dict) -> None:
         """jarvis_vision: the response needs a camera look."""
         if self._thinking and self._cues.vision and not self._vision_announced:
@@ -1063,7 +1105,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._vban_receiver.subscribe(self._on_vban_audio, self._vban_stream_name)
             self._subscribed = True
 
-    async def _send_pipeline_and_stream(self) -> None:
+    async def _send_pipeline_and_stream(self, reason: str = "Home Assistant ready") -> None:
         """Send RunPipeline to HA, schedule audio streaming after a short delay.
 
         Must be called AFTER responding to Describe, so HA has the Info
@@ -1077,7 +1119,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # RunPipeline is being written must not start a second run
         self._streaming = True
         try:
-            await self._send_run_pipeline(PipelineStage.WAKE)
+            await self._send_run_pipeline(PipelineStage.WAKE, reason)
         except BaseException:
             self._streaming = False
             raise
@@ -1088,7 +1130,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._delayed_stream_start(0.3)
         )
 
-    async def _send_run_pipeline(self, start_stage: PipelineStage) -> None:
+    async def _send_run_pipeline(self, start_stage: PipelineStage, reason: str = "") -> None:
         """Send RunPipeline (start_stage → TTS) and reset per-run state.
 
         Without follow-up, HA restarts the wake run itself (restart_on_end).
@@ -1122,8 +1164,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if start_stage == PipelineStage.WAKE:  # no beep guard outside follow-ups
             self._mic_guard_until = 0.0
         _LOGGER.info(
-            "Sent run-pipeline: start=%s end=%s restart=%s",
-            start_stage.value, PipelineStage.TTS.value, restart,
+            "Sent run-pipeline: start=%s end=%s restart=%s (reason: %s)",
+            start_stage.value, PipelineStage.TTS.value, restart, reason or "?",
         )
 
     # ------------------------------------------------------------------
@@ -1207,6 +1249,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if close:
             self._clip = None
 
+    @_as_satellite
     def followup_changed(self) -> None:
         """followup.enabled changed (applied without restarting the satellite).
 
@@ -1234,33 +1277,45 @@ class VbanSatelliteHandler(AsyncEventHandler):
             _LOGGER.info("Follow-up on: reconnecting to Home Assistant to drive the runs")
             self.writer.close()
 
+    @_as_satellite
     def on_assist_state(self, state: str) -> None:
         """State of this satellite's assist_satellite entity in HA (follow-up
         mode): back to idle after a transcript with no response coming
         means HA ended the run (empty response) — no need to wait for
-        RESPONSE_TIMEOUT_S. In a follow-up, idle after "listening" means
-        HA ended the listening (e.g. its end of speech detection)."""
+        RESPONSE_TIMEOUT_S.
+
+        Never used to close an open follow-up: HA also forces "idle" by
+        itself about 2 s after a response should have finished playing
+        (its TTS timeout), whatever run is going on then. Taken for the end
+        of the follow-up, it made the app start a wake run that cancelled
+        the listening (3.12.0). A follow-up ends with the end of speech, an
+        error from HA, or timeout_s.
+        """
         if not self._driven:
             return
-        if state == "listening" and not self._mic_paused:
-            self._assist_listening_seen = True
-            return
-        if (
-            state == "idle" and self._followup_active and not self._awaiting_response
-            and not self._mic_paused and self._assist_listening_seen
-        ):
-            self._followup_ended_by_ha("assist_satellite back to idle")
+        if self._followup_active and not self._mic_paused and not self._awaiting_response:
+            if state == "idle":
+                _LOGGER.info(
+                    "Follow-up: Home Assistant shows idle while listening "
+                    "(its TTS timeout?): the listening goes on",
+                )
             return
         if not (self._awaiting_response and state == "idle"):
             return
-        if time.monotonic() - self._last_transcript_at < 0.5:
+        now = time.monotonic()
+        if now - self._last_transcript_at < 0.5:
             return  # the state before the transcript, arriving late
+        if now < self._ha_tts_idle_until:
+            # Maybe HA's TTS timeout for the previous response: the
+            # RESPONSE_TIMEOUT_S watchdog still ends a run with no response
+            _LOGGER.debug("Idle within Home Assistant's TTS timeout window: not a run end")
+            return
         _LOGGER.info("Home Assistant ended the run without a response")
         self._cancel_watchdog()
         self._awaiting_response = False
         self._last_transcript = ""
         self._stop_thinking()
-        self._run_ended(self._run_seq)
+        self._run_ended(self._run_seq, reason="Home Assistant ended it without a response")
 
     # Safety net: never left without listening
 
@@ -1314,29 +1369,17 @@ class VbanSatelliteHandler(AsyncEventHandler):
     async def _listen_again(self) -> None:
         try:
             if not self._streaming:
-                await self._send_pipeline_and_stream()
+                await self._send_pipeline_and_stream("safety net: not streaming")
                 return
             self._cancel_followup_tasks()
             self._followup_count = 0
-            await self._send_run_pipeline(PipelineStage.WAKE)
+            await self._send_run_pipeline(PipelineStage.WAKE, "safety net: no run")
         except (ConnectionError, OSError) as err:
             _LOGGER.debug("Listening again failed: %s", err)
 
-    def _followup_ended_by_ha(self, why: str) -> None:
-        """HA ended the follow-up run while we waited for the beep or
-        listened: stop waiting, back to the wake word."""
-        _LOGGER.info(
-            "Follow-up: Home Assistant ended the run %s listening (%s)",
-            "before" if self._mic_guard_until > time.monotonic() else "while", why,
-        )
-        self._cancel_watchdog()
-        self._expect_followup = False
-        self._followup_timed_out = True  # (no "done" log: it didn't finish)
-        self._run_ended(self._run_seq)
-
     def _on_response_timeout(self) -> None:
         _LOGGER.info("No response after transcript (empty response?): run over")
-        self._run_ended(self._run_seq)
+        self._run_ended(self._run_seq, reason="no response in time")
 
     def _on_followup_timeout(self) -> None:
         """No speech in time after a question: stop listening."""
@@ -1349,7 +1392,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         task.add_done_callback(_PLAYBACK_TASKS.discard)
         seq = self._run_seq
         self._set_watchdog(
-            self.FOLLOWUP_END_TIMEOUT_S, lambda: self._run_ended(seq),
+            self.FOLLOWUP_END_TIMEOUT_S, lambda: self._run_ended(seq, reason="follow-up: no speech"),
         )
 
     async def _write_quietly(self, event: Event) -> None:
@@ -1358,7 +1401,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         except (ConnectionError, OSError):
             pass
 
-    def _run_ended(self, seq: int, delay: float = 0.0) -> None:
+    def _run_ended(self, seq: int, delay: float = 0.0, reason: str = "run over") -> None:
         """The run seq is over (response played, error or timeout).
 
         Starts the next run: a follow-up if the response was a question,
@@ -1368,6 +1411,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if not self._driven or seq != self._run_seq or seq == self._run_ended_seq:
             return
         self._run_ended_seq = seq
+        self._next_run_reason = reason
         self._cancel_watchdog()
         self._mic_paused = True
         if self._next_run_task and not self._next_run_task.done():
@@ -1414,7 +1458,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     "Follow-up: %d in a row, back to wake word", self._followup_count,
                 )
             self._followup_count = 0
-            await self._send_run_pipeline(PipelineStage.WAKE)
+            await self._send_run_pipeline(
+                PipelineStage.WAKE, f"previous run over: {self._next_run_reason}")
         except (ConnectionError, OSError):
             pass
 
@@ -1444,7 +1489,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             )
         self._mic_guard_until = time.monotonic()  # what came before is dropped
         # Now HA listens too: its no-speech end and ours start together
-        await self._send_run_pipeline(PipelineStage.ASR)
+        await self._send_run_pipeline(PipelineStage.ASR, "follow-up: listening opens")
         _LOGGER.info(
             "Follow-up: %s, mic back after %.2f s, listening for %g s",
             "beep played" if played is not None else "no beep",
@@ -1550,7 +1595,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         await self._wait_vban_played()
         await self._send_played()
         if seq is not None:
-            self._run_ended(seq)
+            self._run_ended(seq, reason="response played (VBAN)")
 
     def _cancel_followup_tasks(self) -> None:
         self._cancel_watchdog()
@@ -1609,7 +1654,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             await asyncio.sleep(delay)
             if self._server_ready and self._is_running and not self._streaming:
                 _LOGGER.info("Restarting pipeline after server error")
-                await self._send_pipeline_and_stream()
+                await self._send_pipeline_and_stream("after a server error")
         except (ConnectionError, OSError, asyncio.CancelledError):
             pass
 
