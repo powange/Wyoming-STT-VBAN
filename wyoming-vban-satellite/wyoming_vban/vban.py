@@ -398,6 +398,17 @@ class VbanReceiver:
         self._running = False
 
 
+def set_multicast_interface(sock: socket.socket, interface: str) -> None:
+    """Send multicast through this interface (IPv4 address; "" = default)."""
+    if not interface:
+        return
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface))
+    except OSError as err:
+        _LOGGER.error("Multicast interface %s unusable for sending (%s): default "
+                      "route used", interface, err)
+
+
 class UdpTarget:
     """Destination of sendto: a host name is resolved once (sendto would
     resolve it at every packet, blocking), again when the address changes
@@ -466,8 +477,12 @@ class VbanSender:
         channels: int = WYOMING_CHANNELS,
         volume: float = 1.0,
         batch_packets: int = DEFAULT_BATCH_PACKETS,
+        multicast_interface: str = "",
     ):
         self.address = address
+        # Multicast: leave by this interface (its IPv4 address) rather than
+        # the default route
+        self.multicast_interface = multicast_interface
         self.port = port
         self.mode = mode
         self.stream_name = stream_name
@@ -538,9 +553,11 @@ class VbanSender:
         if self.mode == "multicast":
             ttl = struct.pack("b", 32)
             self._socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
+            set_multicast_interface(self._socket, self.multicast_interface)
             _LOGGER.info(
-                "VBAN sender: multicast to %s:%d stream=%s",
+                "VBAN sender: multicast to %s:%d stream=%s (interface %s)",
                 self.address, self.port, self.stream_name,
+                self.multicast_interface or "default",
             )
         else:
             _LOGGER.info(

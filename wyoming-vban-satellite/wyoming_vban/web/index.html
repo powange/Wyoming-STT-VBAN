@@ -1006,12 +1006,15 @@ async function refreshStatus() {
 const CALIB_PHRASE = "Dis-moi Jarvis, allume la lumière du salon et règle le chauffage " +
                      "à vingt degrés.";
 const WAKE_PHRASE = "Dis-moi Jarvis";
+// Given by the app at load (the server records for these lengths): these
+// values only until then
 const STEP_SECONDS = { noise: 5, voice: 8, near: 6, far: 6, wake: 20 };
+let WAKE_REPEATS = 5;
 const STEP_LABELS = {
   noise: "Silence, mesure en cours…", voice: "Lisez la phrase…",
   near: "Près du micro (≈ 50 cm), lisez la phrase…",
   far: "À votre place habituelle ou loin (≈ 3 m), lisez la phrase…",
-  wake: `Dites « ${WAKE_PHRASE} » 5 fois, en marquant une pause entre chaque…`,
+  get wake() { return `Dites « ${WAKE_PHRASE} » ${WAKE_REPEATS} fois, en marquant une pause entre chaque…`; },
 };
 const calib = { satellite: null, source: null, poll: null, busy: false, audio: null,
                 generation: 0 }; // generation: bumped when the calibration is closed
@@ -1439,7 +1442,7 @@ function wakeStep() {
           calib.result ? "Recherche d'openWakeWord…" : "Après la mesure de la voix.");
   return [
     el("p", { class: "help" },
-      `À votre place habituelle, dites « ${WAKE_PHRASE} » 5 fois en 20 secondes. Le son, traité avec ` +
+      `À votre place habituelle, dites « ${WAKE_PHRASE} » ${WAKE_REPEATS} fois en ${STEP_SECONDS.wake} secondes. Le son, traité avec ` +
       "les réglages actuels puis avec les réglages proposés, est envoyé directement à openWakeWord, " +
       "sans passer par Home Assistant : Jarvis ne se déclenche pas."),
     models,
@@ -1543,6 +1546,7 @@ function renderCalibration() {
 
 /* Wake word tab */
 
+const CLIP_WAKE_AT_S = 2.5; // the detection, in a clip (BEFORE_S of the app)
 const CLIP_STATUS = { non_classe: "Non classés", bon: "Bons", faux: "Faux", ignore: "Ignorés" };
 const wake = { satellite: "", status: "non_classe", clips: [], counts: {}, enabled: true,
                index: 0, audio: null, total: 0, mode: "review",
@@ -1675,7 +1679,8 @@ async function undoLast() {
 function reviewCard() {
   const clip = review.queue[0];
   const counter = el("p", { class: "review-count" },
-    `${review.toReview} à revoir · ${review.doneToday} fait${review.doneToday > 1 ? "s" : ""} aujourd'hui`);
+    `${review.toReview} à revoir (${wake.satellite || "toutes les pièces"}) · ` +
+    `${review.doneToday} fait${review.doneToday > 1 ? "s" : ""} aujourd'hui`);
   const undo = review.undo.length
     ? el("button", { type: "button", onclick: undoLast }, "Annuler le dernier choix") : null;
   if (!clip) {
@@ -1699,7 +1704,7 @@ function reviewCard() {
     el("button", { type: "button", onclick: () => playClip(clip, true) }, "▶ Réécouter ", el("kbd", {}, "Espace")),
     !heard ? el("p", { class: "help" }, review.blocked
       ? "Le navigateur a bloqué la lecture automatique : touchez « Réécouter »."
-      : "Écoutez l'extrait avant de décider.") : null,
+      : "Écoutez l'extrait jusqu'au mot-clé avant de décider.") : null,
     el("div", { class: "review-buttons" },
       big("ok", "OK, c'était le mot-clé", "O", () => decide("bon")),
       big("nok", "Pas OK, faux déclenchement", "N", () => decide("faux")),
@@ -1730,10 +1735,21 @@ async function loadClips() {
 function playClip(clip, inReview = false) {
   if (wake.audio) wake.audio.pause();
   wake.audio = new Audio(`api/wake_clips/audio?id=${encodeURIComponent(clip.id)}`);
-  // Heard once it plays: the validation buttons wake up
-  wake.audio.addEventListener("playing", () => {
-    if (!wake.listened.has(clip.id)) { wake.listened.add(clip.id); review.blocked = false; refreshClip(clip); }
+  // Heard once played up to the wake word (2.5 s in, where it was
+  // detected) or to its end: the validation buttons wake up then
+  const audio = wake.audio;
+  const heard = () => {
+    if (wake.listened.has(clip.id)) return;
+    wake.listened.add(clip.id);
+    review.blocked = false;
+    refreshClip(clip);
+  };
+  audio.addEventListener("playing", () => { review.blocked = false; });
+  audio.addEventListener("timeupdate", () => {
+    const enough = Math.min(CLIP_WAKE_AT_S, (audio.duration || CLIP_WAKE_AT_S) - 0.1);
+    if (audio.currentTime >= enough) heard();
   });
+  audio.addEventListener("ended", heard);
   wake.audio.play().catch((err) => {
     if (inReview && err.name === "NotAllowedError") { review.blocked = true; refreshReview(); }
     else say(`Lecture impossible : ${err}`, "error");
@@ -1811,11 +1827,11 @@ function countsTable() {
     for (const [room, n] of Object.entries(wake.counts[day])) {
       rows.push(el("tr", {}, el("td", {}, new Date(`${day}T12:00:00`).toLocaleDateString("fr-FR")),
         el("td", {}, room), el("td", {}, String(n.bon)), el("td", {}, String(n.faux)),
-        el("td", {}, String(n.non_classe))));
+        el("td", {}, String(n.ignore || 0)), el("td", {}, String(n.non_classe))));
     }
   }
   return el("div", { class: "counts-wrap" }, el("table", { class: "counts" },
-    el("tr", {}, ["Jour", "Pièce", "Bons", "Faux", "Non classés"].map((h) => el("th", {}, h))), rows));
+    el("tr", {}, ["Jour", "Pièce", "Bons", "Faux", "Ignorés", "Non classés"].map((h) => el("th", {}, h))), rows));
 }
 
 function renderWake() {
@@ -1893,7 +1909,7 @@ document.addEventListener("keydown", (event) => {
   } else if (clip && { b: 1, f: 1, i: 1 }[key]) {
     // Like the buttons: only a clip that has been heard is validated
     if (!wake.listened.has(clip.id)) {
-      say("Écoutez l'extrait avant de le classer (Espace).", "error");
+      say("Écoutez l'extrait jusqu'au mot-clé avant de le classer (Espace).", "error");
     } else {
       classifyClip(clip, { b: "bon", f: "faux", i: "ignore" }[key]);
     }
@@ -1919,6 +1935,7 @@ function showTab(name) {
   if (name === "calibration") openCalibration();
   else closeCalibration();
   if (name === "wake") openWake();
+  else if (wake.audio) { wake.audio.pause(); wake.audio = null; } // not on, out of sight
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
@@ -1934,8 +1951,19 @@ document.addEventListener("visibilitychange", () => {
 
 /* Load, save, import, export */
 
+async function loadCalibrationConfig() {
+  try {
+    const resp = await fetch("api/calibration/config");
+    if (!resp.ok) return;
+    const body = await resp.json();
+    Object.assign(STEP_SECONDS, body.step_seconds || {});
+    if (body.wake_repeats) WAKE_REPEATS = body.wake_repeats;
+  } catch (err) { /* the defaults above */ }
+}
+
 async function load() {
   say("Chargement…");
+  loadCalibrationConfig();
   const resp = await fetch("api/options");
   const body = await resp.json();
   if (!resp.ok) {

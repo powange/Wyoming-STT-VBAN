@@ -32,8 +32,14 @@ DC_TIME_CONSTANT_S = 1.0
 MAX_SAMPLE = (1 << (8 * WYOMING_WIDTH - 1)) - 1
 
 
-def _db(pcm: bytes) -> float:
-    return 20 * math.log10(max(audioop.rms(pcm, WYOMING_WIDTH), 1) / (MAX_SAMPLE + 1))
+def level_db(pcm: bytes) -> float:
+    """RMS level of 16-bit audio in dBFS (the one formula of the app)."""
+    pcm = pcm[: len(pcm) // WYOMING_WIDTH * WYOMING_WIDTH]
+    rms = audioop.rms(pcm, WYOMING_WIDTH) if pcm else 0
+    return 20 * math.log10(max(rms, 1) / (MAX_SAMPLE + 1))
+
+
+_db = level_db
 
 
 class AutoGain:

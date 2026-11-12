@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.13.0
+
+Improvements from the analysis of 3.12.1 (fifth and last batch).
+
+- **Multicast interface for sending too**: `microphone.multicast_interface` now also chooses the interface the satellite's multicast leaves by (VBAN output in multicast mode, debug copies to a multicast address), instead of the default route. It is kept for that when only the VBAN output is in multicast mode.
+- **Wake word review**: a clip counts as heard once played up to the wake word (2.5 s in, where it was detected) or to its end, not as soon as it starts. The counter says which room it counts, the sound stops when leaving the tab, and the table per room and day has an "Ignorés" column.
+- **Camera / phrases**: `-rtsp_transport` is only passed to ffmpeg for `rtsp://` URLs (ffmpeg refused http or rtmp camera streams with it), and ffmpeg writes each audio packet to the app at once (`-flush_packets`).
+- **Calibration**: the lengths of the measures and the number of wake words to say come from the app (they were written in the page and in the app).
+- **Start log**: the summary of each satellite's settings also gives the beep output and latency, and for the media player output its end margin and keep awake.
+- **Code**: one definition of "something under way" in the satellite (three lists of their own had drifted apart), one dBFS formula, the VBAN latency and the stream start delay defined once, the TTS format stored once, one helper for background tasks.
+
 ## 3.12.5
 
 Performance points from the analysis of 3.12.1 (fourth batch). No change of behaviour.

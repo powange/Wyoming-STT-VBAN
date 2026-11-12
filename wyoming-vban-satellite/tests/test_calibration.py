@@ -339,6 +339,12 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
     def url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.ui_port}{path}"
 
+    async def test_lengths_come_from_the_app(self) -> None:
+        async with self.http.get(self.url("/api/calibration/config")) as resp:
+            body = await resp.json()
+        self.assertEqual(body["step_seconds"], self.ui.STEP_SECONDS)
+        self.assertEqual(body["wake_repeats"], self.ui.WAKE_REPEATS)
+
     async def mic(self, pcm: bytes) -> None:
         """Send audio as VBAN packets, in real time."""
         for i in range(0, len(pcm) - 511, 512):

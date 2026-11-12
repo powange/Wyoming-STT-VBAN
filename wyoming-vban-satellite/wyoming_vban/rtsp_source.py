@@ -7,16 +7,15 @@ as for a VBAN microphone.
 """
 
 import asyncio
-import audioop
 import collections
 import contextlib
 import logging
-import math
 import re
 import time
 from typing import Callable, Optional
 
 from .const import VBAN_DATATYPE_INT16, WYOMING_RATE, WYOMING_WIDTH
+from .mic_filter import level_db
 from .vban import VbanPacket
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,12 +74,17 @@ class RtspSource:
             self._subscribers.remove(callback)
 
     def command(self) -> list[str]:
+        # -rtsp_transport only for RTSP: ffmpeg refuses it for an http or
+        # rtmp stream. -flush_packets: each packet reaches the pipe at once
+        transport = (["-rtsp_transport", self.transport]
+                     if self.url.lower().startswith(("rtsp://", "rtsps://")) else [])
         return [
             self.ffmpeg, "-nostdin", "-loglevel", "error",
-            "-rtsp_transport", self.transport,
+            *transport,
             "-fflags", "nobuffer", "-flags", "low_delay",
             "-i", self.url,
             "-vn", "-sn", "-dn", "-ac", "1", "-ar", str(WYOMING_RATE),
+            "-flush_packets", "1",
             "-f", "s16le", "pipe:1",
         ]
 
@@ -221,6 +225,4 @@ class RtspSource:
             await process.wait()
 
 
-def _level_db(pcm: bytes) -> float:
-    rms = audioop.rms(pcm[: len(pcm) // 2 * 2], WYOMING_WIDTH) if len(pcm) >= 2 else 0
-    return 20 * math.log10(max(rms, 1) / 32768)
+_level_db = level_db

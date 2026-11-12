@@ -192,6 +192,14 @@ class RtspSatelliteTest(FakeFfmpegTest):
             RtspSource.BACKOFF_S = (1.0, 2.0, 5.0, 10.0, 30.0)
 
 
+class CommandTest(unittest.TestCase):
+    def test_rtsp_transport_only_for_rtsp(self) -> None:
+        rtsp = RtspSource("rtsp://cam/x", "tcp").command()
+        self.assertIn("-rtsp_transport", rtsp)
+        self.assertIn("-flush_packets", rtsp)
+        self.assertNotIn("-rtsp_transport", RtspSource("http://cam/audio", "tcp").command())
+
+
 class ConfigTest(unittest.TestCase):
     def load(self, satellites: list) -> list:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:

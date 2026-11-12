@@ -197,6 +197,22 @@ class OptionChecksTest(unittest.TestCase):
         self.assertTrue(any("beep_output" in line for line in logs.output))
 
 
+class MulticastOutputTest(unittest.TestCase):
+    def test_interface_kept_for_a_multicast_output(self) -> None:
+        sat = SatelliteConfig(name="Salon", tts_output="vban", tts_vban_mode="multicast",
+                              tts_vban_address="239.0.0.2", tts_vban_enabled=True,
+                              vban_receive_multicast_interface="127.0.0.1")
+        validate([sat], strict=True)
+        self.assertEqual(sat.vban_receive_multicast_interface, "127.0.0.1")
+
+    def test_sender_leaves_by_the_interface(self) -> None:
+        from wyoming_vban.vban import set_multicast_interface
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            set_multicast_interface(sock, "127.0.0.1")
+            self.assertEqual(sock.getsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, 4),
+                             socket.inet_aton("127.0.0.1"))
+
+
 class FilterBypassTest(unittest.TestCase):
     def test_same_settings_try_the_clean_up_again(self) -> None:
         from wyoming_vban.mic_filter import MicFilter

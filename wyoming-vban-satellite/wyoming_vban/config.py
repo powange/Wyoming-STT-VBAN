@@ -255,9 +255,10 @@ class SatelliteConfig:
             self.vban_receive_multicast_group.strip()
             if self.vban_receive_mode == "multicast" else ""
         )
+        # The interface also sends multicast (VBAN output, debug copies)
         self.vban_receive_multicast_interface = (
             self.vban_receive_multicast_interface.strip()
-            if self.vban_receive_mode == "multicast" else ""
+            if "multicast" in (self.vban_receive_mode, self.tts_vban_mode) else ""
         )
 
         volume = max(0.0, min(2.0, self.tts_vban_volume))
@@ -655,7 +656,8 @@ def validate(satellites: list[SatelliteConfig], strict: bool = False) -> None:
 
         # One socket per port: all its satellites must agree on how to open it
         modes = {(s.vban_receive_mode, s.vban_receive_multicast_group,
-                  s.vban_receive_multicast_interface) for s in sats}
+                  s.vban_receive_multicast_interface if s.vban_receive_mode == "multicast"
+                  else "") for s in sats}
         if len(modes) > 1:
             raise ConfigError(
                 f"Satellites {', '.join(s.name for s in sats)} share VBAN port "

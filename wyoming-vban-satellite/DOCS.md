@@ -139,7 +139,7 @@ VBAN source:
 - **vban_port**: UDP port to listen on (e.g. 6980)
 - **vban_mode**: `unicast` (default) or `multicast`
 - **multicast_group**: Multicast group address (e.g. `239.0.0.1`), required when mode is `multicast` (optional, ignored in `unicast` mode)
-- **multicast_interface**: address of this host's network interface that joins the group (e.g. `192.168.1.10`); empty (default) lets the system choose, which is the default route's interface. Useful on a host with several interfaces (VLAN, Docker) when no multicast audio arrives. Satellites sharing a VBAN port must use the same one.
+- **multicast_interface**: address of this host's network interface that joins the group (e.g. `192.168.1.10`); empty (default) lets the system choose, which is the default route's interface. Useful on a host with several interfaces (VLAN, Docker) when no multicast audio arrives. Satellites sharing a VBAN port must use the same one. Multicast sent by the satellite (VBAN output in multicast mode, debug copies to a multicast address) leaves by this interface too; it is kept for that when only the VBAN output is in multicast mode.
 - **stream_name**: VBAN stream name routed to this satellite. Leave empty to accept any stream not claimed by another satellite on the same port.
 
 #### Several satellites on the same VBAN port

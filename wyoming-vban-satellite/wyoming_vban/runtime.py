@@ -296,7 +296,7 @@ class SatelliteRunner:
         self.watcher = watcher
         self.publisher = publisher
         self.cues = cues
-        self.mirrors = SatelliteMirrors(mirrors)
+        self.mirrors = SatelliteMirrors(mirrors, cfg.vban_receive_multicast_interface)
         self.vban_sender: Optional[VbanSender] = None
         self.media_output: Optional[MediaPlayerOutput] = None
         self.mic_mute: Optional[MicMute] = None
@@ -398,6 +398,7 @@ class SatelliteRunner:
                 stream_name=cfg.tts_vban_stream_name,
                 volume=cfg.tts_vban_volume,
                 batch_packets=cfg.tts_vban_batch_packets,
+                multicast_interface=cfg.vban_receive_multicast_interface,
             )
             _LOGGER.info(
                 "  TTS VBAN: mode=%s address=%s:%d stream=%s volume=%.2f batch=%d",
@@ -613,11 +614,21 @@ class SatelliteRunner:
             "  Microphone: %s%s", self._describe_mic(),
             " (following the Home Assistant entities)" if cfg.mic_follow_ha else "",
         )
-        _LOGGER.info(
-            "  Follow-up without wake word: %s",
-            f"on (beep={'on' if cfg.followup_beep else 'off'}, "
-            f"timeout={cfg.followup_timeout_s}s)" if cfg.followup_enabled else "off",
-        )
+        if cfg.followup_enabled:
+            latency = (f"{cfg.followup_beep_latency_ms} ms"
+                       if cfg.followup_beep_latency_ms is not None else "default")
+            beep = (f"on {cfg.followup_beep_output}, latency {latency}"
+                    if cfg.followup_beep else "off")
+            followup = f"on (beep {beep}, timeout={cfg.followup_timeout_s}s)"
+        else:
+            followup = "off"
+        _LOGGER.info("  Follow-up without wake word: %s", followup)
+        if cfg.tts_output == "media_player":
+            _LOGGER.info(
+                "  Media player %s: end margin %d ms, keep awake %s",
+                cfg.tts_media_player, cfg.tts_end_margin_ms,
+                "on" if cfg.tts_keep_awake else "off",
+            )
 
     # Live changes
 

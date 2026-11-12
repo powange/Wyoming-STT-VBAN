@@ -116,6 +116,7 @@ class WebUI:
         app.router.add_post("/api/calibration/denoise", self._calibration_denoise)
         app.router.add_post("/api/calibration/autogain", self._calibration_autogain)
         app.router.add_get("/api/calibration/wake_models", self._wake_models)
+        app.router.add_get("/api/calibration/config", self._calibration_config)
         app.router.add_delete("/api/calibration", self._calibration_clear)
         app.router.add_get("/api/calibration", self._calibration_state)
         app.router.add_get("/api/wake_clips", self._clips_list)
@@ -684,6 +685,13 @@ class WebUI:
             session.takes = {}
             session.take_levels = {}
             session.autogain_pcm = {}
+
+    async def _calibration_config(self, request: web.Request) -> web.Response:
+        """Lengths of the measures and wake words to say: the page shows
+        what the server records (one place for them)."""
+        return web.json_response({
+            "step_seconds": self.STEP_SECONDS, "wake_repeats": self.WAKE_REPEATS,
+        })
 
     async def _calibration_state(self, request: web.Request) -> web.Response:
         """The satellite's calibration in progress (or none)."""

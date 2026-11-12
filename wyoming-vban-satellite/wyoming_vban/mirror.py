@@ -19,7 +19,7 @@ from typing import Optional
 
 from .config import DebugMirror
 from .const import WYOMING_RATE
-from .vban import UdpTarget, VbanPacket, VbanSender, build_packet
+from .vban import UdpTarget, VbanPacket, VbanSender, build_packet, set_multicast_interface
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,8 +38,10 @@ class RawMirror:
 
     ERROR_LOG_INTERVAL_S = 5.0
 
-    def __init__(self, address: str, port: int, stream_name: str):
+    def __init__(self, address: str, port: int, stream_name: str,
+                 multicast_interface: str = ""):
         self.address = address
+        self.multicast_interface = multicast_interface
         self.port = port
         self.stream_name = stream_name
         self._socket: Optional[socket.socket] = None
@@ -53,6 +55,7 @@ class RawMirror:
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         if _mode(self.address) == "multicast":
             self._socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
+            set_multicast_interface(self._socket, self.multicast_interface)
 
     def on_packet(self, packet: VbanPacket) -> None:
         if self._socket is None:
@@ -89,7 +92,8 @@ class RawMirror:
 class SatelliteMirrors:
     """The debug mirrors of one satellite."""
 
-    def __init__(self, mirrors: list[DebugMirror]):
+    def __init__(self, mirrors: list[DebugMirror], multicast_interface: str = ""):
+        self.multicast_interface = multicast_interface  # the satellite's
         self.config = list(mirrors)  # as configured (to skip unchanged updates)
         self.mic_received: list[RawMirror] = []
         self._mic_sent: list[VbanSender] = []
@@ -113,12 +117,14 @@ class SatelliteMirrors:
         for mirror in mirrors:
             name = mirror.vban_stream_name()
             if mirror.stream == "mic_received":
-                self.mic_received.append(RawMirror(mirror.address, mirror.port, name))
+                self.mic_received.append(RawMirror(mirror.address, mirror.port, name,
+                                                   self.multicast_interface))
             else:
                 rate = WYOMING_RATE if mirror.stream == "mic_sent" else TTS_MIRROR_RATE
                 sender = VbanSender(
                     address=mirror.address, port=mirror.port,
                     mode=_mode(mirror.address), stream_name=name, sample_rate=rate,
+                    multicast_interface=self.multicast_interface,
                 )
                 (self._mic_sent if mirror.stream == "mic_sent" else self._tts).append(sender)
             _LOGGER.info(
