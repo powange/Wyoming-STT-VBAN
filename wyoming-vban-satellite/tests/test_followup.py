@@ -7,6 +7,7 @@ Run from wyoming-vban-satellite/:  python3 -m unittest discover tests
 
 import asyncio
 import socket
+import struct
 import time
 import unittest
 import unittest.mock
@@ -71,6 +72,7 @@ class FakeVbanSender:
 
     def send(self, pcm, sample_rate=None, width=None, channels=None) -> None:
         self.sent.append(len(pcm))
+        self.sent_at = getattr(self, "sent_at", []) + [time.monotonic()]
 
     async def wait_sent(self, max_wait: float = 300.0) -> None:
         pass
@@ -416,6 +418,7 @@ class FakeMediaOutput:
 
     entity_id = "media_player.nest"
     state_watcher = None
+    end_margin_s = 0.6
 
     def __init__(self) -> None:
         self.published: list[float] = []  # time each WAV was published
@@ -463,6 +466,144 @@ class FollowupMediaPlayerTest(FollowupTest):
         self.assertGreaterEqual(time.monotonic() - t_run, self.followup.timeout_s - 0.1)
 
     # (the base class's VBAN-output tests don't apply here)
+    async def test_question_reply_is_played_before_next_run(self) -> None:
+        pass
+
+    async def test_announcement_does_not_start_a_run(self) -> None:
+        pass
+
+
+class FakeCastWatcher:
+    """A Nest Mini's state over HA: "playing" 0.1 s after play_media, then
+    "idle" once the WAV has played, plus late_s (Cast reporting it late)."""
+
+    connected = True
+
+    def __init__(self, late_s: float) -> None:
+        self.late_s = late_s
+        self.changes: list = []
+
+    def played(self, url: str, duration: float) -> None:
+        from wyoming_vban.ha_ws import StateChange
+        start = time.monotonic() + 0.1
+        self.changes.append(StateChange(start, "playing", {"media_content_id": url}))
+        self.changes.append(StateChange(start + duration + self.late_s, "idle",
+                                        {"media_content_id": url}))
+
+    async def wait_for(self, entity_id, predicate, since, timeout):
+        deadline = time.monotonic() + timeout
+        while True:
+            now = time.monotonic()
+            for change in self.changes:
+                if since <= change.time <= now and predicate(change):
+                    return change
+            if now >= deadline:
+                return None
+            await asyncio.sleep(0.02)
+
+
+class FakeCastOutput(FakeMediaOutput):
+    def __init__(self, late_s: float) -> None:
+        super().__init__()
+        self.state_watcher = FakeCastWatcher(late_s)
+        self._durations: dict[str, float] = {}
+
+    def publish(self, wav: bytes) -> str:
+        url = super().publish(wav)
+        rate = struct.unpack("<I", wav[24:28])[0]
+        self._durations[url] = (len(wav) - 44) / (rate * 2)
+        return url
+
+    async def play(self, url: str) -> bool:
+        self.state_watcher.played(url, self._durations[url])
+        return True
+
+
+class CastEndTest(FollowupTest):
+    """The end of a response on a Cast speaker reporting it late or on time."""
+
+    followup = FollowupSettings(enabled=True, beep=True, timeout_s=1.0)
+
+    async def next_run(self, timeout: float = 8.0):
+        return await super().next_run(timeout)
+
+    def make_handler(self, reader, writer) -> VbanSatelliteHandler:
+        self.media = getattr(self, "media", None) or FakeCastOutput(late_s=0.0)
+        return VbanSatelliteHandler(
+            reader, writer, self.info, self.receiver, None, media_output=self.media,
+            followup=self.followup, exchange_publisher=self.publisher,
+            satellite_name="Bureau", waiting_cues=self.waiting_cues,
+        )
+
+    async def beep_delay(self) -> float:
+        """From the response's "playing" to the beep's play_media."""
+        await self.next_run()
+        await self.respond("Quelle lumière ?")  # 0.1 s of audio
+        self.assertIsNotNone(await self.next_run(timeout=8))
+        playing = self.media.state_watcher.changes[0].time
+        return self.media.published[1] - playing
+
+    async def test_nest_reporting_the_end_on_time(self) -> None:
+        # Unchanged: the beep follows the reported end (0.1 s), before the estimate
+        self.assertLess(await self.beep_delay(), 0.1 + 0.6)
+
+    async def test_nest_reporting_the_end_5_s_late(self) -> None:
+        self.media.state_watcher.late_s = 5.0
+        delay = await self.beep_delay()
+        # At the estimated end ("playing" + 0.1 s + 0.6 s), not 5 s later
+        self.assertGreaterEqual(delay, 0.1 + 0.6 - 0.05)
+        self.assertLess(delay, 1.5)
+
+    async def test_late_end_is_logged(self) -> None:
+        self.media.state_watcher.late_s = 2.5
+        await self.next_run()
+        with self.assertLogs("wyoming_vban.satellite", "INFO") as logs:
+            await self.respond("Il est 9 heures.")  # no beep after it
+            run = await self.next_run()
+            self.assertEqual(run.start_stage, "wake")
+            await asyncio.sleep(2.5)
+        self.assertTrue(any("Media player reported end 1.8 s after the estimated end" in line
+                            or "Media player reported end 1.9 s after the estimated end" in line
+                            for line in logs.output), logs.output)
+
+    # (the base class's VBAN-output tests don't apply here)
+    async def test_question_reply_is_played_before_next_run(self) -> None:
+        pass
+
+    async def test_announcement_does_not_start_a_run(self) -> None:
+        pass
+
+
+class BeepOnVbanTest(FollowupTest):
+    """followup.beep_output: vban, with the responses on a media player."""
+
+    followup = FollowupSettings(enabled=True, beep=True, timeout_s=1.0, beep_output="vban")
+
+    def make_handler(self, reader, writer) -> VbanSatelliteHandler:
+        self.media = getattr(self, "media", None) or FakeMediaOutput()
+        return VbanSatelliteHandler(
+            reader, writer, self.info, self.receiver, self.sender, media_output=self.media,
+            followup=self.followup, exchange_publisher=self.publisher,
+            satellite_name="Bureau", waiting_cues=self.waiting_cues,
+        )
+
+    async def next_run(self, timeout: float = 8.0):
+        return await super().next_run(timeout)
+
+    async def test_beep_on_vban_then_listening(self) -> None:
+        await self.next_run()
+        await self.respond("Quelle lumière ?")
+        run = await self.next_run()
+        t_run = time.monotonic()
+        self.assertEqual(run.start_stage, "asr")
+        self.assertEqual(len(self.media.published), 1)  # the response only
+        self.assertEqual(self.sender.sent, [int(16000 * 0.15) * 2])  # the beep, on VBAN
+        # Listening once the VBAN beep has played (+ latency + tail)
+        self.assertGreaterEqual(
+            t_run - self.sender.sent_at[0],
+            VbanSatelliteHandler.BEEP_LATENCY_VBAN_S + self.followup.mic_tail_s - 0.1,
+        )
+
     async def test_question_reply_is_played_before_next_run(self) -> None:
         pass
 

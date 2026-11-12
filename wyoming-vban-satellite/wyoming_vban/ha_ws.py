@@ -348,6 +348,21 @@ class HaStateWatcher:
         _LOGGER.debug("%s -> %s", entity_id, change.state)
         self._spawn(self._notify())
 
+    async def state_of(self, entity_id: str) -> Optional[str]:
+        """Current state of an entity: the last change seen, or else asked
+        to HA (None if unknown or not connected)."""
+        changes = self._history.get(entity_id)
+        if changes:
+            return changes[-1].state
+        try:
+            states = await self.call({"type": "get_states"})
+        except (HaUnavailable, HaCommandError):
+            return None
+        for state in states or []:
+            if state.get("entity_id") == entity_id:
+                return state.get("state")
+        return None
+
     async def _notify(self) -> None:
         async with self._changed:
             self._changed.notify_all()

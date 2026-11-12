@@ -95,6 +95,15 @@ def parse_args() -> argparse.Namespace:
         help="media_player output: keep the mic muted this long after the "
         "response has played (default 250, 0 = no tail)",
     )
+    parser.add_argument(
+        "--tts-end-margin-ms", type=int, default=600,
+        help="media_player output: a response is over at most its length plus "
+        "this after playing starts (default 600)",
+    )
+    parser.add_argument(
+        "--tts-keep-awake", action=argparse.BooleanOptionalAction, default=False,
+        help="media_player output: keep the Cast app open with a short silence",
+    )
 
     # Follow-up: answer a question without the wake word
     parser.add_argument(
@@ -118,6 +127,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--followup-beep-latency-ms", type=int, default=None,
         help="Speaker latency of the follow-up beep, 0-3000 (default: per output)",
+    )
+    parser.add_argument(
+        "--followup-beep-output", choices=["media_player", "vban"], default="media_player",
+        help="Where the follow-up beep plays",
     )
 
     # Microphone clean-up

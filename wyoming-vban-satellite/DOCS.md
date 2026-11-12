@@ -183,6 +183,8 @@ Set `output: media_player`, then in the block:
 - **http_port**: Port of the small HTTP server that serves the response to the speaker (default: 10800 + satellite position in the list, i.e. 10800 for the first satellite, 10801 for the second…)
 - **http_host**: LAN IP of the Home Assistant host, used in the URL given to the speaker. Leave empty to auto-detect.
 - **mic_mute_tail_ms**: How long the microphone stays muted after the response has played, 0–5000 ms (default: 250). See below.
+- **end_margin_ms** (default 600): a response is over at the first of: the end the media player reports, or the moment it started playing plus the WAV's length plus this margin. A Cast device that reopens its app (it closes after 5 minutes idle) can report the end seconds late (9.4 s of "playing" for 4.1 s of audio); the log says `Media player reported end X.X s after the estimated end` when it does by more than 1 s.
+- **keep_awake** (default off): 0.2 s of silence every 4 minutes while the satellite is idle, so the Cast app stays open and the first response doesn't wait for it. Never while the speaker plays or has paused something else.
 
 How it works: the full response is buffered, turned into a WAV file served at
 `http://<host>:<port>/tts/<id>.wav`, and played with the
@@ -223,6 +225,7 @@ needed as usual.
 - **enabled**: Enable follow-ups (default: `true`)
 - **beep**: Play a short beep (150 ms, 880 Hz) on the satellite's output (VBAN or media player) when it starts listening for the answer (default: `true`)
 - **timeout_s**: If no speech is detected within this time, go back to wake word listening, 3–30 s (default: 8). Counted from when the listening really opens (see below).
+- **beep_output**: `media_player` (default, with the responses) or `vban` (the satellite's VBAN output, which must be enabled: no Cast latency of about 1.5 s on the beep). The response always ends before the beep.
 - **beep_latency_ms**: how long the speaker takes to play the beep, 0–3000 ms. Empty (default): 400 ms on VBAN, 1500 ms on a media player whose state can't be followed.
 
 At most 3 follow-ups in a row; then the wake word is required again.

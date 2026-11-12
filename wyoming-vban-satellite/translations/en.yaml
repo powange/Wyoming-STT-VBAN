@@ -99,6 +99,12 @@ configuration:
           mic_mute_tail_ms:
             name: Mic mute tail (ms)
             description: Mic kept muted this long after the response (default 250)
+          end_margin_ms:
+            name: End margin (ms)
+            description: A response is over at most its length plus this after the speaker starts playing it, even if the speaker reports its end later (Cast after reopening its app), 0-5000 (default 600)
+          keep_awake:
+            name: Keep the speaker awake
+            description: Plays 0.2 s of silence every 4 minutes while the satellite is idle, so the Cast app doesn't close (reopening it delays the first response by seconds). Never while the speaker plays or pauses something else (default off)
       followup:
         name: Follow-up
         description: Answer a question without the wake word (empty = defaults)
@@ -112,6 +118,9 @@ configuration:
           timeout_s:
             name: Timeout (s)
             description: Back to the wake word without speech (3-30, default 8), counted from when the listening really opens
+          beep_output:
+            name: Beep output
+            description: media_player (default, with the responses) or vban (the satellite's VBAN output, which must be enabled; no Cast latency on the beep). The response always ends before the beep
           beep_latency_ms:
             name: Beep latency (ms)
             description: How long the speaker takes to play the beep, 0-3000 (default empty, 400 on VBAN, 1500 on a media player whose state can't be followed). The listening opens after the beep, once the microphone stream is back, plus media_player.mic_mute_tail_ms

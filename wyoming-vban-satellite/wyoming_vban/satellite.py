@@ -74,6 +74,8 @@ class FollowupSettings:
     beep_latency_s: Optional[float] = None
     # Margin after the microphone stream comes back (media_player.mic_mute_tail_ms)
     mic_tail_s: float = 0.25
+    # Where the beep plays: "media_player" (with the responses) or "vban"
+    beep_output: str = "media_player"
 
 
 def make_tones(rate: int, notes: list[tuple[float, float]], volume: float) -> bytes:
@@ -251,7 +253,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
     # when the media_player state can't be watched
     CAST_START_DELAY_S = 1.5
     PLAY_START_TIMEOUT_S = 5.0  # max wait for the media_player to be playing
-    PLAY_END_MARGIN_S = 5.0  # max wait for the end: WAV duration + this
 
     # Follow-up (satellite-driven runs)
     MAX_FOLLOWUPS = 3  # consecutive follow-ups before requiring the wake word
@@ -353,6 +354,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._was_paused = False  # resumed by RunSatellite (maybe no Describe)
         self._resume_task: Optional[asyncio.Task] = None
         self._switch_task: Optional[asyncio.Task] = None  # follow-up turned on
+        self._beep_output_warned = False
         self._transcript_expiry: Optional[asyncio.Task] = None
 
         # Debug copies of the audio sent to HA and of the responses
@@ -432,6 +434,15 @@ class VbanSatelliteHandler(AsyncEventHandler):
     def ha_ready(self) -> bool:
         """HA has started the satellite on this connection."""
         return self._server_ready
+
+    @property
+    def busy(self) -> bool:
+        """An exchange is under way (response awaited or playing, follow-up)."""
+        return bool(
+            self._awaiting_response or self._tts_receiving or self._followup_active
+            or (self._playback_task is not None and not self._playback_task.done())
+            or (self._next_run_task is not None and not self._next_run_task.done())
+        )
 
     @property
     def is_streaming(self) -> bool:
@@ -1002,22 +1013,49 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return
 
         _LOGGER.debug("Cast playing after %.2fs", started.time - requested_at)
+        # Over at the first of: the end reported, or "playing" + length +
+        # margin (Cast can report the end seconds late, e.g. after reopening
+        # its app: 9.4 s of "playing" for 4.1 s of audio)
+        estimated_end = started.time + duration + self._media_output.end_margin_s
+
+        def ended(c) -> bool:
+            return c.state not in ("playing", "buffering") or not is_ours(c)
+
         finished = await watcher.wait_for(
-            entity_id,
-            lambda c: c.state not in ("playing", "buffering") or not is_ours(c),
-            since=started.time,
-            timeout=duration + self.PLAY_END_MARGIN_S,
+            entity_id, ended, since=started.time,
+            timeout=max(0.0, estimated_end - time.monotonic()),
         )
         if finished is None:
-            # Timed out, or WebSocket lost: fall back to the WAV duration
-            _LOGGER.debug("Cast end not seen, using the WAV duration")
-            await asyncio.sleep(max(0.0, started.time + duration - time.monotonic()))
+            # Not reported yet (or WebSocket lost): the estimated end
+            await asyncio.sleep(max(0.0, estimated_end - time.monotonic()))
+            # (seen only if nothing else is played meanwhile, e.g. no beep)
+            self._watch_late_end(
+                watcher, entity_id,
+                lambda c: c.state not in ("playing", "buffering") and is_ours(c),
+                started.time, estimated_end,
+            )
             return
 
         _LOGGER.debug(
             "Cast finished after %.2fs (WAV %.2fs)",
             finished.time - started.time, duration,
         )
+
+    def _watch_late_end(self, watcher, entity_id, ended, since: float, estimated_end: float) -> None:
+        """Log how late the media player reports the end, to tune
+        media_player.end_margin_ms."""
+
+        async def watch() -> None:
+            finished = await watcher.wait_for(entity_id, ended, since=since, timeout=60.0)
+            if finished is not None and finished.time - estimated_end > 1.0:
+                _LOGGER.info(
+                    "Media player reported end %.1f s after the estimated end",
+                    finished.time - estimated_end,
+                )
+
+        task = asyncio.create_task(watch())
+        _PLAYBACK_TASKS.add(task)
+        task.add_done_callback(_PLAYBACK_TASKS.discard)
 
     def _subscribe_to_vban(self) -> None:
         """Subscribe this handler to VBAN audio packets."""
@@ -1418,7 +1456,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
         """Start the "I'm listening" beep on the satellite's output; returns
         an awaitable ending when it has played (None if none could play)."""
         latency = self._followup.beep_latency_s
-        if self._media_output:
+        on_vban = self._followup.beep_output == "vban"
+        if on_vban and self._vban_sender is None:
+            if not self._beep_output_warned:
+                _LOGGER.warning("followup.beep_output is vban but the VBAN output is off: "
+                                "beep on the media player")
+                self._beep_output_warned = True
+            on_vban = False
+        if self._media_output and not on_vban:
             rate = 22050
             url = self._media_output.publish(_beep_wav(rate, self.BEEP_SECONDS))
             requested_at = time.monotonic()
@@ -1466,13 +1511,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if started is None:
             await asyncio.sleep(max(0.0, estimated_end - time.monotonic()))
             return
-        # A Cast device may not report the end of such a short sound
+        # A Cast device may not report (in time) the end of such a short sound
+        beep_end = started.time + self.BEEP_SECONDS + self._media_output.end_margin_s
         finished = await watcher.wait_for(
             entity_id, lambda c: c.state not in ("playing", "buffering") or not is_ours(c),
-            since=started.time, timeout=self.BEEP_SECONDS + 1.0,
+            since=started.time, timeout=max(0.0, beep_end - time.monotonic()),
         )
         if finished is None:
-            await asyncio.sleep(max(0.0, started.time + self.BEEP_SECONDS - time.monotonic()))
+            await asyncio.sleep(max(0.0, beep_end - time.monotonic()))
 
     async def _wait_mic_back(self, deadline: float) -> Optional[bool]:
         """False if the microphone stream is flowing (or never started: nothing

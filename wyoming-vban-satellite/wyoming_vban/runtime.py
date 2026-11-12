@@ -52,6 +52,8 @@ from .vban import VbanPacket, VbanReceiver, VbanSender, WyomingConverter
 
 _LOGGER = logging.getLogger(__name__)
 
+WYOMING_RATE_FOR_SILENCE = 16000
+
 # Name of the satellite owning the current task, prefixed to log lines
 # (all satellites run in one process). Tasks inherit it from the task
 # that created them.
@@ -295,6 +297,7 @@ class SatelliteRunner:
             timeout_s=cfg.followup_timeout_s,
             beep_latency_s=_ms_to_s(cfg.followup_beep_latency_ms),
             mic_tail_s=cfg.mic_mute_tail_ms / 1000,
+            beep_output=cfg.followup_beep_output,
         )
         # Last values of the satellite's HA microphone entities (if followed)
         self.ha_mic: Optional[HaMicSettings] = None
@@ -401,6 +404,7 @@ class SatelliteRunner:
                 http_port=cfg.tts_http_port,
             )
             self.media_output.state_watcher = self.watcher
+            self.media_output.end_margin_s = cfg.tts_end_margin_ms / 1000
             # Shared by all connections of this satellite
             self.mic_mute = MicMute(
                 tail_s=cfg.mic_mute_tail_ms / 1000,
@@ -442,6 +446,7 @@ class SatelliteRunner:
 
         server: Optional[AsyncServer] = None
         registered = False
+        keep_awake: Optional[asyncio.Task] = None
         try:
             if self.vban_sender:
                 self.vban_sender.open()
@@ -453,6 +458,8 @@ class SatelliteRunner:
                     raise ConfigError(
                         f"Cannot start TTS HTTP server on port {cfg.tts_http_port}: {err}"
                     ) from err
+                keep_awake = asyncio.create_task(self._keep_cast_awake())
+                keep_awake.add_done_callback(_log_task_failure("Cast keep awake"))
 
             server = AsyncServer.from_uri(f"tcp://0.0.0.0:{cfg.wyoming_port}")
             await server.start(handler_factory)
@@ -481,6 +488,9 @@ class SatelliteRunner:
             # awaits Server.wait_closed(), which can hang on Python 3.12.
             await asyncio.Future()
         finally:
+            if keep_awake is not None:
+                keep_awake.cancel()
+                await asyncio.gather(keep_awake, return_exceptions=True)
             if server is not None:
                 await server.stop()
 
@@ -495,6 +505,34 @@ class SatelliteRunner:
             if registered:
                 await self.discovery.unregister(cfg.wyoming_port)
                 _LOGGER.debug("Zeroconf unregistered")
+
+    # Cast keep awake
+
+    KEEP_AWAKE_EVERY_S = 240.0  # Cast closes its app after 5 min idle
+    SILENCE_WAV = build_wav(bytes(int(WYOMING_RATE_FOR_SILENCE * 0.2) * 2),
+                            WYOMING_RATE_FOR_SILENCE, 2, 1)
+
+    async def _keep_cast_awake(self) -> None:
+        """media_player.keep_awake: a short silence every 4 min while the
+        satellite is idle, so the Cast app stays open (reopening it delays
+        the next response by seconds). Never over something else playing."""
+        while True:
+            await asyncio.sleep(self.KEEP_AWAKE_EVERY_S)
+            output = self.media_output
+            if output is None or not self.cfg.tts_keep_awake or self.watcher is None:
+                continue
+            if any(h.busy for h in list(self.handlers)) or (
+                self.mic_mute is not None and self.mic_mute.is_muted()
+            ):
+                continue
+            state = await self.watcher.state_of(output.entity_id)
+            # Not over the user's music (playing, paused) nor an unreachable one
+            if state not in ("idle", "off"):
+                _LOGGER.debug("Keep awake skipped: %s is %s", output.entity_id, state)
+                continue
+            if await output.play(output.publish(self.SILENCE_WAV)):
+                _LOGGER.debug("Keep awake: silence played on %s (was %s)",
+                              output.entity_id, state)
 
     def mic_settings(self) -> tuple[str, bool, float, float]:
         """(noise suppression, auto gain, volume, auto gain target dBFS): the
@@ -569,6 +607,7 @@ class SatelliteRunner:
             self.vban_sender.volume = cfg.tts_vban_volume
         if self.media_output is not None:
             self.media_output.entity_id = cfg.tts_media_player
+            self.media_output.end_margin_s = cfg.tts_end_margin_ms / 1000
         if self.mic_mute is not None:
             self.mic_mute.tail_s = cfg.mic_mute_tail_ms / 1000
         if not cfg.mic_follow_ha:
@@ -583,6 +622,7 @@ class SatelliteRunner:
                 handler.followup_changed()
         self.followup.beep_latency_s = _ms_to_s(cfg.followup_beep_latency_ms)
         self.followup.mic_tail_s = cfg.mic_mute_tail_ms / 1000
+        self.followup.beep_output = cfg.followup_beep_output
         # Handlers hold this object: change its content
         for field in dataclasses.fields(WaitingCues):
             setattr(self.cues, field.name, getattr(cues, field.name))

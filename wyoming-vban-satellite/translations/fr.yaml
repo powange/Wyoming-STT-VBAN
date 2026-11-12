@@ -99,6 +99,12 @@ configuration:
           mic_mute_tail_ms:
             name: Marge de coupure micro (ms)
             description: Micro coupe ce temps apres la reponse (defaut 250)
+          end_margin_ms:
+            name: Marge de fin de lecture (ms)
+            description: Une reponse est finie au plus tard sa duree plus cette marge apres le debut de sa lecture, meme si l'enceinte signale sa fin plus tard (Cast apres la relance de son application), 0-5000 (defaut 600)
+          keep_awake:
+            name: Garder l'enceinte eveillee
+            description: Rejoue 0,2 s de silence toutes les 4 minutes quand le satellite est au repos, pour que l'application Cast ne se ferme pas (la relancer retarde la premiere reponse de plusieurs secondes). Jamais pendant que l'enceinte joue ou a mis en pause autre chose (desactive par defaut)
       followup:
         name: Relance
         description: Repondre a une question sans mot-cle (vide = valeurs par defaut)
@@ -112,6 +118,9 @@ configuration:
           timeout_s:
             name: Delai (s)
             description: Retour au mot-cle sans parole (3-30, defaut 8), compte a partir de l'ouverture reelle de l'ecoute
+          beep_output:
+            name: Sortie du bip
+            description: media_player (defaut, avec les reponses) ou vban (la sortie VBAN du satellite, qui doit etre activee ; plus de latence Cast sur le bip). La reponse est toujours finie avant le bip
           beep_latency_ms:
             name: Latence du bip (ms)
             description: Temps que met le haut-parleur a jouer le bip, 0-3000 (vide par defaut, 400 en VBAN, 1500 sur un media player dont l'etat n'est pas suivi). L'ecoute s'ouvre apres le bip, au retour du flux micro, plus media_player.mic_mute_tail_ms

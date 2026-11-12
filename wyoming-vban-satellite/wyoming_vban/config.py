@@ -60,12 +60,15 @@ OPTION_BLOCKS: dict[str, dict[str, str]] = {
         "http_port": "tts_http_port",
         "http_host": "tts_http_host",
         "mic_mute_tail_ms": "mic_mute_tail_ms",
+        "end_margin_ms": "tts_end_margin_ms",
+        "keep_awake": "tts_keep_awake",
     },
     "followup": {
         "enabled": "followup_enabled",
         "beep": "followup_beep",
         "timeout_s": "followup_timeout_s",
         "beep_latency_ms": "followup_beep_latency_ms",
+        "beep_output": "followup_beep_output",
     },
     "waiting_sounds": {
         "listen_end_mode": "listen_end_mode",
@@ -155,12 +158,20 @@ class SatelliteConfig:
     tts_http_port: int = DEFAULT_TTS_HTTP_PORT
     tts_http_host: str = ""
     mic_mute_tail_ms: int = 250
+    # A response on the media player is over at most this long after its
+    # length, counted from "playing" (the end Cast reports can come late)
+    tts_end_margin_ms: int = 600
+    # Keep the Cast app open (it closes after 5 min idle; reopening delays
+    # the next response): 0.2 s of silence every 4 min while idle
+    tts_keep_awake: bool = False
     followup_enabled: bool = True
     followup_beep: bool = True
     followup_timeout_s: int = 8
     # Speaker latency of the follow-up beep, 0-3000 ms (None: the output's
     # default, 400 ms on VBAN, 1500 ms on a media player without its state)
     followup_beep_latency_ms: Optional[int] = None
+    # Where the follow-up beep plays: media_player (with the responses) or vban
+    followup_beep_output: str = "media_player"
     # Announcements while the response is prepared. Modes: ANNOUNCEMENT_MODES
     # ("" = not set: default, or from the pre-3.2 booleans below)
     listen_end_mode: str = "none"
@@ -280,6 +291,20 @@ class SatelliteConfig:
                 self.name, self.followup_timeout_s, timeout,
             )
             self.followup_timeout_s = timeout
+
+        margin = max(0, min(5000, int(self.tts_end_margin_ms)))
+        if margin != self.tts_end_margin_ms:
+            _LOGGER.warning(
+                "[%s] media_player.end_margin_ms %s clamped to %d (valid range 0-5000)",
+                self.name, self.tts_end_margin_ms, margin,
+            )
+        self.tts_end_margin_ms = margin
+        if self.followup_beep_output not in ("media_player", "vban"):
+            _LOGGER.warning(
+                "[%s] followup.beep_output '%s' unknown (media_player, vban): using media_player",
+                self.name, self.followup_beep_output,
+            )
+            self.followup_beep_output = "media_player"
 
         if self.followup_beep_latency_ms is not None:
             latency = max(0, min(3000, int(self.followup_beep_latency_ms)))

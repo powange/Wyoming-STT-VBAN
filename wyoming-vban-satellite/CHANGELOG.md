@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.12.0
+
+- **Fix (follow-up on a Cast speaker)**: the beep came seconds after a question when the Nest reported the end of the response late (after reopening its Cast app: 9.4 s of "playing" for 4.1 s of audio), because the app waited for it to go back to idle. A response is now over at the first of: the end reported, or "playing" + the WAV's length + `media_player.end_margin_ms` (600 ms by default); without "playing", as before. Same for the beep on the media player. The log says `Media player reported end X.X s after the estimated end` when the speaker is more than 1 s late, to tune the margin.
+- **New `followup.beep_output`**: `media_player` (default) or `vban`: the beep on the satellite's VBAN output (e.g. the Atom of the room), without the Cast latency. The response always ends before the beep.
+- **New `media_player.keep_awake`** (off by default): 0.2 s of silence every 4 minutes while the satellite is idle, so the Cast app doesn't close and the first response doesn't pay for reopening it. Never while the speaker plays or has paused something else, nor while it can't be reached.
+
 ## 3.11.1
 
 - **Fix (follow-up without wake word)**: Home Assistant ended the follow-up's listening before the app opened it, then the satellite stopped listening at all. The ASR run was sent with the beep, so Home Assistant's end of speech detection only got silence and stopped after about 0.8 s, while the app waited for the beep to play (1.5 s on a Nest Mini); nothing then brought the satellite back to the wake word.
