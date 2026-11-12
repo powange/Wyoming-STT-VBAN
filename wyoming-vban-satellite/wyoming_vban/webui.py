@@ -9,6 +9,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any, Optional
@@ -19,7 +20,9 @@ from aiohttp import web
 
 from . import calibration, wake_test
 from .calibration import CalibrationSession
-from .config import ConfigError, parse_options, validate
+from .config import (
+    AUTO_GAIN_TARGET_RANGE, MIC_VOLUME_RANGE, ConfigError, parse_options, validate,
+)
 from .ha_ws import HaCommandError, HaUnavailable
 from .media_player import build_wav
 from .mic_filter import MicFilter
@@ -343,8 +346,9 @@ class WebUI:
             session.noise_pcm, pcm, noise, session.proposal["volume"], auto_gain, target,
         )
         # Later steps start again from this voice
-        session.denoise, session.denoise_pcm = None, {}
+        session.denoise, session.denoise_pcm, session.noise_choice = None, {}, None
         session.takes, session.autogain, session.autogain_pcm = {}, None, {}
+        session.take_levels, session.wake = {}, None
         return {"noise": session.noise, "voice": session.voice, "proposal": session.proposal}
 
     @staticmethod
@@ -352,7 +356,10 @@ class WebUI:
         """The noise suppression level picked in step A (or recommended)."""
         level = body.get("noise_suppression")
         if level in calibration.NOISE_SUPPRESSION_LEVELS:
+            session.noise_choice = level  # restored with the page
             return level
+        if session.noise_choice is not None:
+            return session.noise_choice
         return session.denoise["recommended"] if session.denoise else "off"
 
     async def _calibration_denoise(self, request: web.Request) -> web.Response:
@@ -361,6 +368,9 @@ class WebUI:
         session = self._session(name)
         if session is None or session.proposal is None:
             return web.json_response({"error": "Faites d'abord la mesure de la voix"}, status=400)
+        if name in self._busy:
+            return web.json_response(
+                {"error": "Un calibrage est déjà en cours sur ce satellite"}, status=409)
 
         def analyze() -> dict[str, Any]:
             rows, previews = calibration.compare_noise_levels(
@@ -374,14 +384,22 @@ class WebUI:
             }
             return session.denoise
 
-        return web.json_response(await asyncio.to_thread(analyze))
+        self._busy.add(name)
+        try:
+            return web.json_response(await asyncio.to_thread(analyze))
+        finally:
+            self._busy.discard(name)
 
     async def _calibration_autogain(self, request: web.Request) -> web.Response:
         """Step B: near / far voice levels -> auto gain on or off."""
         body = await self._json(request)
-        session = self._session(str(body.get("satellite", "")))
+        name = str(body.get("satellite", ""))
+        session = self._session(name)
         if session is None or not {"near", "far"} <= set(session.takes):
             return web.json_response({"error": "Enregistrez d'abord les deux prises"}, status=400)
+        if name in self._busy:
+            return web.json_response(
+                {"error": "Un calibrage est déjà en cours sur ce satellite"}, status=409)
         noise = self._noise_choice(session, body)
 
         def analyze() -> dict[str, Any]:
@@ -403,10 +421,13 @@ class WebUI:
                     session.noise_pcm, raw, noise, volume, True, decision["target_db"])
             return decision
 
+        self._busy.add(name)
         try:
             return web.json_response(await asyncio.to_thread(analyze))
         except ValueError:
             return web.json_response({"error": "Aucune voix dans les prises"}, status=409)
+        finally:
+            self._busy.discard(name)
 
     # openWakeWord app: fixed here, not taken from the request (the page
     # can't make the app open connections elsewhere)
@@ -615,17 +636,32 @@ class WebUI:
 
     @staticmethod
     def _apply_values(body: dict[str, Any]) -> dict[str, Any]:
+        """ValueError / TypeError if invalid (NaN, infinity, not a boolean…);
+        numbers are clamped to their option's range."""
+
+        def number(key: str, low: float, high: float) -> float:
+            value = body[key]
+            if isinstance(value, bool):
+                raise TypeError(key)
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError(key)
+            return max(low, min(high, value))
+
         values: dict[str, Any] = {}
         if body.get("volume") is not None:
-            values["volume"] = round(float(body["volume"]), 2)
+            values["volume"] = round(number("volume", *MIC_VOLUME_RANGE), 2)
         if body.get("noise_suppression") is not None:
             if body["noise_suppression"] not in calibration.NOISE_SUPPRESSION_LEVELS:
                 raise ValueError("noise_suppression")
             values["noise_suppression"] = body["noise_suppression"]
         if body.get("auto_gain") is not None:
-            values["auto_gain"] = bool(body["auto_gain"])
+            if not isinstance(body["auto_gain"], bool):
+                raise TypeError("auto_gain")
+            values["auto_gain"] = body["auto_gain"]
             if values["auto_gain"] and body.get("auto_gain_target_db") is not None:
-                values["auto_gain_target_db"] = int(round(float(body["auto_gain_target_db"])))
+                values["auto_gain_target_db"] = int(round(
+                    number("auto_gain_target_db", *AUTO_GAIN_TARGET_RANGE)))
         return values
 
     def _forget(self, name: str, applied: dict[str, Any], finish: Any) -> None:
@@ -636,10 +672,13 @@ class WebUI:
         if finish:
             del self._sessions[name]
             return
+        session.applied.update(applied)  # restored with the page
+        if "noise_suppression" in applied:
+            session.noise_choice = applied["noise_suppression"]
         if "volume" in applied:
             session.voice_after_pcm = b""
-        if "noise_suppression" in applied:  # the voice take only served step A
-            session.voice_pcm = b""
+        if "noise_suppression" in applied:
+            # (the voice take is kept: step C warms the auto gain up on it)
             session.denoise_pcm = {}
         if "auto_gain" in applied:
             session.takes = {}
@@ -706,6 +745,8 @@ class WebUI:
             return web.json_response({"error": "Extrait inconnu"}, status=404)
         except ValueError:
             return web.json_response({"error": "Statut inconnu"}, status=400)
+        except OSError as err:
+            return web.json_response({"error": f"Extrait non enregistré : {err}"}, status=500)
         return web.json_response({"clip": clip})
 
     async def _status(self, request: web.Request) -> web.Response:

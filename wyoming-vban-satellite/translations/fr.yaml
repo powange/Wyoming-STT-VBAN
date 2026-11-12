@@ -42,7 +42,7 @@ configuration:
             description: Niveau de voix vise par le gain automatique, -31 a -3 dBFS (defaut -18) ; l'onglet Calibrage propose une valeur
           follow_ha_entities:
             name: Suivre les entites Home Assistant
-            description: Les entites Volume du micro, Gain automatique et Niveau de suppression du bruit du satellite dans Home Assistant remplacent les trois reglages ci-dessus (desactive par defaut)
+            description: Les entites Volume du micro, Gain automatique et Niveau de suppression du bruit du satellite dans Home Assistant remplacent les quatre reglages ci-dessus (volume, suppression du bruit, gain automatique et sa cible) (desactive par defaut)
           vban_port:
             name: Port VBAN
             description: Port UDP qui recoit le flux du micro (partageable entre satellites) ; seulement avec la source vban

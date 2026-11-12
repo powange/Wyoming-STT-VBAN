@@ -527,5 +527,19 @@ class CalibrationApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("before", events[0])
 
 
+
+class ApplyValuesTest(unittest.TestCase):
+    def test_numbers_checked_and_clamped(self) -> None:
+        from wyoming_vban.webui import WebUI
+        for bad in ({"volume": float("nan")}, {"volume": float("inf")}, {"volume": True},
+                    {"auto_gain": "oui"},
+                    {"auto_gain": True, "auto_gain_target_db": float("-inf")}):
+            with self.assertRaises((ValueError, TypeError)):
+                WebUI._apply_values(bad)
+        self.assertEqual(WebUI._apply_values({"volume": 50, "auto_gain": True,
+                                              "auto_gain_target_db": -60}),
+                         {"volume": 10.0, "auto_gain": True, "auto_gain_target_db": -31})
+
+
 if __name__ == "__main__":
     unittest.main()

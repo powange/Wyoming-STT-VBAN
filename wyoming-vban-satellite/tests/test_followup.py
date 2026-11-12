@@ -545,6 +545,19 @@ class FollowupMediaPlayerTest(FollowupTest):
             satellite_name="Bureau", waiting_cues=self.waiting_cues,
         )
 
+    async def test_playback_error_still_ends_the_run(self) -> None:
+        await self.next_run()
+
+        def broken(wav: bytes) -> str:
+            raise RuntimeError("disque plein")
+
+        self.media.publish = broken
+        with self.assertLogs("wyoming_vban.satellite", "ERROR"):
+            await self.respond("Il est 9 heures.")
+            # At once, not after the idle guard (5 s)
+            run = await self.next_run(timeout=3)
+        self.assertEqual(run.start_stage, "wake")
+
     async def test_asr_run_only_after_the_beep(self) -> None:
         await self.next_run()
         await self.respond("Quelle lumière ?")

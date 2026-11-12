@@ -9,6 +9,7 @@ as for a VBAN microphone.
 import asyncio
 import audioop
 import collections
+import contextlib
 import logging
 import math
 import re
@@ -187,8 +188,15 @@ class RtspSource:
     async def _read_stderr(self, errors: collections.deque[str]) -> None:
         """Keep ffmpeg's last error lines (and never let its pipe fill up)."""
         assert self._process is not None and self._process.stderr is not None
-        async for line in self._process.stderr:
-            text = mask_url(line.decode(errors="replace").strip())
+        stderr = self._process.stderr
+        while True:
+            try:
+                line = await stderr.readline()
+            except ValueError:  # a line over the stream limit (64 KiB):
+                continue  # dropped by readline, the next ones still read
+            if not line:
+                return
+            text = mask_url(line.decode(errors="replace").strip())[:500]
             if text:
                 errors.append(text)
                 _LOGGER.debug("ffmpeg: %s", text)
@@ -204,7 +212,8 @@ class RtspSource:
                 process.terminate()
                 await asyncio.wait_for(process.wait(), self.STOP_TIMEOUT_S)
             except asyncio.TimeoutError:
-                process.kill()
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
                 await process.wait()
             except ProcessLookupError:
                 pass

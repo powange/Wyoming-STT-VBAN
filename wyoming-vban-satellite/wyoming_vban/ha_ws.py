@@ -173,6 +173,10 @@ class HaStateWatcher:
                                       str(err) or type(err).__name__)
                 finally:
                     self._ws = None
+                    # Changes missed while disconnected: ask HA again
+                    # (state_of) rather than trust the last one seen
+                    for changes in self._history.values():
+                        changes.clear()
                     self._subscriptions = {}
                     self._late_subscriptions = set()
                     for future in self._results.values():

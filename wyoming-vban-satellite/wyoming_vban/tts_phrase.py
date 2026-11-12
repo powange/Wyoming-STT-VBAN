@@ -11,6 +11,7 @@ import hashlib
 import io
 import logging
 import os
+import time
 import wave
 from pathlib import Path
 from typing import Optional
@@ -54,8 +55,8 @@ class TtsPhrase:
         """Use the cached WAV if present. Returns True if loaded."""
         try:
             self.cue = Cue.from_wav(str(self.cache_path))
-        except (OSError, EOFError, wave.Error):
-            return False
+        except (OSError, EOFError, wave.Error, ValueError):
+            return False  # absent or corrupt: synthesized again
         _LOGGER.info("Phrase '%s' loaded from cache (%.2fs)", self.text, self.cue.duration)
         return True
 
@@ -129,9 +130,14 @@ class TtsPhrase:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             # Written aside then renamed: a file cut short by a stop would
             # otherwise be played (truncated) forever
-            partial = self.cache_path.with_suffix(".part")
-            partial.write_bytes(wav)
-            os.replace(partial, self.cache_path)
+            # (named per process and phrase: two writers never share it)
+            partial = self.cache_path.with_name(
+                f"{self.cache_path.name}.{os.getpid()}.{id(self)}.part")
+            try:
+                partial.write_bytes(wav)
+                os.replace(partial, self.cache_path)
+            finally:
+                partial.unlink(missing_ok=True)
         except OSError as err:
             _LOGGER.debug("Phrase not cached (%s): kept in memory only", err)
 
@@ -149,6 +155,10 @@ def remove_stale_phrases(phrases: list[TtsPhrase], cache_dir: Optional[str] = No
                 if path not in keep:
                     path.unlink(missing_ok=True)
                     _LOGGER.debug("Removed stale phrase cache %s", path)
+            # Left by a stop while writing (not one being written now)
+            for path in cache_dir_path.glob(f"{TtsPhrase.CACHE_PREFIX}*.part"):
+                if time.time() - path.stat().st_mtime > 60:
+                    path.unlink(missing_ok=True)
         except OSError:
             pass
 

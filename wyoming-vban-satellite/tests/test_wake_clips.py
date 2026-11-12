@@ -246,6 +246,37 @@ class StoreTest(StoreCase):
         self.assertEqual(again.list()[0]["id"], clip_id)
         self.assertEqual(again.counts()[time.strftime("%Y-%m-%d")]["Salon"]["non_classe"], 1)
 
+    def test_bad_files_dont_lose_the_others(self) -> None:
+        clip_id = self.add(transcript="bonjour")
+        root = self.store.root
+        (root / "liste.json").write_text("[1, 2]", encoding="utf-8")
+        (root / "abime.json").write_text("{", encoding="utf-8")
+        (root / "orphelin.wav").write_bytes(b"RIFF")
+        # An older suggestion (3.10) is computed again
+        meta = json.loads((root / f"{clip_id}.json").read_text(encoding="utf-8"))
+        meta["suggestion"], meta["suggestion_reason"] = "probablement_faux", "ancienne règle"
+        (root / f"{clip_id}.json").write_text(json.dumps(meta), encoding="utf-8")
+        again = ClipStore(str(root), str(self.inbox))
+        clips = again.list()
+        self.assertEqual([c["id"] for c in clips], [clip_id])
+        self.assertEqual(clips[0]["suggestion"], suggest(clips[0])[0])
+        self.assertNotEqual(clips[0]["suggestion_reason"], "ancienne règle")
+        self.assertFalse((root / "orphelin.wav").exists())
+
+    def test_late_transcript_updates_the_inbox_copy(self) -> None:
+        clip_id = self.add()
+        self.store.classify(clip_id, "bon")
+        self.store.update(clip_id, transcript="allume la lumière")
+        copies = list((self.inbox / "dis_moi_jarvis" / "positifs").glob("*.json"))
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(json.loads(copies[0].read_text(encoding="utf-8"))["transcript"],
+                         "allume la lumière")
+
+    def test_report_false_needs_the_satellite(self) -> None:
+        self.add("Salon")
+        self.assertIsNone(self.store.report_false(""))
+        self.assertTrue(self.store.report_false("Salon")["id"])
+
 
 class CaptureTest(FollowupTest):
     """Through the satellite: wake run detection → clip; follow-up → none."""
@@ -410,3 +441,34 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         store.classify(ids[0], "faux")
         await asyncio.sleep(0.1)
         self.assertEqual(sent, [21, 0])  # back to 20: removed
+
+    async def test_review_notification_removed_when_turned_off(self) -> None:
+        import dataclasses
+        sent = []
+
+        async def notify(count: int) -> None:
+            await asyncio.sleep(0.05 if count else 0)  # a slow creation…
+            sent.append(count)
+
+        self.runtime._notify_review = notify
+        self.runtime.options.wake_clips_notify = True
+        store = self.runtime.clip_store
+        for _ in range(21):
+            store.add("Salon", "dis_moi_jarvis-6", chunk(500))
+        await asyncio.sleep(0)
+        # …never overtaken by the removal when the option is turned off
+        error, _ = await self.runtime.apply(
+            dataclasses.replace(self.runtime.options, wake_clips_notify=False))
+        self.assertIsNone(error)
+        await asyncio.sleep(0.2)
+        self.assertEqual(sent, [21, 0])
+
+    async def test_classify_disk_error_is_json(self) -> None:
+        from unittest import mock
+        store = self.runtime.clip_store
+        clip_id = store.add("Salon", "dis_moi_jarvis-6", chunk(500))
+        with mock.patch.object(type(store), "_write_meta", side_effect=OSError("disque plein")):
+            async with self.http.post(self.url("/api/wake_clips/classify"),
+                                      json={"id": clip_id, "status": "bon"}) as resp:
+                self.assertEqual(resp.status, 500)
+                self.assertIn("disque plein", (await resp.json())["error"])

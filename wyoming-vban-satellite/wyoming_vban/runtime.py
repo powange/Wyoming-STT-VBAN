@@ -3,6 +3,7 @@
 import asyncio
 import audioop
 import collections
+import contextlib
 import dataclasses
 import logging
 import math
@@ -10,7 +11,7 @@ import os
 import time
 import wave
 import weakref
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import aiohttp
 from wyoming.server import AsyncServer
@@ -314,6 +315,8 @@ class SatelliteRunner:
         # (time, level dB without DC, DC offset / full scale) per packet
         self._levels: collections.deque[tuple[float, float, float]] = collections.deque()
         self.last_packet_at = 0.0
+        self._stream = cfg.vban_receive_stream_name  # subscribed to
+        self._platforms: dict[str, str] = {}  # media_player -> integration
 
     # Lifecycle
 
@@ -346,7 +349,7 @@ class SatelliteRunner:
         await self.mirrors.close()
 
     def _subscribe(self) -> None:
-        stream = self.cfg.vban_receive_stream_name
+        stream = self._stream = self.cfg.vban_receive_stream_name
         self.receiver.subscribe(self._on_packet, stream)
         for raw in self.mirrors.mic_received:
             self.receiver.subscribe(raw.on_packet, stream)
@@ -519,13 +522,30 @@ class SatelliteRunner:
             ):
                 continue
             state = await self.watcher.state_of(output.entity_id)
-            # Not over the user's music (playing, paused) nor an unreachable one
+            # Not over the user's music (playing, paused) nor an unreachable
+            # one. "off" is a Cast app closed; for a TV or an amplifier it
+            # would turn it on
+            if state == "off" and not await self._is_cast(output.entity_id):
+                state = "off (not a Cast speaker)"
             if state not in ("idle", "off"):
                 _LOGGER.debug("Keep awake skipped: %s is %s", output.entity_id, state)
                 continue
             if await output.play(output.publish(self.SILENCE_WAV)):
                 _LOGGER.debug("Keep awake: silence played on %s (was %s)",
                               output.entity_id, state)
+
+    async def _is_cast(self, entity_id: str) -> bool:
+        """The media_player comes from HA's Cast integration (cached)."""
+        cached = self._platforms.get(entity_id)
+        if cached is None:
+            assert self.watcher is not None
+            try:
+                entry = await self.watcher.call(
+                    {"type": "config/entity_registry/get", "entity_id": entity_id})
+            except (HaUnavailable, HaCommandError):
+                return False  # asked again next time
+            cached = self._platforms[entity_id] = (entry or {}).get("platform", "")
+        return cached == "cast"
 
     def mic_settings(self) -> tuple[str, bool, float, float]:
         """(noise suppression, auto gain, volume, auto gain target dBFS): the
@@ -619,9 +639,12 @@ class SatelliteRunner:
         # Handlers hold this object: change its content
         for field in dataclasses.fields(WaitingCues):
             setattr(self.cues, field.name, getattr(cues, field.name))
-        self._unsubscribe()
-        await self.mirrors.reconfigure(mirrors)
-        self._subscribe()
+        # Only when changed: meanwhile the microphone's packets are lost
+        if mirrors != self.mirrors.config or cfg.vban_receive_stream_name != self._stream:
+            self._unsubscribe()
+            if mirrors != self.mirrors.config:
+                await self.mirrors.reconfigure(mirrors)
+            self._subscribe()
         token = SATELLITE_NAME.set(cfg.name)
         try:
             _LOGGER.info("Settings applied without restart")
@@ -780,6 +803,7 @@ class AppRuntime:
         self.clips_inbox = clips_inbox
         self.clip_store: Optional[ClipStore] = None
         self._review_notified = 0  # queue size last notified (0: none shown)
+        self._review_task: Optional[asyncio.Task] = None
         self._ingress_path: Optional[str] = None
         self.supervisor_url = "http://supervisor"
         self.options: Optional[AppOptions] = None
@@ -787,7 +811,8 @@ class AppRuntime:
         self.fatal = asyncio.Event()
         self.failure = ""
         self._changing = False
-        self._stopping = False
+        # Tasks being stopped on purpose: their end isn't a failure
+        self._expected_stops: set[asyncio.Task] = set()
         self._change_failed = asyncio.Event()
         # One configuration change at a time (double click, calibration
         # applying while the editor saves)
@@ -799,6 +824,7 @@ class AppRuntime:
         self._restart_tasks: dict[str, asyncio.Task] = {}
         self._phrases: Optional[PhraseRegistry] = None
         self._phrase_tasks: dict[int, asyncio.Task] = {}  # id(phrase) -> task
+        self._used_phrases: list[TtsPhrase] = []
         self._watcher: Optional[HaStateWatcher] = None
         self._watcher_task: Optional[asyncio.Task] = None
         self._ha_audio: Optional[HaAudioSync] = None
@@ -842,8 +868,9 @@ class AppRuntime:
         self._phrases = registry
         return {sat.name: _waiting_cues(sat, registry) for sat in options.satellites}
 
-    def _sync_phrases(self, cues: dict[str, WaitingCues]) -> None:
-        """Synthesize the phrases in use, drop the others."""
+    def _sync_phrases(self, cues: dict[str, WaitingCues], clean: bool = True) -> None:
+        """Synthesize the phrases in use, drop the others (their cache
+        files too unless clean is False: see _clean_up)."""
         used = {}
         for sat_cues in cues.values():
             for field in dataclasses.fields(WaitingCues):
@@ -862,7 +889,9 @@ class AppRuntime:
             self._phrases._phrases = {
                 k: p for k, p in self._phrases._phrases.items() if id(p) in used
             }
-        remove_stale_phrases(list(used.values()), self.cache_dir)
+        self._used_phrases = list(used.values())
+        if clean:
+            remove_stale_phrases(self._used_phrases, self.cache_dir)
 
     async def _set_watcher(self, needed: bool, options: AppOptions) -> None:
         """Start or stop the HA WebSocket and attach it to the satellites.
@@ -903,8 +932,9 @@ class AppRuntime:
 
     # Wake word clips
 
-    def _sync_clips(self, options: AppOptions) -> None:
-        """Open (or close) the clip store, give each satellite its recorder."""
+    def _sync_clips(self, options: AppOptions, purge: bool = True) -> None:
+        """Open (or close) the clip store, give each satellite its recorder
+        (purged with the new limits unless purge is False: see _clean_up)."""
         if not options.wake_clips_enabled:
             self.clip_store = None
         elif self.clip_store is None:
@@ -922,9 +952,16 @@ class AppRuntime:
         else:
             self.clip_store.retention_days = options.wake_clips_retention_days
             self.clip_store.max_clips = options.wake_clips_max
-            self.clip_store.purge()
+            if purge:
+                self.clip_store.purge()
         for runner in self._runners.values():
             self._attach_clips(runner)
+        # The review notification follows its option (and the clips' one)
+        if self.clip_store is not None:
+            self._clips_changed(self.clip_store)
+        elif self._review_notified:
+            self._review_notified = 0
+            self._send_review_notification(0)
 
     def _attach_clips(self, runner: SatelliteRunner) -> None:
         if self.clip_store is None or not runner.cfg.wake_clips:
@@ -952,16 +989,30 @@ class AppRuntime:
     def _clips_changed(self, store: ClipStore) -> None:
         """Optional HA notification while more than REVIEW_NOTIFY_ABOVE clips
         wait for their review (removed once back under it)."""
-        if self.options is None or not self.options.wake_clips_notify:
+        if self.options is None:
             return
-        count = len(store.review_queue())
+        count = len(store.review_queue()) if self.options.wake_clips_notify else 0
         if count > self.REVIEW_NOTIFY_ABOVE:
             if count != self._review_notified:
                 self._review_notified = count
-                asyncio.create_task(self._notify_review(count))
+                self._send_review_notification(count)
         elif self._review_notified:
+            # Under the threshold, or notifications turned off: removed
             self._review_notified = 0
-            asyncio.create_task(self._notify_review(0))
+            self._send_review_notification(0)
+
+    def _send_review_notification(self, count: int) -> None:
+        """One at a time, in order (a removal never overtaken by an older
+        creation)."""
+        previous = self._review_task
+
+        async def send() -> None:
+            if previous is not None:
+                await asyncio.gather(previous, return_exceptions=True)
+            await self._notify_review(count)
+
+        self._review_task = asyncio.create_task(send())
+        self._review_task.add_done_callback(_log_task_failure("Review notification"))
 
     async def _notify_review(self, count: int) -> None:
         watcher = self._watcher
@@ -991,7 +1042,7 @@ class AppRuntime:
 
     async def _ingress_link(self) -> str:
         """The app's page in Home Assistant (/hassio/ingress/<slug>)."""
-        if self._ingress_path is None:
+        if not self._ingress_path:  # unknown, or failed before: asked again
             self._ingress_path = ""
             try:
                 async with aiohttp.ClientSession() as session:
@@ -1048,8 +1099,26 @@ class AppRuntime:
     async def _stop_receiver(self, port: int) -> None:
         self._receivers.pop(port).stop()
         task = self._receiver_tasks.pop(port)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        with self._expected_stop(task):
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    @contextlib.contextmanager
+    def _expected_stop(self, task: Optional[asyncio.Task]) -> Iterator[None]:
+        """While stopping this task: its end isn't a failure (its done
+        callback runs before the stop's await returns)."""
+        if task is None:
+            yield
+            return
+        self._expected_stops.add(task)
+        try:
+            yield
+        finally:
+            self._expected_stops.discard(task)
+
+    async def _stop_satellite(self, runner: SatelliteRunner) -> None:
+        with self._expected_stop(runner.task):
+            await runner.stop()
 
     def _start_runner(
         self, sat: SatelliteConfig, cues: WaitingCues, mirrors: list[DebugMirror],
@@ -1069,11 +1138,7 @@ class AppRuntime:
         )
 
     async def _stop_runner(self, name: str) -> None:
-        self._stopping = True
-        try:
-            await self._runners.pop(name).stop()
-        finally:
-            self._stopping = False
+        await self._stop_satellite(self._runners.pop(name))
 
     def _on_task_done(self, task: asyncio.Task, what: str, satellite: str = "") -> None:
         """A satellite or receiver stopped: a failure unless we stopped it.
@@ -1082,7 +1147,7 @@ class AppRuntime:
         Otherwise a satellite is started again a bit later, alone; a
         receiver (they retry by themselves) stops the app.
         """
-        if self._stopping or task.cancelled():
+        if task in self._expected_stops or task.cancelled():
             return
         self.failure = f"{what} stopped ({task.exception() or 'no error'})"
         _LOGGER.error("%s", self.failure)
@@ -1104,7 +1169,19 @@ class AppRuntime:
         _LOGGER.warning("Satellite '%s' is started again in %.0fs", name, delay)
         if (old := self._restart_tasks.get(name)) is not None:
             old.cancel()
-        self._restart_tasks[name] = asyncio.create_task(self._restart_runner(name, runner, delay))
+        task = asyncio.create_task(self._restart_runner(name, runner, delay))
+        self._restart_tasks[name] = task
+
+        def done(task: asyncio.Task, name: str = name) -> None:
+            if self._restart_tasks.get(name) is task:
+                del self._restart_tasks[name]
+            if not task.cancelled() and task.exception() is not None:
+                exc = task.exception()
+                _LOGGER.error("Satellite '%s' not started again: %s", name, exc,
+                              exc_info=exc)
+                report_problem(f"Satellite '{name}' pas redémarré : {exc}")
+
+        task.add_done_callback(done)
 
     async def _restart_runner(self, name: str, failed: SatelliteRunner, delay: float) -> None:
         await asyncio.sleep(delay)
@@ -1117,11 +1194,7 @@ class AppRuntime:
             mirrors = validate_mirrors(self.options.debug_mirrors, self.options.satellites,
                                        quiet=True)
             del self._runners[name]
-            self._stopping = True
-            try:
-                await failed.stop()
-            finally:
-                self._stopping = False
+            await self._stop_satellite(failed)
             _LOGGER.info("Starting satellite '%s' again", name)
             self._start_runner(sat, failed.cues, [m for m in mirrors if m.satellite == name])
 
@@ -1160,13 +1233,12 @@ class AppRuntime:
 
     async def stop(self) -> None:
         """Stop everything (the app keeps running)."""
-        self._stopping = True
         try:
-            for task in self._restart_tasks.values():
+            for task in list(self._restart_tasks.values()):
                 task.cancel()
             self._restart_tasks = {}
-            for runner in self._runners.values():
-                await runner.stop()
+            for runner in list(self._runners.values()):
+                await self._stop_satellite(runner)
             for task in self._phrase_tasks.values():
                 task.cancel()
             await asyncio.gather(*self._phrase_tasks.values(), return_exceptions=True)
@@ -1176,6 +1248,7 @@ class AppRuntime:
                 await asyncio.gather(self._watcher_task, return_exceptions=True)
             for port in list(self._receivers):
                 await self._stop_receiver(port)
+            await self.discovery.close()  # (normally closed with its last service)
         finally:
             self._runners = {}
             self._phrase_tasks = {}
@@ -1183,7 +1256,6 @@ class AppRuntime:
             self._watcher = None
             self._watcher_task = None
             self.publisher.watcher = None
-            self._stopping = False
 
     async def apply(self, options: AppOptions) -> tuple[Optional[str], list[str]]:
         """Apply new (validated) options, restarting only what must be.
@@ -1219,6 +1291,7 @@ class AppRuntime:
                 await asyncio.wait_for(self._change_failed.wait(), self.STARTUP_CHECK_S)
             except asyncio.TimeoutError:
                 _LOGGER.info("New configuration applied")
+                self._clean_up()
                 return None
             error = self.failure
             _LOGGER.error("New configuration failed (%s): restoring the previous one", error)
@@ -1233,6 +1306,16 @@ class AppRuntime:
         finally:
             self._changing = False
 
+    def _clean_up(self) -> None:
+        """A change is confirmed: clips beyond the new limits, phrases no
+        longer used."""
+        try:
+            if self.clip_store is not None:
+                self.clip_store.purge()
+            remove_stale_phrases(self._used_phrases, self.cache_dir)
+        except OSError as err:
+            _LOGGER.error("Clean-up after the change: %s", err)
+
     async def _roll_back(self, previous: AppOptions) -> bool:
         """Back to the previous options, restarting only what differs or
         stopped (the satellites the change didn't touch keep running).
@@ -1244,11 +1327,7 @@ class AppRuntime:
                     for name, runner in list(self._runners.items()):
                         if runner.receiver is self._receivers.get(port):
                             await self._stop_runner(name)
-                    self._stopping = True
-                    try:
-                        await self._stop_receiver(port)
-                    finally:
-                        self._stopping = False
+                    await self._stop_receiver(port)
             for name, runner in list(self._runners.items()):
                 if runner.task is None or runner.task.done():
                     await self._stop_runner(name)
@@ -1269,9 +1348,11 @@ class AppRuntime:
         cues = self._build_cues(new)
         self.options = new
         logging.getLogger().setLevel(logging.DEBUG if new.debug_logging else logging.INFO)
-        self._sync_clips(new)
+        # Files are deleted once the change is confirmed (_clean_up): not
+        # by a configuration that is refused and rolled back
+        self._sync_clips(new, purge=False)
         self.publisher.enabled = new.publish_exchanges
-        self._sync_phrases(cues)
+        self._sync_phrases(cues, clean=False)
         await self._set_watcher(self._needs_watcher(new, cues), new)
 
         old_sats = {s.name: s for s in old.satellites}
@@ -1305,12 +1386,8 @@ class AppRuntime:
                 done.append(f"satellite '{name}' removed")
             elif name in restart:
                 await self._stop_runner(name)
-        self._stopping = True
-        try:
-            for port in changed_ports:
-                await self._stop_receiver(port)
-        finally:
-            self._stopping = False
+        for port in changed_ports:
+            await self._stop_receiver(port)
         for port, sat in wanted.items():
             if port not in self._receivers:
                 self._start_receiver(port, sat)

@@ -17,7 +17,6 @@ from .const import (
     VBAN_DATATYPE_FLOAT32,
     VBAN_DATATYPE_FLOAT64,
     VBAN_DATATYPE_INT16,
-    VBAN_DATATYPE_INT32,
     VBAN_DATATYPE_UINT8,
     VBAN_DATATYPE_WIDTH,
     VBAN_HEADER_SIZE,
@@ -33,6 +32,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Rate-limit non-PCM codec warnings to avoid log spam
 _non_pcm_warned_codecs: set = set()
+_unsupported_formats_warned: set = set()
 
 
 @dataclass
@@ -72,6 +72,15 @@ def parse_packet(data: bytes) -> Optional[VbanPacket]:
     data_format_codec = data[7]
     data_format = data_format_codec & 0x07
     codec = data_format_codec & 0xF0
+
+    if data_format not in VBAN_DATATYPE_WIDTH:
+        # 12 and 10-bit formats (6, 7): read as 16-bit they'd be noise
+        if data_format not in _unsupported_formats_warned:
+            _unsupported_formats_warned.add(data_format)
+            _LOGGER.warning(
+                "VBAN data format %d not supported — ignoring packets", data_format,
+            )
+        return None
 
     if codec != VBAN_CODEC_PCM:
         # Warn only once per unique codec to avoid log spam (would fire
@@ -147,10 +156,13 @@ def to_mono16(audio: bytes, data_format: int, channels: int) -> bytes:
         return b""
     if data_format in (VBAN_DATATYPE_FLOAT32, VBAN_DATATYPE_FLOAT64):
         floats = array.array("f" if data_format == VBAN_DATATYPE_FLOAT32 else "d", audio)
-        if channels > 1:
+        if channels == 2:
+            floats = [(a + b) / 2 for a, b in zip(floats[::2], floats[1::2])]
+        elif channels > 2:
             floats = floats[::channels]
+        # NaN (s != s) as silence, ±inf clipped
         return array.array(
-            "h", (max(-32768, min(32767, int(s * 32767))) for s in floats)
+            "h", (0 if s != s else int(max(-1.0, min(1.0, s)) * 32767) for s in floats)
         ).tobytes()
     pcm = audio
     if data_format == VBAN_DATATYPE_UINT8:
@@ -379,6 +391,40 @@ class VbanReceiver:
         self._running = False
 
 
+class UdpTarget:
+    """Destination of sendto: a host name is resolved once (sendto would
+    resolve it at every packet, blocking), again when the address changes
+    and after a send error (at most every RETRY_S; meanwhile the last
+    address found is used). None while it was never resolved."""
+
+    RETRY_S = 5.0
+
+    def __init__(self) -> None:
+        self._key: Optional[tuple[str, int]] = None
+        self._resolved: Optional[tuple[str, int]] = None
+        self._stale = True
+        self._retry_at = 0.0
+
+    def get(self, address: str, port: int) -> Optional[tuple[str, int]]:
+        if self._key != (address, port):
+            self._key = (address, port)
+            self._resolved, self._stale, self._retry_at = None, True, 0.0
+        if self._stale:
+            now = time.monotonic()
+            if now >= self._retry_at:
+                self._retry_at = now + self.RETRY_S
+                try:
+                    self._resolved = (socket.gethostbyname(address), port)
+                    self._stale = False
+                except OSError as err:
+                    _LOGGER.warning("Cannot resolve %s: %s", address, err)
+        return self._resolved
+
+    def invalidate(self) -> None:
+        """A send failed: resolve again (the address may have moved)."""
+        self._stale = True
+
+
 class VbanSender:
     """Sends audio as VBAN packets over UDP, paced at the audio rate.
 
@@ -435,6 +481,8 @@ class VbanSender:
         self._data_ready: Optional[asyncio.Event] = None
         self._drain_task: Optional[asyncio.Task] = None
         self._pending_overflow_logged = False
+        self._flush_requested = False  # send the tail without pre-buffering
+        self._target = UdpTarget()
         self._last_send_error_log = 0.0
         self._max_pending_bytes = int(
             (self.MAX_PENDING_MS / 1000) * sample_rate * WYOMING_WIDTH * channels
@@ -451,17 +499,30 @@ class VbanSender:
         leftover audio from a previous stream leaking into the new one.
         """
         self._pending.clear()
+        self._flush_requested = False
 
     def pending_seconds(self) -> float:
         """Duration of the audio still waiting to be sent."""
         return len(self._pending) / (self.sample_rate * WYOMING_WIDTH * self.channels)
 
+    def flush(self) -> None:
+        """The audio is complete: send its last partial packet (padded with
+        silence) now, without waiting for more or for the pre-buffer."""
+        packet_bytes = self.SAMPLES_PER_PACKET * WYOMING_WIDTH * self.channels
+        if self._pending:
+            if len(self._pending) % packet_bytes:
+                self._pending.extend(bytes(packet_bytes - len(self._pending) % packet_bytes))
+            self._flush_requested = True
+            if self._data_ready is not None:
+                self._data_ready.set()
+
     async def wait_sent(self, max_wait: float = 300.0) -> None:
-        """Return once the buffered audio has been sent (or max_wait)."""
-        packet_seconds = self.SAMPLES_PER_PACKET / self.sample_rate
+        """The audio is complete: return once all of it has been sent (or
+        max_wait)."""
+        self.flush()
         deadline = time.monotonic() + max_wait
-        while self.pending_seconds() >= packet_seconds and time.monotonic() < deadline:
-            await asyncio.sleep(0.05)
+        while self._pending and self._socket is not None and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
 
     def open(self) -> None:
         """Create the send socket and start the drain task."""
@@ -580,8 +641,12 @@ class VbanSender:
         packet = self._header + struct.pack("<I", self._frame_counter) + chunk
 
         try:
-            self._socket.sendto(packet, (self.address, self.port))
+            target = self._target.get(self.address, self.port)
+            if target is None:
+                raise OSError(f"{self.address} not resolved")
+            self._socket.sendto(packet, target)
         except OSError as err:
+            self._target.invalidate()
             # Rate-limit send-error logs to avoid spam on persistent failures
             # (e.g. destination unreachable during an entire TTS response).
             now = time.monotonic()
@@ -620,7 +685,9 @@ class VbanSender:
                 # This avoids a race where send() fires between the length
                 # check and the clear (we'd wait 500ms for nothing).
                 self._data_ready.clear()
-                if len(self._pending) >= prebuffer_bytes:
+                if len(self._pending) >= prebuffer_bytes or (
+                    self._flush_requested and self._pending
+                ):
                     break
                 try:
                     await asyncio.wait_for(self._data_ready.wait(), timeout=0.5)
@@ -660,6 +727,8 @@ class VbanSender:
                 if sent_at - next_send > batch_duration / 2:
                     next_send = sent_at
                 next_send += batch_duration
+            if not self._pending:
+                self._flush_requested = False
 
     async def close(self) -> None:
         """Close the send socket and stop the drain task."""

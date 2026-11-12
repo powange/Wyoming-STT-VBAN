@@ -130,10 +130,35 @@ class ClipStore:
                     meta = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if (self.root / f"{meta.get('id')}.wav").exists():
+                meta = self._checked(meta, path.stem)
+                if meta is not None and self.wav_path(meta["id"]).exists():
                     self._clips[meta["id"]] = meta
+            # A WAV without its description (stopped while writing): lost
+            for path in self.root.glob("*.wav"):
+                if path.stem not in self._clips:
+                    path.unlink(missing_ok=True)
         except OSError as err:
             _LOGGER.error("Wake word clips folder %s unusable: %s", self.root, err)
+
+    @staticmethod
+    def _checked(meta: Any, stem: str) -> Optional[dict[str, Any]]:
+        """A clip's description as read from disk, completed (older
+        versions) and with its suggestion computed again (the rules
+        change); None if it isn't one (one bad file mustn't lose the rest)."""
+        if not isinstance(meta, dict) or meta.get("id") != stem:
+            return None
+        if not isinstance(meta.get("time"), (int, float)):
+            return None
+        meta.setdefault("satellite", "")
+        meta.setdefault("wake_word", "")
+        if meta.get("status") not in STATUSES:
+            meta["status"] = "non_classe"
+        for key in ("transcript", "response", "stt_error"):
+            meta.setdefault(key, None)
+        if not isinstance(meta.get("peaks"), list):
+            meta["peaks"] = []
+        meta["suggestion"], meta["suggestion_reason"] = suggest(meta)
+        return meta
 
     def _write_meta(self, meta: dict[str, Any]) -> None:
         path = self.root / f"{meta['id']}.json"
@@ -184,9 +209,9 @@ class ClipStore:
             return
         info.update(fields)
         info["suggestion"], info["suggestion_reason"] = suggest(info)
-        self._write_meta(info)
         if info["status"] in INBOX_FOLDERS:
-            self._write_manifest(wake_word_folder(info["wake_word"]))
+            self._sync_inbox(info)  # its JSON in the inbox too, and the manifest
+        self._write_meta(info)
 
     @_locked
     def classify(self, clip_id: str, status: str) -> dict[str, Any]:
@@ -229,7 +254,10 @@ class ClipStore:
     def report_false(self, satellite: str = "") -> Optional[dict[str, Any]]:
         """"That wasn't for you" from Home Assistant: the satellite's last
         clip is flagged for the review (not classified: it is still to be
-        listened to)."""
+        listened to). The satellite is required: otherwise another room's
+        last clip would be flagged."""
+        if not satellite:
+            return None
         clips = self.list(satellite)
         if not clips:
             return None

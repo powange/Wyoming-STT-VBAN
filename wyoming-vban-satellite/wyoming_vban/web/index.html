@@ -1072,8 +1072,18 @@ function startMeter() {
   };
   if (window.EventSource) {
     calib.source = new EventSource(`api/meter?${query}`);
-    calib.source.onmessage = (event) => renderVu(JSON.parse(event.data));
-    calib.source.onerror = () => { stopMeter(); poll(); }; // e.g. proxy buffering
+    // A proxy buffering the stream gives neither messages nor an error:
+    // polling if nothing came within 2 s
+    const watchdog = setTimeout(() => {
+      if (calib.source === source && !received) { stopMeter(); poll(); }
+    }, 2000);
+    let received = false;
+    const source = calib.source;
+    source.onmessage = (event) => {
+      received = true;
+      renderVu(JSON.parse(event.data));
+    };
+    source.onerror = () => { clearTimeout(watchdog); stopMeter(); poll(); }; // e.g. proxy buffering
   } else {
     poll();
   }
@@ -1119,7 +1129,8 @@ async function resumeCalibration() {
   calib.noise = state.noise;
   calib.result = state.result;
   calib.denoise = state.denoise;
-  calib.noiseChoice = state.denoise ? state.denoise.recommended : null;
+  calib.noiseChoice = state.noise_choice || (state.denoise ? state.denoise.recommended : null);
+  calib.applied = state.applied || {};
   calib.takes = state.takes || {};
   calib.autogain = state.autogain;
   calib.wake = state.wake;
@@ -1503,7 +1514,9 @@ const CLIP_STATUS = { non_classe: "Non classés", bon: "Bons", faux: "Faux", ign
 const wake = { satellite: "", status: "non_classe", clips: [], counts: {}, enabled: true,
                index: 0, audio: null, total: 0, mode: "review",
                listened: new Set() }; // clips heard: only those can be validated
-const review = { queue: [], toReview: 0, doneToday: 0, skipped: [], undo: [], blocked: false };
+const review = { queue: [], toReview: 0, doneToday: 0, skipped: [], undo: [], blocked: false,
+                 pending: false }; // a choice being sent: no other one meanwhile
+let wakeRequest = 0; // only the latest list / queue request is shown
 const SUGGESTION_TEXT = { probablement_faux: "probablement faux", probablement_bon: "probablement bon",
                           a_verifier: "à vérifier" };
 
@@ -1514,9 +1527,11 @@ function openWake() {
 
 async function loadReview(first) {
   const query = new URLSearchParams({ satellite: wake.satellite });
+  const request = ++wakeRequest;
   try {
     const resp = await fetch(`api/wake_clips/review?${query}`);
     const body = await resp.json();
+    if (request !== wakeRequest) return; // a newer request answers
     if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
     wake.enabled = body.enabled;
     // Skipped ones go to the end (decided later); an undone one comes first
@@ -1529,6 +1544,7 @@ async function loadReview(first) {
     renderWake();
     if (review.queue[0] && review.queue[0].id !== before) playClip(review.queue[0], true);
   } catch (err) {
+    if (request !== wakeRequest) return;
     say(`Extraits indisponibles : ${err.message || err}`, "error");
     renderWake();
   }
@@ -1540,41 +1556,63 @@ async function postClassify(id, status) {
     body: JSON.stringify({ id, status }),
   });
   const body = await resp.json();
-  if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
+  if (!resp.ok) {
+    const error = new Error(body.error || `Erreur ${resp.status}`);
+    error.status = resp.status;
+    throw error;
+  }
   return body.clip;
 }
 
 async function decide(status) {
   const clip = review.queue[0];
-  if (!clip || !wake.listened.has(clip.id)) return;
+  if (!clip || !wake.listened.has(clip.id) || review.pending) return;
+  // Out of the queue at once: a second key can't aim at the same clip
+  review.pending = true;
+  review.queue = review.queue.slice(1);
+  renderWake();
+  if (review.queue[0]) playClip(review.queue[0], true);
   try {
     await postClassify(clip.id, status);
     review.undo.push(clip.id);
     review.skipped = review.skipped.filter((id) => id !== clip.id);
     say("");
-    await loadReview();
   } catch (err) {
+    review.queue = [clip, ...review.queue.filter((c) => c.id !== clip.id)];
     say(`Classement impossible : ${err.message || err}`, "error");
+  } finally {
+    review.pending = false;
   }
+  await loadReview();
 }
 
 function skipClip() {
   const clip = review.queue[0];
-  if (!clip) return;
+  if (!clip || review.pending) return;
   review.skipped = review.skipped.filter((id) => id !== clip.id).concat(clip.id);
+  review.queue = review.queue.slice(1).concat(clip); // at once, like a choice
+  renderWake();
+  if (review.queue[0] && review.queue[0] !== clip) playClip(review.queue[0], true);
   loadReview();
 }
 
 async function undoLast() {
+  if (review.pending) return;
   const id = review.undo.pop();
   if (!id) return;
+  review.pending = true;
   try {
     await postClassify(id, "non_classe"); // back in the queue, out of the inbox
     say("Dernier choix annulé : l'extrait est de nouveau à revoir.", "ok");
+    review.pending = false;
     await loadReview(id);
   } catch (err) {
-    review.undo.push(id);
+    // Gone (purged): nothing to undo any more, the next one can be
+    if (err.status !== 404) review.undo.push(id);
     say(`Annulation impossible : ${err.message || err}`, "error");
+    renderWake();
+  } finally {
+    review.pending = false;
   }
 }
 
@@ -1616,14 +1654,17 @@ function reviewCard() {
 
 async function loadClips() {
   const query = new URLSearchParams({ satellite: wake.satellite, status: wake.status });
+  const request = ++wakeRequest;
   try {
     const resp = await fetch(`api/wake_clips?${query}`);
     const body = await resp.json();
+    if (request !== wakeRequest) return; // a newer request answers
     if (!resp.ok) throw new Error(body.error || `Erreur ${resp.status}`);
     Object.assign(wake, { clips: body.clips, counts: body.counts, enabled: body.enabled,
                           total: body.total || 0 });
     wake.index = Math.min(wake.index, Math.max(0, wake.clips.length - 1));
   } catch (err) {
+    if (request !== wakeRequest) return;
     say(`Extraits indisponibles : ${err.message || err}`, "error");
   }
   renderWake();
@@ -1762,6 +1803,8 @@ document.addEventListener("keydown", (event) => {
   if (currentTab !== "wake" || event.target.closest("input, select, textarea") ||
       event.ctrlKey || event.metaKey || event.altKey) return;
   const key = event.key.toLowerCase();
+  // A held key repeats: one choice per press
+  if (event.repeat && key !== "arrowdown" && key !== "arrowup") return;
   if (wake.mode === "review") {
     const current = review.queue[0];
     if (!current) return;

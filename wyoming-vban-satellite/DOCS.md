@@ -117,7 +117,7 @@ Assistant (and to the wake word):
 - **auto_gain**: brings the voice to a steady level (default off), between −12 and +20 dB, only while someone speaks.
 - **auto_gain_target_db**: voice level aimed at by the automatic gain, −31 to −3 dBFS (default −18).
 - **volume**: fixed microphone gain, 0.1–10 (default 1.0), applied first.
-- **follow_ha_entities**: `true` to apply the satellite's *Mic volume*, *Auto gain* and *Noise suppression level* entities of Home Assistant instead of the three settings above (default `false`). Home Assistant creates these entities for Wyoming satellites but doesn't pass them to the pipeline, so on their own they do nothing. Mapping: volume as is; noise `low`/`medium`/`high`/`max` → `light`/`medium`/`strong`/`strong`; auto gain `0` = off, `N` = aim at −N dBFS. Applied live; the last values stay if Home Assistant is unreachable. The entities are found by their registry ids, so renaming them is fine. If Home Assistant ever passes these settings to Wyoming pipelines itself, the processing would be applied twice: turn this off then.
+- **follow_ha_entities**: `true` to apply the satellite's *Mic volume*, *Auto gain* and *Noise suppression level* entities of Home Assistant instead of the four settings above (volume, noise suppression, auto gain and its target) (default `false`). Home Assistant creates these entities for Wyoming satellites but doesn't pass them to the pipeline, so on their own they do nothing. Mapping: volume as is; noise `low`/`medium`/`high`/`max` → `light`/`medium`/`strong`/`strong`; auto gain `0` = off, `N` = aim at −N dBFS. Applied live; the last values stay if Home Assistant is unreachable. The entities are found by their registry ids, so renaming them is fine. If Home Assistant ever passes these settings to Wyoming pipelines itself, the processing would be applied twice: turn this off then.
 
 The **Calibrage** tab of the interface measures the background noise and your
 voice and proposes, step by step, the volume, the noise suppression level (the
@@ -184,7 +184,7 @@ Set `output: media_player`, then in the block:
 - **http_host**: LAN IP of the Home Assistant host, used in the URL given to the speaker. Leave empty to auto-detect.
 - **mic_mute_tail_ms**: How long the microphone stays muted after the response has played, 0–5000 ms (default: 250). See below.
 - **end_margin_ms** (default 600): a response is over at the first of: the end the media player reports, or the moment it started playing plus the WAV's length plus this margin. A Cast device that reopens its app (it closes after 5 minutes idle) can report the end seconds late (9.4 s of "playing" for 4.1 s of audio); the log says `Media player reported end X.X s after the estimated end` when it does by more than 1 s.
-- **keep_awake** (default off): 0.2 s of silence every 4 minutes while the satellite is idle, so the Cast app stays open and the first response doesn't wait for it. Never while the speaker plays or has paused something else.
+- **keep_awake** (default off): 0.2 s of silence every 4 minutes while the satellite is idle, so the Cast app stays open and the first response doesn't wait for it. Never while the speaker plays or has paused something else; on a speaker shown `off`, only if it comes from the Cast integration (a TV or an amplifier would be turned on).
 
 How it works: the full response is buffered, turned into a WAV file served at
 `http://<host>:<port>/tts/<id>.wav`, and played with the

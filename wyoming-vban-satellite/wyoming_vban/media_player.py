@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import socket
+import time
 import uuid
 import wave
 from collections import OrderedDict
@@ -65,14 +66,19 @@ def build_wav(pcm: bytes, rate: int, width: int, channels: int) -> bytes:
 class MediaPlayerOutput:
     """Serves TTS WAV files over HTTP and plays them on a HA media_player."""
 
-    KEEP_FILES = 5  # most recent WAVs kept available (older ones are purged)
+    # WAVs stay available KEEP_S (a long response is read in parts while it
+    # plays: bips and silences published meanwhile must not remove it);
+    # the KEEP_FILES most recent always, MAX_FILES at most (memory)
+    KEEP_S = 600.0
+    KEEP_FILES = 5
+    MAX_FILES = 50
     PLAY_MEDIA_TIMEOUT_S = 5.0
 
     def __init__(self, entity_id: str, http_host: str, http_port: int):
         self.entity_id = entity_id
         self.http_host = http_host
         self.http_port = http_port
-        self._files: "OrderedDict[str, bytes]" = OrderedDict()
+        self._files: "OrderedDict[str, tuple[float, bytes]]" = OrderedDict()
         self._runner: Optional[web.AppRunner] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._token = os.environ.get("SUPERVISOR_TOKEN", "")
@@ -96,7 +102,12 @@ class MediaPlayerOutput:
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, host="0.0.0.0", port=self.http_port)
-        await site.start()
+        try:
+            await site.start()
+        except BaseException:  # e.g. port in use: not left half started
+            await self._runner.cleanup()
+            self._runner = None
+            raise
         self._session = aiohttp.ClientSession()
         _LOGGER.info(
             "TTS HTTP server listening on http://%s:%d/tts/",
@@ -113,9 +124,10 @@ class MediaPlayerOutput:
             self._runner = None
 
     async def _handle_get(self, request: web.Request) -> web.Response:
-        data = self._files.get(request.match_info["name"])
-        if data is None:
+        entry = self._files.get(request.match_info["name"])
+        if entry is None:
             raise web.HTTPNotFound()
+        data = entry[1]
         _LOGGER.debug("Serving %s to %s", request.path, request.remote)
         headers = {"Accept-Ranges": "bytes"}
         # Some renderers (Sonos, DLNA) ask for parts of the file
@@ -136,8 +148,12 @@ class MediaPlayerOutput:
     def publish(self, wav: bytes) -> str:
         """Make a WAV available under a unique name and return its URL."""
         name = f"{uuid.uuid4().hex}.wav"
-        self._files[name] = wav
-        while len(self._files) > self.KEEP_FILES:
+        now = time.monotonic()
+        self._files[name] = (now, wav)
+        while len(self._files) > self.MAX_FILES or (
+            len(self._files) > self.KEEP_FILES
+            and now - next(iter(self._files.values()))[0] > self.KEEP_S
+        ):
             self._files.popitem(last=False)
         return f"http://{self.http_host}:{self.http_port}/tts/{name}"
 

@@ -501,6 +501,36 @@ def validate_mirrors(
     return valid
 
 
+def _is_ipv4_multicast(address: str) -> bool:
+    parts = address.split(".")
+    if len(parts) != 4 or not all(p.isdigit() and int(p) <= 255 for p in parts):
+        return False
+    return 224 <= int(parts[0]) <= 239
+
+
+def _warn_unused_output_options(sat: SatelliteConfig) -> None:
+    """Options that need an output the satellite doesn't have: said at
+    the save, not discovered later (or never)."""
+    vban_output = sat.tts_output != "none" and sat.tts_vban_enabled
+    if (sat.followup_enabled and sat.followup_beep and sat.followup_beep_output == "vban"
+            and not vban_output):
+        _LOGGER.warning(
+            "[%s] followup.beep_output is vban but the VBAN output is off: "
+            "the beep plays on the media_player", sat.name,
+        )
+    if sat.tts_output != "media_player":
+        if sat.tts_keep_awake:
+            _LOGGER.warning(
+                "[%s] media_player.keep_awake is on but the output isn't "
+                "media_player: ignored", sat.name,
+            )
+        if sat.tts_end_margin_ms != SatelliteConfig.tts_end_margin_ms:
+            _LOGGER.warning(
+                "[%s] media_player.end_margin_ms is set but the output isn't "
+                "media_player: ignored", sat.name,
+            )
+
+
 def validate(satellites: list[SatelliteConfig], strict: bool = False) -> None:
     """Check per-satellite settings and conflicts between satellites.
 
@@ -562,6 +592,17 @@ def validate(satellites: list[SatelliteConfig], strict: bool = False) -> None:
                 "microphone.multicast_group is empty. Set the multicast group "
                 "address (e.g. 239.0.0.1), or use unicast mode."
             )
+        if (
+            sat.mic_source == "vban"
+            and sat.vban_receive_mode == "multicast"
+            and not _is_ipv4_multicast(sat.vban_receive_multicast_group)
+        ):
+            raise ConfigError(
+                f"Satellite '{sat.name}': microphone.multicast_group "
+                f"'{sat.vban_receive_multicast_group}' isn't an IPv4 multicast address "
+                "(224.0.0.0 to 239.255.255.255, e.g. 239.0.0.1)"
+            )
+        _warn_unused_output_options(sat)
         if sat.vban_receive_multicast_interface:
             try:
                 socket.inet_aton(sat.vban_receive_multicast_interface)

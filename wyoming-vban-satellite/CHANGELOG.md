@@ -1,5 +1,40 @@
 # Changelog
 
+## 3.12.4
+
+Fixes from the analysis of 3.12.1 (third batch: all the remaining bugs).
+
+- **Follow-up and runs**
+  - The safety net (no run for 5 s) no longer fires while a follow-up's own timeout is armed: after "no speech", if Home Assistant doesn't answer, the dedicated 10 s timeout ends the run (no misleading warning, no extra run when HA's error comes late).
+  - An unexpected error while playing a response or the beep ends the run cleanly (logged, back to the wake word) instead of leaving it to the safety net.
+  - A run's state is set before its `run-pipeline` is sent: an error arriving right after it belongs to the new run (it was taken for the previous one's and ignored).
+  - After the microphone stream stopped and was restarted, a pending follow-up no longer sends an extra listening run and the wake word clips are captured again.
+  - VBAN output: two close responses no longer send `played` twice (the first wait is cancelled and hands its run end over, as with the media player).
+  - A wake word clip is closed at each new run: a later transcript can no longer be attached to it.
+- **VBAN**
+  - With a host name as destination (VBAN output, debug mirrors), the name is resolved once (and again after a send error) instead of at every packet, about 62 times a second, blocking. No change with IP addresses.
+  - Stereo float streams are averaged (only the left channel was kept), a NaN sample is silence (it lost the packet), and the 12 and 10-bit formats are refused with a warning (they were read as 16-bit noise).
+  - The last part of a VBAN response is sent right away (it waited 0.5 s, after `played`).
+- **Microphone**: saving the same clean-up settings again tries the noise suppression / auto gain again after it was bypassed (silent output); only a change or a restart did. Applying any setting live no longer cuts the microphone to Home Assistant for an instant (subscriptions and debug copies are only redone when they change).
+- **Media player**
+  - The WAVs stay available 10 minutes (the 5 most recent always): beeps and silences published while a long response plays no longer remove it (404 in the middle of the playback on speakers reading in parts).
+  - `keep_awake` starts from the speaker's current state after a reconnection to Home Assistant (it could see it idle while music had started), and plays on an `off` speaker only if it comes from the Cast integration (a TV or an amplifier would be turned on every 4 minutes).
+  - The WAV server no longer stays half started when its port is taken.
+- **Configuration**
+  - A refused configuration (rolled back) no longer deletes wake word clips and cached phrases first: they are cleaned up once the change is confirmed.
+  - Checked at the save: the multicast group must be an IPv4 multicast address (224.0.0.0–239.255.255.255) instead of the receiver retrying forever; `followup.beep_output: vban` without a VBAN output, `keep_awake` and `end_margin_ms` without the media player output are reported in the log.
+  - The `follow_ha_entities` description says the HA entities replace four settings (it said three).
+- **Wake word clips**
+  - A clip description that isn't an object no longer stops the loading of all clips; suggestions made by older rules are computed again; WAVs left without their description are removed.
+  - A sorted clip whose transcript comes later gets its JSON in the WakeForge inbox updated too.
+  - "That wasn't for you" without a satellite no longer flags another room's clip.
+  - The review notification is removed when the option is turned off, notifications are sent one at a time in order, and the link to the app is asked again after a Supervisor failure.
+  - Review: two quick keys (or a held key) can no longer sort the same clip twice; "Undo" on a clip purged meanwhile no longer fails forever; an older answer no longer overwrites a newer list (filter changed quickly). A disk error while sorting is shown instead of an error 500.
+- **Calibration**: recording the voice again also resets the near/far takes and the wake word test; step C warms the auto gain up on the voice even after step A was applied; after a reload, what was already applied and the noise level picked are restored; NaN, infinity or a non-boolean are refused and numbers clamped to their range; steps A and B wait for a measure in progress.
+- **Interface**: the level meter falls back to polling when the live stream stays silent for 2 s (a proxy buffering it).
+- **App**: overlapping stops (a satellite restarting while the configuration changes) no longer report false failures nor hide real ones; a satellite restart that fails is logged; the Zeroconf responder is closed when the app stops; a long ffmpeg error line, a forced stop of ffmpeg or a corrupt cached phrase are handled; temporary phrase files no longer remain.
+- **Logs**: `First VBAN packet…` carries the satellite's name, and the "estimating the end of playback" warning is limited per speaker (one satellite's hid another's).
+
 ## 3.12.3
 
 - **Faster sorting of wake word clips**: WakeForge's `manifest.json` re-read and re-hashed every sorted clip at each change (about 190 MB read per click with 2000 clips). Each clip is now hashed once, from the bytes copied to the inbox, and the hash is kept with it; a purge rewrites the manifest once instead of once per deleted clip. One classification with 1000 sorted clips: about 100 ms → 11 ms (more on slower storage). Clips sorted before are hashed once more, then kept.

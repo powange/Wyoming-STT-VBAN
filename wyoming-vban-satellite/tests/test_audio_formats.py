@@ -12,6 +12,7 @@ import math
 import socket
 import struct
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -69,9 +70,54 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(list(array.array("h", to_mono16(stereo, VBAN_DATATYPE_INT16, 2))),
                          [30000, 1000])
 
+    def test_float_stereo_averaged_nan_silent(self) -> None:
+        stereo = array.array("f", [0.5, 0.0, float("nan"), 0.5, float("inf"), 1.0]).tobytes()
+        self.assertEqual(list(array.array("h", to_mono16(stereo, VBAN_DATATYPE_FLOAT32, 2))),
+                         [8191, 0, 32767])
+
+    def test_12_and_10_bit_formats_refused(self) -> None:
+        from wyoming_vban.vban import parse_packet
+        good = build_packet(b"\0" * 4, "Mic", 16000, 1, 2, 0)
+        self.assertIsNotNone(parse_packet(good))
+        odd = bytearray(good)
+        odd[7] = (odd[7] & 0xF0) | 6
+        with self.assertLogs("wyoming_vban.vban", "WARNING"):
+            self.assertIsNone(parse_packet(bytes(odd)))
+
     def test_more_channels_keep_the_first(self) -> None:
         four = struct.pack("<8h", 1, 2, 3, 4, 5, 6, 7, 8)
         self.assertEqual(list(array.array("h", to_mono16(four, VBAN_DATATYPE_INT16, 4))), [1, 5])
+
+
+class SenderTest(unittest.IsolatedAsyncioTestCase):
+    def test_host_name_resolved_once(self) -> None:
+        from unittest import mock
+        from wyoming_vban.vban import UdpTarget
+        target = UdpTarget()
+        target.RETRY_S = 0.0  # (a send error resolves again at most every RETRY_S)
+        with mock.patch("socket.gethostbyname", return_value="192.0.2.7") as resolve:
+            for _ in range(50):
+                self.assertEqual(target.get("enceinte.local", 6980), ("192.0.2.7", 6980))
+            target.invalidate()  # a send error: resolved again, once
+            target.get("enceinte.local", 6980)
+            target.get("enceinte.local", 6980)
+            target.get("autre.local", 6980)  # a new address
+        self.assertEqual(resolve.call_count, 3)
+
+    async def test_tail_sent_without_waiting(self) -> None:
+        from wyoming_vban.vban import VbanSender
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            sender = VbanSender("127.0.0.1", listener.getsockname()[1])
+            sender.open()
+            try:
+                sender.send(b"\1\0" * 100)  # under a packet, under the pre-buffer
+                start = time.monotonic()
+                await sender.wait_sent()
+                self.assertLess(time.monotonic() - start, 0.3)
+                self.assertEqual(sender.pending_seconds(), 0)
+            finally:
+                await sender.close()
 
 
 class StreamNameTest(unittest.TestCase):
@@ -120,6 +166,39 @@ class PhraseCacheTest(unittest.TestCase):
             stale.write_bytes(b"x")
             remove_stale_phrases([], folder)
             self.assertFalse(stale.exists())
+
+
+class OptionChecksTest(unittest.TestCase):
+    def test_multicast_group_checked(self) -> None:
+        sat = SatelliteConfig(name="Salon", vban_receive_mode="multicast",
+                              vban_receive_multicast_group="192.168.1.5", tts_output="none")
+        with self.assertRaisesRegex(ConfigError, "multicast"):
+            validate([sat], strict=True)
+        sat.vban_receive_multicast_group = "239.0.0.1"
+        validate([sat], strict=True)
+
+    def test_options_without_their_output_are_said(self) -> None:
+        sat = SatelliteConfig(name="Salon", tts_output="vban", tts_vban_address="192.0.2.1",
+                              tts_keep_awake=True, tts_end_margin_ms=900)
+        with self.assertLogs("wyoming_vban.config", "WARNING") as logs:
+            validate([sat], strict=True)
+        self.assertTrue(any("keep_awake" in line for line in logs.output))
+        self.assertTrue(any("end_margin_ms" in line for line in logs.output))
+        sat = SatelliteConfig(name="Salon", tts_output="media_player",
+                              tts_media_player="media_player.x", followup_enabled=True,
+                              followup_beep_output="vban")
+        with self.assertLogs("wyoming_vban.config", "WARNING") as logs:
+            validate([sat], strict=True)
+        self.assertTrue(any("beep_output" in line for line in logs.output))
+
+
+class FilterBypassTest(unittest.TestCase):
+    def test_same_settings_try_the_clean_up_again(self) -> None:
+        from wyoming_vban.mic_filter import MicFilter
+        mic_filter = MicFilter("medium", False, 2.0)
+        mic_filter.bypassed = True
+        mic_filter.configure("medium", False, 2.0)
+        self.assertFalse(mic_filter.bypassed)
 
 
 class MulticastInterfaceTest(unittest.TestCase):
@@ -171,8 +250,22 @@ class RangeTest(unittest.IsolatedAsyncioTestCase):
                 async with http.get(url) as resp:
                     self.assertEqual((resp.status, len(await resp.read())), (200, 1024))
                     self.assertEqual(resp.headers["Accept-Ranges"], "bytes")
+                # Beeps and silences published meanwhile don't remove it
+                for _ in range(10):
+                    output.publish(b"x")
+                async with http.get(url) as resp:
+                    self.assertEqual(resp.status, 200)
         finally:
             await output.stop()
+
+    async def test_port_in_use_leaves_nothing_started(self) -> None:
+        with socket.socket() as sock:
+            sock.bind(("0.0.0.0", 0))
+            sock.listen()
+            output = MediaPlayerOutput("media_player.x", "127.0.0.1", sock.getsockname()[1])
+            with self.assertRaises(OSError):
+                await output.start()
+            self.assertIsNone(output._runner)
 
 
 class ReceiverRetryTest(unittest.IsolatedAsyncioTestCase):
@@ -189,6 +282,62 @@ class ReceiverRetryTest(unittest.IsolatedAsyncioTestCase):
         receiver.stop()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+class KeepAwakeTest(unittest.IsolatedAsyncioTestCase):
+    async def keep_awake(self, state: str, platform: str) -> list[str]:
+        """What the keep awake loop plays in one round."""
+        import types
+        from wyoming_vban.runtime import SatelliteRunner
+
+        played: list[str] = []
+
+        class Output:
+            entity_id = "media_player.salon"
+
+            def publish(self, wav: bytes) -> str:
+                return "http://x/silence.wav"
+
+            async def play(self, url: str) -> bool:
+                played.append(url)
+                return True
+
+        class Watcher:
+            async def state_of(self, entity_id):
+                return state
+
+            async def call(self, command):
+                return {"entity_id": command["entity_id"], "platform": platform}
+
+        runner = types.SimpleNamespace(
+            media_output=Output(), cfg=types.SimpleNamespace(tts_keep_awake=True),
+            watcher=Watcher(), handlers=[], mic_mute=None, _platforms={},
+            KEEP_AWAKE_EVERY_S=0.01, SILENCE_WAV=b"",
+        )
+        runner._is_cast = lambda entity_id: SatelliteRunner._is_cast(runner, entity_id)
+        task = asyncio.create_task(SatelliteRunner._keep_cast_awake(runner))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return played
+
+    async def test_off_only_for_cast(self) -> None:
+        self.assertTrue(await self.keep_awake("off", "cast"))  # its app closed
+        self.assertFalse(await self.keep_awake("off", "samsungtv"))  # would turn it on
+        self.assertTrue(await self.keep_awake("idle", "samsungtv"))
+        self.assertFalse(await self.keep_awake("playing", "cast"))
+
+    async def test_history_forgotten_on_reconnection(self) -> None:
+        from wyoming_vban.ha_ws import HaStateWatcher
+        watcher = HaStateWatcher(["media_player.salon"], url="http://127.0.0.1:9/ws")
+        watcher.BACKOFF_MIN_S = 0.01
+        watcher._on_state_trigger({"variables": {"trigger": {
+            "to_state": {"entity_id": "media_player.salon", "state": "idle"}}}})
+        task = asyncio.create_task(watcher.run())  # connection refused
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(len(watcher._history["media_player.salon"]), 0)
 
 
 class CommandLineTest(unittest.TestCase):

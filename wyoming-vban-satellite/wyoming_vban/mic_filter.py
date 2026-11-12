@@ -134,6 +134,10 @@ class MicFilter:
         if (noise_suppression, auto_gain, volume, auto_gain_target_db) == (
             self.noise_suppression, self.auto_gain, self.volume, self.auto_gain_target_db
         ):
+            # Same settings saved again: the clean-up is tried again if it
+            # had been bypassed (otherwise only a change or a restart would)
+            self._silent_s = 0.0
+            self.bypassed = False
             return
         # Rebuild only what changed: a new volume keeps the learnt noise
         # profile and the settled gain

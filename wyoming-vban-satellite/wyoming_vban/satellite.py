@@ -73,18 +73,17 @@ _PLAYBACK_TASKS: "set[asyncio.Task]" = set()
 EXCHANGE_EVENT_TYPE = "jarvis_echange"  # HA event fired for each exchange
 
 FALLBACK_WARNING_INTERVAL_S = 60.0
-_last_fallback_warning = 0.0
+_last_fallback_warning: dict[str, float] = {}  # by speaker
 
 
-def _warn_timing_fallback(reason: str) -> None:
-    """Warn (at most once a minute) that playback end is estimated."""
-    global _last_fallback_warning
+def _warn_timing_fallback(reason: str, entity_id: str = "") -> None:
+    """Warn (at most once a minute per speaker) that playback end is estimated."""
     now = time.monotonic()
-    if now - _last_fallback_warning >= FALLBACK_WARNING_INTERVAL_S:
+    if now - _last_fallback_warning.get(entity_id, 0.0) >= FALLBACK_WARNING_INTERVAL_S:
         _LOGGER.warning(
             "%s — estimating the end of playback from the WAV duration", reason,
         )
-        _last_fallback_warning = now
+        _last_fallback_warning[entity_id] = now
 
 
 @dataclass
@@ -434,6 +433,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._grace_audio: list[bytes] = []
         self._idle_guard_task: Optional[asyncio.Task] = None
         self._vban_end_task: Optional[asyncio.Task] = None
+        self._vban_end_seq: Optional[int] = None
         # Follow-up: mic audio received before this time is replaced by
         # silence (until the listening really opens)
         self._mic_guard_until = 0.0
@@ -670,6 +670,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 _PLAYBACK_TASKS.add(self._playback_task)
                 self._playback_task.add_done_callback(_PLAYBACK_TASKS.discard)
             elif self._vban_sender:
+                # A newer response replaces one still waiting to report
+                # played: it ends the replaced one's run too
+                if self._vban_end_task and not self._vban_end_task.done():
+                    self._vban_end_task.cancel()
+                    if seq is None:
+                        seq = self._vban_end_seq
+                self._vban_end_seq = seq
                 task = asyncio.create_task(self._run_ended_after_vban(seq))
                 self._vban_end_task = task
                 _PLAYBACK_TASKS.add(task)
@@ -947,6 +954,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
         """
         try:
             await self._play_response(pcm, rate, width, channels, generation)
+        except Exception:  # noqa: BLE001 — the run must still end
+            _LOGGER.exception("Response not played")
         finally:
             if self._mic_mute:
                 self._mic_mute.end_response(generation)
@@ -1031,7 +1040,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         started = None
         if watcher is None or not watcher.connected:
-            _warn_timing_fallback("HA WebSocket not connected")
+            _warn_timing_fallback("HA WebSocket not connected", entity_id)
         else:
             started = await watcher.wait_for(
                 entity_id,
@@ -1042,7 +1051,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
             if started is None:
                 _warn_timing_fallback(
                     f"{entity_id} not seen playing within "
-                    f"{self.PLAY_START_TIMEOUT_S:.0f}s"
+                    f"{self.PLAY_START_TIMEOUT_S:.0f}s",
+                    entity_id,
                 )
 
         if started is None:
@@ -1136,14 +1146,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._driven = False
             _LOGGER.info("Follow-up off: Home Assistant restarts the runs again")
         restart = not self._driven
-        await self.write_event(
-            RunPipeline(
-                start_stage=start_stage,
-                end_stage=PipelineStage.TTS,
-                restart_on_end=restart,
-            ).event()
-        )
+        # The new run's state is set before the write: events read while it
+        # is being sent belong to it, not to the previous run
+        previous_seq = self._run_seq
         self._run_seq += 1
+        self._clip = None  # a new exchange: the previous clip is complete
         # A wake run's detection timestamp counts from its first audio chunk
         self._wake_run = start_stage == PipelineStage.WAKE
         self._wake_sample0 = None
@@ -1157,6 +1164,17 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._grace_audio = []
         if start_stage == PipelineStage.WAKE:  # no beep guard outside follow-ups
             self._mic_guard_until = 0.0
+        try:
+            await self.write_event(
+                RunPipeline(
+                    start_stage=start_stage,
+                    end_stage=PipelineStage.TTS,
+                    restart_on_end=restart,
+                ).event()
+            )
+        except BaseException:
+            self._run_seq = previous_seq  # not sent: no new run
+            raise
         _LOGGER.info(
             "Sent run-pipeline: start=%s end=%s restart=%s (reason: %s)",
             start_stage.value, PipelineStage.TTS.value, restart, reason or "?",
@@ -1329,6 +1347,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return False  # a run is open
         pending = (
             self._next_run_task, self._playback_task, self._vban_end_task, self._restart_task,
+            self._watchdog_task,  # an armed watchdog will end the run
         )
         busy = (
             any(t is not None and not t.done() for t in pending)
@@ -1457,6 +1476,15 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 PipelineStage.WAKE, f"previous run over: {self._next_run_reason}")
         except (ConnectionError, OSError):
             pass
+        except Exception:  # noqa: BLE001 — never stay without a run
+            _LOGGER.exception("Next run not started: back to the wake word")
+            self._followup_active = False
+            self._followup_timed_out = False
+            self._followup_count = 0
+            try:
+                await self._send_run_pipeline(PipelineStage.WAKE, "after an internal error")
+            except Exception:  # noqa: BLE001 — the idle guard tries again
+                _LOGGER.exception("Wake run not started")
 
     async def _open_after_beep(self) -> None:
         """Play the beep, then open the listening once it has really played:
@@ -1646,6 +1674,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
     async def _restart_pipeline_after_error(self, delay: float) -> None:
         try:
             await self._stop_streaming()
+            # A new wake run: a pending follow-up (or its watchdog) would
+            # start a second one
+            self._cancel_followup_tasks()
             await asyncio.sleep(delay)
             if self._server_ready and self._is_running and not self._streaming:
                 _LOGGER.info("Restarting pipeline after server error")
@@ -1831,13 +1862,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._mic_back.set()  # the stream (re)starts
         self._last_mic_at = now
         if not self._first_packet_logged:
-            _LOGGER.info(
-                "First %s packet from stream '%s': %dHz, %dch, format=%d",
-                self._mic_label, packet.stream_name,
-                packet.sample_rate,
-                packet.channels,
-                packet.data_format,
-            )
+            # Called from the receiver: the log carries the satellite's name
+            token = SATELLITE_NAME.set(self._satellite_name or SATELLITE_NAME.get())
+            try:
+                _LOGGER.info(
+                    "First %s packet from stream '%s': %dHz, %dch, format=%d",
+                    self._mic_label, packet.stream_name,
+                    packet.sample_rate,
+                    packet.channels,
+                    packet.data_format,
+                )
+            finally:
+                SATELLITE_NAME.reset(token)
             self._first_packet_logged = True
 
         if not self._streaming:

@@ -18,7 +18,7 @@ from typing import Optional
 
 from .config import DebugMirror
 from .const import WYOMING_RATE
-from .vban import VbanPacket, VbanSender, build_packet
+from .vban import UdpTarget, VbanPacket, VbanSender, build_packet
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ class RawMirror:
         self._socket: Optional[socket.socket] = None
         self._counter = 0
         self._last_error_log = 0.0
+        self._target = UdpTarget()
 
     def open(self) -> None:
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -64,8 +65,12 @@ class RawMirror:
         )
         self._counter = (self._counter + 1) & 0xFFFFFFFF
         try:
-            self._socket.sendto(data, (self.address, self.port))
+            target = self._target.get(self.address, self.port)
+            if target is None:
+                raise OSError(f"{self.address} not resolved")
+            self._socket.sendto(data, target)
         except OSError as err:
+            self._target.invalidate()
             now = time.monotonic()
             if now - self._last_error_log >= self.ERROR_LOG_INTERVAL_S:
                 _LOGGER.warning("Debug mirror %s send error: %s", self.stream_name, err)
@@ -81,6 +86,7 @@ class SatelliteMirrors:
     """The debug mirrors of one satellite."""
 
     def __init__(self, mirrors: list[DebugMirror]):
+        self.config = list(mirrors)  # as configured (to skip unchanged updates)
         self.mic_received: list[RawMirror] = []
         self._mic_sent: list[VbanSender] = []
         self._tts: list[VbanSender] = []
@@ -94,6 +100,7 @@ class SatelliteMirrors:
     async def reconfigure(self, mirrors: list[DebugMirror]) -> None:
         """Replace the mirrors (the satellite keeps running)."""
         await self.close()
+        self.config = list(mirrors)
         self.mic_received, self._mic_sent, self._tts = [], [], []
         self._build(mirrors)
         self.open()

@@ -12,7 +12,6 @@ import os
 os.environ["VBAN_SATELLITE_NO_ZEROCONF"] = "1"
 
 import asyncio
-import copy
 import json
 import socket
 import stat

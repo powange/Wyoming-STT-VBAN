@@ -336,6 +336,8 @@ class CalibrationSession:
     autogain: Optional[dict[str, Any]] = None
     autogain_pcm: dict[str, bytes] = field(default_factory=dict)  # "near-after"…
     wake: Optional[dict[str, Any]] = None  # wake word test result (no audio kept)
+    noise_choice: Optional[str] = None  # level picked in step A
+    applied: dict[str, Any] = field(default_factory=dict)  # settings applied so far
 
     def audio(self, which: str) -> bytes:
         """A recording to listen to: before, after, denoise-<level>,
@@ -358,6 +360,8 @@ class CalibrationSession:
             "takes": dict(self.take_levels),
             "autogain": self.autogain,
             "wake": self.wake,
+            "noise_choice": self.noise_choice,
+            "applied": dict(self.applied),
         }
 
     def touch(self) -> None:
