@@ -110,7 +110,7 @@ configuration:
             description: Mic kept muted this long after the response (default 250)
           end_margin_ms:
             name: End margin (ms)
-            description: A response is over at most its length plus this after the speaker starts playing it, even if the speaker reports its end later (Cast after reopening its app), 0-5000 (default 600)
+            description: A response is over at most its length plus this after the speaker starts playing it, even if the speaker reports its end later (Cast after reopening its app), 0-5000 (default 300)
           keep_awake:
             name: Keep the speaker awake
             description: Plays 0.2 s of silence every 4 minutes while the satellite is idle, so the Cast app doesn't close (reopening it delays the first response by seconds). Never while the speaker plays or pauses something else (default off)

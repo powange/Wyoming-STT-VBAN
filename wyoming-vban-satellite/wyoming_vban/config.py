@@ -163,7 +163,7 @@ class SatelliteConfig:
     mic_mute_tail_ms: int = 250
     # A response on the media player is over at most this long after its
     # length, counted from "playing" (the end Cast reports can come late)
-    tts_end_margin_ms: int = 600
+    tts_end_margin_ms: int = 300
     # Keep the Cast app open (it closes after 5 min idle; reopening delays
     # the next response): 0.2 s of silence every 4 min while idle
     tts_keep_awake: bool = False

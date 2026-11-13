@@ -544,7 +544,7 @@ function outputSection(sat, index) {
               placeholder: String(10800 + index) }),
         field(mp, "http_host", { label: "Hôte HTTP", help: "Vide = détection automatique" }),
         field(mp, "end_margin_ms", { label: "Marge de fin de lecture (ms)", type: "number",
-              min: 0, max: 5000, placeholder: "600",
+              min: 0, max: 5000, placeholder: "300",
               help: "réponse finie au plus tard sa durée + cette marge après le début de lecture" }),
         field(mp, "keep_awake", { label: "Garder l'enceinte éveillée", type: "switch", wide: true,
               help: "un court silence toutes les 4 min au repos : la première réponse ne paie plus la relance de Cast" }),

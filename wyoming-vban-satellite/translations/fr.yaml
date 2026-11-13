@@ -110,7 +110,7 @@ configuration:
             description: Micro coupe ce temps apres la reponse (defaut 250)
           end_margin_ms:
             name: Marge de fin de lecture (ms)
-            description: Une reponse est finie au plus tard sa duree plus cette marge apres le debut de sa lecture, meme si l'enceinte signale sa fin plus tard (Cast apres la relance de son application), 0-5000 (defaut 600)
+            description: Une reponse est finie au plus tard sa duree plus cette marge apres le debut de sa lecture, meme si l'enceinte signale sa fin plus tard (Cast apres la relance de son application), 0-5000 (defaut 300)
           keep_awake:
             name: Garder l'enceinte eveillee
             description: Rejoue 0,2 s de silence toutes les 4 minutes quand le satellite est au repos, pour que l'application Cast ne se ferme pas (la relancer retarde la premiere reponse de plusieurs secondes). Jamais pendant que l'enceinte joue ou a mis en pause autre chose (desactive par defaut)

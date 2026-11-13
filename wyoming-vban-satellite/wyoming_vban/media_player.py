@@ -87,7 +87,7 @@ class MediaPlayerOutput:
         self.state_watcher: Optional[HaStateWatcher] = None
         # A playback is over at most its length plus this after "playing"
         # (the end Cast reports can come seconds late)
-        self.end_margin_s = 0.6
+        self.end_margin_s = 0.3
 
     async def start(self) -> None:
         """Start the HTTP server serving /tts/<name>.wav."""

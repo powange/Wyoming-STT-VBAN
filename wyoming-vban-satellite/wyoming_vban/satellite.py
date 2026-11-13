@@ -456,6 +456,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._idle_guard_task: Optional[asyncio.Task] = None
         self._vban_end_task: Optional[asyncio.Task] = None
         self._vban_end_seq: Optional[int] = None
+        # The wake run started while the response plays (media player):
+        # logged once the real microphone is back
+        self._early_wake = False
         # Follow-up: mic audio received before this time is replaced by
         # silence (until the listening really opens)
         self._mic_guard_until = 0.0
@@ -711,6 +714,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
                         ),
                     )
                 )
+                if seq is not None and self._mic_mute is not None and not self._next_is_followup():
+                    # Wake word listening starts now, on the silence sent
+                    # while the response plays: openWakeWord's window is
+                    # full when the real microphone comes back (no warm-up
+                    # after the end of the sound). A question keeps its
+                    # follow-up, opened after the beep.
+                    self._early_wake = True
+                    self._run_ended(seq, reason="response received (wake word during playback)")
             elif self._vban_sender:
                 # A newer response replaces one still waiting to report
                 # played: it ends the replaced one's run too
@@ -1033,12 +1044,18 @@ class VbanSatelliteHandler(AsyncEventHandler):
             await self._send_played()
             return
 
-        await self._wait_playback_end(url, duration, requested_at)
+        sound_end = await self._wait_playback_end(url, duration, requested_at)
 
         # Margin for echo / the very end of the Cast output
         if self._mic_mute:
             await asyncio.sleep(self._mic_mute.tail_s)
             self._mic_mute.end_response(generation)
+            if self._early_wake and generation == self._tts_generation:
+                self._early_wake = False
+                _LOGGER.info(
+                    "Wake word ready %.1f s after the end of the response",
+                    time.monotonic() - sound_end,
+                )
 
         await self._send_played()
 
@@ -1056,13 +1073,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
     async def _wait_playback_end(
         self, url: str, duration: float, requested_at: float
-    ) -> None:
+    ) -> float:
         """Return when the media_player has finished playing url.
 
         Follows the media_player state over the HA WebSocket: wait for it to
         be playing our file, then to stop playing it. Without the WebSocket,
         or if playback is never seen starting, estimate the end from the WAV
         duration and CAST_START_DELAY_S (counted from the play_media call).
+        Returns the estimated end of the sound (monotonic time).
         """
         assert self._media_output is not None
         watcher = self._media_output.state_watcher
@@ -1094,7 +1112,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if started is None:
             estimated_end = requested_at + duration + self.CAST_START_DELAY_S
             await asyncio.sleep(max(0.0, estimated_end - time.monotonic()))
-            return
+            return estimated_end
 
         _LOGGER.debug("Cast playing after %.2fs", started.time - requested_at)
         # Over at the first of: the end reported, or "playing" + length +
@@ -1118,12 +1136,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 lambda c: c.state not in ("playing", "buffering") and is_ours(c),
                 started.time, estimated_end,
             )
-            return
+            return started.time + duration
 
         _LOGGER.debug(
             "Cast finished after %.2fs (WAV %.2fs)",
             finished.time - started.time, duration,
         )
+        return min(finished.time, started.time + duration)
 
     def _watch_late_end(self, watcher, entity_id, ended, since: float, estimated_end: float) -> None:
         """Log how late the media player reports the end, to tune
@@ -1461,6 +1480,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         except (ConnectionError, OSError):
             pass
 
+    def _next_is_followup(self) -> bool:
+        """The next run will be a follow-up (see _start_next_run)."""
+        return (self._expect_followup and self._followup.enabled
+                and self._followup_count < self.MAX_FOLLOWUPS)
+
     def _run_ended(self, seq: int, delay: float = 0.0, reason: str = "run over") -> None:
         """The run seq is over (response played, error or timeout).
 
@@ -1490,10 +1514,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 self._followup_active = False
                 self._followup_timed_out = False
 
+            followup = self._next_is_followup()
             expect, self._expect_followup = self._expect_followup, False
             # (follow-up turned off meanwhile: back to the wake word)
             expect = expect and self._followup.enabled
-            if expect and self._followup_count < self.MAX_FOLLOWUPS:
+            if followup:
                 self._followup_count += 1
                 _LOGGER.info(
                     "Follow-up: response is a question → listening without wake word"
