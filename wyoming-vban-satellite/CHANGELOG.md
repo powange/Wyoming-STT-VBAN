@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.16.0
+
+- **New: conversation agent prewarmed with each satellite's context.** The first question to Ollama after a quiet time took up to 46 s (14/11, Bureau: "Combien font 2 x 7 ?" answered after 45.6 s, the next one after 3.8 s), although Home Assistant had been prewarmed a minute before: Home Assistant builds a different system prompt for each device (its area, timers support, before the exposed entities), and the `conversation.process` action, without a device, warms the version no satellite uses.
+  - On the HA event `jarvis_prechauffage` (data: `satellites`, optional list; all by default), each satellite is warmed in turn, never in parallel, with the WebSocket command `conversation/process`: the agent of its pipeline (its pipeline select, or the preferred pipeline), its `device_id`, language `fr`, "Préchauffage, réponds seulement OK.", a new conversation. Nothing is played, no `jarvis_echange`, no change of the satellite's state. A satellite listening, thinking or answering is warmed 30 s later; 90 s at most per satellite.
+  - New global option `prewarm_idle_minutes` (0 = off, the default): a satellite is warmed again after this many minutes without a question.
+  - Log: `Prewarm Bureau: X.X s` (under ~6 s the cache was good, 20 s and more the prompt was read again).
+
 ## 3.15.0
 
 - **Wake word ready right after a response** (media player output, follow-up on): after a response, "Dis-moi Jarvis" only worked again about 1.5 s after the end of the sound, 2.5 s after Home Assistant showed "idle" (13/11, Bureau, Nest Mini: the wake run left at 34.8 s for a sound ending around 34.2 s, then openWakeWord filled its window). The wake run now starts as soon as the response is received (within 100 ms), while it plays: the microphone is replaced by silence as before (muted during the response), so nothing is detected during the playback, and openWakeWord's window is already full when the real microphone comes back, at the end of the sound plus `end_margin_ms` and `mic_mute_tail_ms`. A response that is a question keeps its follow-up, opened after the beep. New log: `Wake word ready X.X s after the end of the response`. The VBAN output is unchanged (no microphone mute there).

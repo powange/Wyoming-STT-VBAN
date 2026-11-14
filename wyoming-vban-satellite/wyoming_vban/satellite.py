@@ -353,8 +353,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         debug_mirrors: Optional["SatelliteMirrors"] = None,
         clip_recorder: Optional[Callable[[], Optional["ClipRecorder"]]] = None,
         end_of_speech: Optional[EndOfSpeechSettings] = None,
+        on_question: Optional[Callable[[], None]] = None,
     ):
         super().__init__(reader, writer)
+        self._on_question = on_question  # a transcript: the agent is asked
+        self._stt_active = False  # wake word heard / STT running: listening
         # End of speech detected by the app during STT (shared settings)
         self._eos_settings = end_of_speech or EndOfSpeechSettings()
         self._eos = EndOfSpeechDetector()
@@ -489,6 +492,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         """An exchange is under way (response awaited or playing, follow-up)."""
         return self._followup_active or self._work_pending()
 
+    @property
+    def in_exchange(self) -> bool:
+        """Listening (after the wake word), thinking or answering."""
+        return self._stt_active or self.busy
+
     def _work_pending(self) -> bool:
         """Something under way will end or start a run: a response awaited,
         received or playing, a sound, a pending task or timeout. The one
@@ -548,6 +556,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             return True
 
         if event.type == "transcribe":
+            self._stt_active = True
             # STT starts (after the wake word, or a follow-up run): follow
             # the speech to end it without waiting for HA's VAD
             if self._eos_settings.enabled and self._streaming and not self._mic_paused:
@@ -560,6 +569,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if event.type == "transcript":
             self._eos.disarm()
+            self._stt_active = False
+            if self._on_question is not None:
+                self._on_question()
             # STT done: a TTS response (or an error) normally follows. TTS
             # audio from now on is this run's response, not an announcement.
             self._awaiting_response = True
@@ -577,6 +589,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             if not self._driven:
                 # A new wake word: whatever was awaited from the last run is over
                 self._forget_transcript()
+            self._stt_active = True
             self._capture_wake_clip(Detection.from_event(event))
             return True
 
@@ -615,6 +628,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if AudioStart.is_type(event.type):
             self._eos.disarm()
+            self._stt_active = False
             start = AudioStart.from_event(event)
             self._tts_stream_bytes = 0
             self._tts_format = (start.rate, start.width, start.channels)
@@ -747,6 +761,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             )
             self._clip_note(close=True, stt_error=code)
             self._eos.disarm()
+            self._stt_active = False
             self._last_transcript = ""
             self._stop_thinking()
             if self._driven:
@@ -1204,6 +1219,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         previous_seq = self._run_seq
         self._run_seq += 1
         self._eos.disarm()
+        self._stt_active = False
         self._clip = None  # a new exchange: the previous clip is complete
         # A wake run's detection timestamp counts from its first audio chunk
         self._wake_run = start_stage == PipelineStage.WAKE

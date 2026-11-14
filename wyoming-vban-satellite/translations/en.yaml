@@ -239,3 +239,6 @@ configuration:
   debug_logging:
     name: Debug Logging
     description: Enable verbose debug logging
+  prewarm_idle_minutes:
+    name: Prewarm after inactivity (minutes)
+    description: Warm the conversation agent again with a satellite's context after this many minutes without a question from it (0 = off, default; the jarvis_prechauffage event always works)

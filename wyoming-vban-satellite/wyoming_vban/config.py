@@ -449,6 +449,9 @@ class AppOptions:
     wake_clips_retention_days: int = 30
     wake_clips_max: int = 2000
     wake_clips_notify: bool = False  # HA notification when the review queue grows
+    # Conversation agent prewarmed again after this long without a question
+    # (0: only on the jarvis_prechauffage event); see prewarm.py
+    prewarm_idle_minutes: int = 0
 
 def load_options(path: str) -> AppOptions:
     """Read the app options file."""
@@ -480,6 +483,7 @@ def parse_options(options: dict[str, Any]) -> AppOptions:
         wake_clips_notify=bool(clips.get("notify_review")),
         satellites=satellites,
         debug_logging=bool(options.get("debug_logging")),
+        prewarm_idle_minutes=max(0, min(1440, int(options.get("prewarm_idle_minutes") or 0))),
         publish_exchanges=True if publish is None else bool(publish),
         debug_mirrors=mirrors,
         announcements_tts_engine=(

@@ -334,6 +334,22 @@ remove them to get the new defaults, or set the modes.
 
 ### Voice exchanges as Home Assistant events
 
+### Prewarming the conversation agent
+
+Home Assistant builds a different system prompt for each device (the
+satellite's area, timers support, before the exposed entities): the
+`conversation.process` action, without a device, warms a prompt the
+satellites never use. The app warms each satellite's own one, in turn, with
+the WebSocket command `conversation/process` (agent of the satellite's
+pipeline, its device, "Préchauffage, réponds seulement OK.", a new
+conversation): nothing is played, no `jarvis_echange`, no change of state.
+A busy satellite is warmed 30 s later; 90 s at most each.
+
+- HA event **`jarvis_prechauffage`** (data `satellites`: optional list of names, all by default), e.g. from an automation at start-up, at 00:01 and every hour.
+- **prewarm_idle_minutes** (global, default 0 = off): warmed again after this many minutes without a question from the satellite.
+
+Log: `Prewarm Bureau: 3.9 s` (under ~6 s the cache was good; 20 s and more the prompt was read again).
+
 ### Wake word clips (`wake_clips` block)
 
 To retrain the wake word model on what really triggers it, the app can keep

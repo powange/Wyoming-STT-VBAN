@@ -239,3 +239,6 @@ configuration:
   debug_logging:
     name: Journalisation de debogage
     description: Activer la journalisation detaillee
+  prewarm_idle_minutes:
+    name: Prechauffage apres inactivite (minutes)
+    description: Prechauffer de nouveau l'agent de conversation avec le contexte d'un satellite apres ce nombre de minutes sans question de sa part (0 = desactive, par defaut ; l'evenement jarvis_prechauffage fonctionne toujours)

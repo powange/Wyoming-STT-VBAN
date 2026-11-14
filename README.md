@@ -13,6 +13,7 @@ Use any VBAN-capable microphone on your network (VoiceMeeter, ESP32, VBAN Recept
 - **Follow-up without wake word** when Jarvis asks a question
 - **Announcements while waiting** — sounds or spoken phrases while the response is prepared (see below)
 - **Exchanges published** as Home Assistant events (`jarvis_echange`), **debug audio copies** as VBAN streams
+- **Conversation agent prewarmed with each satellite's context** (`jarvis_prechauffage` HA event, or after a quiet time): the first question after midnight or a restart no longer waits for the AI to read its whole prompt again (see below)
 - **Wake word clips**: the audio of each detection kept and sorted in the interface (good / false trigger), sorted clips dropped in `/share/wakeforge/inbox` for retraining the model
 - **Host networking** — full UDP multicast support in Docker
 
@@ -112,6 +113,48 @@ changed.
 | Internet search (`jarvis_recherche` HA event) | sound, then "Je cherche sur internet." |
 | Camera look (`jarvis_vision` HA event) | phrase "Attends, j'observe." |
 
+## Prewarming the conversation agent
+
+Home Assistant builds a different system prompt for each device asking: the
+satellite's area ("You are in area Bureau…") and timers support come before
+the exposed entities. The `conversation.process` action has no device, so it
+warms a prompt the satellites never use; after midnight (the date in the
+prompt changes), a restart of Home Assistant or a change of exposed entities,
+the first question of a satellite then reads the whole prompt again (with
+Ollama: 46 s instead of 4 s, about 5,000 tokens).
+
+The app warms each satellite's own prompt, one satellite after the other,
+with the WebSocket command `conversation/process`: the conversation agent of
+the satellite's pipeline, the satellite's device, the text "Préchauffage,
+réponds seulement OK." in a new conversation (the satellite's own history is
+left alone). Nothing is played, no `jarvis_echange` is fired, the
+satellite's state doesn't change. A satellite listening, thinking or
+answering is warmed 30 s later; each one times out after 90 s.
+
+- On the Home Assistant event **`jarvis_prechauffage`** (data, optional:
+  `satellites`, a list of names; all of them by default). For example at
+  start-up, at 00:01 and every hour:
+
+```yaml
+automation:
+  - alias: Préchauffage de Jarvis
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: time
+        at: "00:01:00"
+      - trigger: time_pattern
+        minutes: 5
+    actions:
+      - event: jarvis_prechauffage
+```
+
+- After **`prewarm_idle_minutes`** without a question from a satellite
+  (global option, 0 = off, the default).
+
+The log gives the time of each one, `Prewarm Bureau: 3.9 s`: under about 6 s
+the cache was good, 20 s and more the prompt was read again.
+
 ## Architecture
 
 ```
@@ -148,6 +191,7 @@ a full example.
 | `announcements_tts_voice` | `fr_FR-siwis-medium` | Voice of the spoken announcements |
 | `debug_mirror` | `[]` | Debug copies of audio streams as VBAN |
 | `debug_logging` | `false` | Enable verbose logging |
+| `prewarm_idle_minutes` | `0` | Prewarm a satellite's conversation agent again after this many minutes without a question from it (0 = only on the `jarvis_prechauffage` event) |
 
 ## Examples
 

@@ -30,6 +30,8 @@ from .ha_audio import HaAudioSync, HaMicSettings, auto_gain_settings
 from .ha_ws import SUPERVISOR_WS_URL, HaCommandError, HaStateWatcher, HaUnavailable
 from .calibration import CLIP_THRESHOLD, LevelMeter
 from .end_of_speech import EndOfSpeechSettings
+from .prewarm import EVENT_TYPE as PREWARM_EVENT
+from .prewarm import Prewarmer
 from .calibration import _clipped as calibration_clipped
 from .mic_filter import MicFilter
 from .mirror import SatelliteMirrors
@@ -335,6 +337,7 @@ class SatelliteRunner:
         self.last_packet_at = 0.0
         self._stream = cfg.vban_receive_stream_name  # subscribed to
         self._platforms: dict[str, str] = {}  # media_player -> integration
+        self.on_question: Optional[Callable[[str], None]] = None  # (set by the app)
 
     # Lifecycle
 
@@ -449,6 +452,8 @@ class SatelliteRunner:
                 mic_mute=self.mic_mute,
                 followup=self.followup,
                 end_of_speech=self.end_of_speech,
+                on_question=lambda name=cfg.name: (
+                    self.on_question(name) if self.on_question else None),
                 exchange_publisher=self.publisher,
                 satellite_name=cfg.name,
                 mic_label="RTSP" if self.rtsp is not None else "VBAN",
@@ -566,6 +571,10 @@ class SatelliteRunner:
                 return False  # asked again next time
             cached = self._platforms[entity_id] = (entry or {}).get("platform", "")
         return cached == "cast"
+
+    def in_exchange(self) -> bool:
+        """Listening after the wake word, thinking or answering."""
+        return any(h.in_exchange for h in list(self.handlers))
 
     def speech_floor_db(self) -> Optional[float]:
         """Background noise seen by the end of speech (latest connection)."""
@@ -889,6 +898,10 @@ class AppRuntime:
         self._ha_audio: Optional[HaAudioSync] = None
         self.ha_ws_url = SUPERVISOR_WS_URL
         self.discovery = Discovery()  # one mDNS responder for all satellites
+        self.prewarmer = Prewarmer(
+            lambda: self._watcher, lambda: self._runners,
+            lambda: self.options.prewarm_idle_minutes if self.options else 0,
+        )
         self.publisher = ExchangePublisher(False, None)
 
     @property
@@ -909,6 +922,7 @@ class AppRuntime:
             or any(s.tts_output == "media_player" for s in options.satellites)
             or any(s.mic_follow_ha or s.followup_enabled for s in options.satellites)
             or options.wake_clips_enabled
+            or options.prewarm_idle_minutes > 0
             or any(c.search or c.vision for c in cues.values())
         )
 
@@ -966,6 +980,8 @@ class AppRuntime:
             self._watcher.add_event_listener("jarvis_vision", notify_vision)
             # "That wasn't for you": the satellite's last wake word clip is false
             self._watcher.add_event_listener("jarvis_faux_declenchement", self._on_false_wake)
+            # Warm the conversation agent with each satellite's context
+            self._watcher.add_event_listener(PREWARM_EVENT, self.prewarmer.on_event)
             self._ha_audio = HaAudioSync(self._watcher, self._on_ha_mic, self._on_assist_state)
             self._watcher_task = asyncio.create_task(self._watcher.run())
             self._watcher_task.add_done_callback(_log_task_failure("HA WebSocket"))
@@ -1190,6 +1206,7 @@ class AppRuntime:
             self._watcher, self.publisher, cues, mirrors, self.discovery,
         )
         self._runners[sat.name] = runner
+        runner.on_question = self.prewarmer.question
         self._attach_clips(runner)
         if self._ha_audio is not None and sat.name in self._ha_audio.settings:
             runner.set_ha_mic(self._ha_audio.settings[sat.name])
@@ -1266,6 +1283,7 @@ class AppRuntime:
         self.options = options
         logging.getLogger().setLevel(logging.DEBUG if options.debug_logging else logging.INFO)
         _LOGGER.info("Starting %d satellite(s)", len(options.satellites))
+        self.prewarmer.start()
         await self._sync_clips(options)
         cues = self._build_cues(options)
         self._sync_phrases(cues)
@@ -1310,6 +1328,7 @@ class AppRuntime:
             for port in list(self._receivers):
                 await self._stop_receiver(port)
             await self.discovery.close()  # (normally closed with its last service)
+            await self.prewarmer.stop()
         finally:
             self._runners = {}
             self._phrase_tasks = {}
