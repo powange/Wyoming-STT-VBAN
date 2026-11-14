@@ -234,45 +234,73 @@ def notify_vision(data: dict) -> None:
 
 
 class MicMute:
-    """Mutes the microphone while a response plays on the media_player.
+    """Mutes the microphone while the app plays something on the
+    media_player (a response, an announcement): the one source of truth.
 
     HA restarts wake word detection as soon as the pipeline run ends, which
     is before the response has played on the media_player: the speaker's
     voice would reach the microphone and trigger false wake-ups. (VBAN
     output doesn't need this: the receiver is half-duplex.)
 
+    Only the app's own playbacks mute it, each with its id: a new one
+    replaces the previous one (no stacked mutes), and the end of a playback
+    that isn't the current one is ignored. A mute never lasts more than its
+    limit (MAX_PLAYBACK_S once its playback started).
+
     Shared by all connections of one satellite, so a reconnect from HA
     while a response plays keeps the microphone muted.
     """
 
+    MAX_PLAYBACK_S = 30.0
+
     def __init__(self, tail_s: float, max_muted_s: float):
         self.tail_s = tail_s  # extra mute after playback (echo, Cast end)
-        self._max_muted_s = max_muted_s
-        self._muted = False  # a response is being received or played
-        self._muted_since = 0.0
-        self._generation = 0  # increments with each response
+        self._max_muted_s = max_muted_s  # while a response is being received
+        self._muted = False
+        self._generation = 0  # increments with each playback
+        self._deadline = 0.0
+        self._reason = ""
 
-    def start_response(self) -> int:
-        """Mute when HA starts sending a response; returns its id."""
+    def start_response(self, reason: str = "response") -> int:
+        """A playback by the app starts (or is about to): mute; returns its id."""
         self._generation += 1
+        replaced = self._muted
         self._muted = True
-        self._muted_since = time.monotonic()
+        self._reason = reason
+        self._deadline = time.monotonic() + self._max_muted_s
+        _LOGGER.info("Mic muted (reason: %s%s)", reason,
+                     ", replacing the previous one" if replaced else "")
         return self._generation
 
-    def end_response(self, generation: int) -> None:
-        """Response done (played plus tail, failed or dropped): unmute.
+    def playing(self, generation: int, seconds: float) -> None:
+        """Its playback starts (play_media sent): muted at most this much
+        longer (MAX_PLAYBACK_S at most), even if receiving it took long."""
+        if generation != self._generation:
+            return  # replaced meanwhile
+        if not self._muted:
+            _LOGGER.info("Mic muted (reason: %s playing)", self._reason)
+        self._muted = True
+        self._deadline = time.monotonic() + min(seconds, self.MAX_PLAYBACK_S)
 
-        Ignored if a newer response has started since: it owns the mute.
+    def end_response(self, generation: int, reason: str = "played") -> None:
+        """Playback done (played plus tail, failed or dropped): unmute.
+
+        Ignored if a newer playback has started since: it owns the mute.
         """
-        if generation == self._generation:
+        if generation == self._generation and self._muted:
             self._muted = False
+            _LOGGER.info("Mic restored (reason: %s)", reason)
+
+    def release(self, reason: str) -> None:
+        """Real microphone back now, whatever plays."""
+        if self._muted:
+            self._muted = False
+            _LOGGER.info("Mic restored (reason: %s)", reason)
 
     def is_muted(self) -> bool:
-        if self._muted and time.monotonic() - self._muted_since > self._max_muted_s:
-            # Safety net: never stay muted if a response never completes
-            _LOGGER.warning(
-                "Microphone muted for over %ds — unmuting", self._max_muted_s,
-            )
+        if self._muted and time.monotonic() > self._deadline:
+            # Safety net: never stay muted if a playback never ends
+            _LOGGER.warning("Mic mute timeout, real microphone restored (%s)", self._reason)
             self._muted = False
         return self._muted
 
@@ -459,9 +487,14 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._idle_guard_task: Optional[asyncio.Task] = None
         self._vban_end_task: Optional[asyncio.Task] = None
         self._vban_end_seq: Optional[int] = None
-        # The wake run started while the response plays (media player):
-        # logged once the real microphone is back
+        # The wake run started while the response plays (media player)
+        self._early_wake_seq: Optional[int] = None  # its run, until it starts
         self._early_wake = False
+        self._early_wake_timer: Optional[asyncio.TimerHandle] = None
+        self._response_text_pending = False  # transcript seen, its Synthesize not yet
+        # "Wake word ready" once the real mic reaches a wake run: (text, since)
+        self._ready_pending: Optional[tuple[str, float]] = None
+        self._run_ended_at = 0.0
         # Follow-up: mic audio received before this time is replaced by
         # silence (until the listening really opens)
         self._mic_guard_until = 0.0
@@ -570,6 +603,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if event.type == "transcript":
             self._eos.disarm()
             self._stt_active = False
+            self._response_text_pending = True  # its Synthesize may come late
             if self._on_question is not None:
                 self._on_question()
             # STT done: a TTS response (or an error) normally follows. TTS
@@ -603,10 +637,13 @@ class VbanSatelliteHandler(AsyncEventHandler):
 
         if Synthesize.is_type(event.type):
             text = Synthesize.from_event(event).text or ""
-            if not self._awaiting_response:
+            # With streaming TTS (an LLM), HA sends the audio first and this
+            # text after it (TTS_START): it still is the response's
+            if not (self._awaiting_response or self._response_text_pending):
                 # An announcement, not this run's response
                 _LOGGER.debug("Announcement text: %s", text)
                 return True
+            self._response_text_pending = False
             self._stop_thinking()
             self._clip_note(close=True, response=text)
             self._publish_exchange(text)
@@ -616,6 +653,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     "Response text%s: %s",
                     " (question)" if self._expect_followup else "", text,
                 )
+                if self._early_wake_seq == self._run_seq:
+                    # The response's audio came first: its run ends in HA
+                    # right after this text (RUN_END), the wake run after it
+                    self._maybe_early_wake(after_s=self.EARLY_WAKE_AFTER_TEXT_S)
             return True
 
         if RunPipeline.is_type(event.type):
@@ -655,7 +696,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 self._tts_receiving = True
                 # Mute the mic right away, before play_media
                 if self._mic_mute:
-                    self._tts_generation = self._mic_mute.start_response()
+                    self._tts_generation = self._mic_mute.start_response(
+                        "response" if self._response_audio else "announcement")
                 return True
             # Reset resampler state AND drop any leftover audio from a
             # previous stream so the new TTS starts cleanly — unless a
@@ -705,7 +747,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             if self._media_output and not self._tts_pcm:
                 # Nothing to play: unmute now
                 if self._mic_mute:
-                    self._mic_mute.end_response(self._tts_generation)
+                    self._mic_mute.end_response(self._tts_generation, "empty response")
                 if seq is not None:
                     self._run_ended(seq, reason="response empty")
             elif self._media_output:
@@ -728,14 +770,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
                         ),
                     )
                 )
-                if seq is not None and self._mic_mute is not None and not self._next_is_followup():
-                    # Wake word listening starts now, on the silence sent
-                    # while the response plays: openWakeWord's window is
-                    # full when the real microphone comes back (no warm-up
-                    # after the end of the sound). A question keeps its
-                    # follow-up, opened after the beep.
-                    self._early_wake = True
-                    self._run_ended(seq, reason="response received (wake word during playback)")
+                if seq is not None and self._mic_mute is not None:
+                    self._early_wake_seq = seq
+                    self._maybe_early_wake()
             elif self._vban_sender:
                 # A newer response replaces one still waiting to report
                 # played: it ends the replaced one's run too
@@ -921,11 +958,21 @@ class VbanSatelliteHandler(AsyncEventHandler):
             url = self._media_output.publish(
                 build_wav(cue.pcm, cue.rate, cue.width, cue.channels)
             )
-            if await self._media_output.play(url):
-                playing = cue.duration + self.CUE_CAST_START_S
-                self._mic_silence_until = time.monotonic() + playing
-                await asyncio.sleep(playing)
-                return
+            mute = self._mic_mute
+            # (the one mute: a response arriving meanwhile replaces it)
+            generation = mute.start_response("announcement") if mute else None
+            try:
+                if await self._media_output.play(url):
+                    playing = cue.duration + self.CUE_CAST_START_S
+                    if mute and generation is not None:
+                        mute.playing(generation, playing + 3.0)
+                    else:
+                        self._mic_silence_until = time.monotonic() + playing
+                    await asyncio.sleep(playing)
+                    return
+            finally:
+                if mute and generation is not None:
+                    mute.end_response(generation, "announcement over")
         if self._vban_sender:
             try:
                 self._vban_sender.send(
@@ -1020,7 +1067,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
             _LOGGER.exception("Response not played")
         finally:
             if self._mic_mute:
-                self._mic_mute.end_response(generation)
+                self._mic_mute.end_response(generation, "response over")
         # Not reached when cancelled by a newer response (which reports itself)
         if on_played:
             on_played()
@@ -1042,6 +1089,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
         )
 
         requested_at = time.monotonic()
+        if self._mic_mute:
+            # Muted at most for its length, the end margin and 3 s
+            self._mic_mute.playing(generation, duration + self._media_output.end_margin_s + 3.0)
         if not await self._media_output.play(url):
             if self._vban_sender is None:
                 _LOGGER.error("No VBAN output configured — response dropped")
@@ -1064,13 +1114,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # Margin for echo / the very end of the Cast output
         if self._mic_mute:
             await asyncio.sleep(self._mic_mute.tail_s)
-            self._mic_mute.end_response(generation)
+            self._mic_mute.end_response(generation, "response played")
             if self._early_wake and generation == self._tts_generation:
                 self._early_wake = False
-                _LOGGER.info(
-                    "Wake word ready %.1f s after the end of the response",
-                    time.monotonic() - sound_end,
-                )
+                # Logged once the real mic really reaches the wake run
+                self._ready_pending = ("after the end of the response", sound_end)
 
         await self._send_played()
 
@@ -1220,6 +1268,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._run_seq += 1
         self._eos.disarm()
         self._stt_active = False
+        self._response_text_pending = False
+        self._early_wake_seq = None
         self._clip = None  # a new exchange: the previous clip is complete
         # A wake run's detection timestamp counts from its first audio chunk
         self._wake_run = start_stage == PipelineStage.WAKE
@@ -1455,6 +1505,16 @@ class VbanSatelliteHandler(AsyncEventHandler):
         _LOGGER.info("No response after transcript (empty response?): run over")
         self._run_ended(self._run_seq, reason="no response in time")
 
+    def _substituted(self, now: float) -> bool:
+        """Silence goes instead of the microphone: a sound of the app plays
+        (response, announcement, beep). Never while a command is being
+        listened to: wake word heard, STT running (the follow-up's beep is
+        kept out by its own guard)."""
+        if self._stt_active:
+            return False
+        return now < self._mic_silence_until or (
+            self._mic_mute is not None and self._mic_mute.is_muted())
+
     async def _end_of_speech_reached(self) -> None:
         """The speech is over: end the STT now (audio-stop), not ~1.7 s
         later with HA's VAD."""
@@ -1496,6 +1556,45 @@ class VbanSatelliteHandler(AsyncEventHandler):
         except (ConnectionError, OSError):
             pass
 
+    # A response's text arriving after its audio (streaming TTS): HA ends
+    # that run (RUN_END) right after; a wake run sent before would be left
+    # without audio by it (HA then drops the satellite's chunks: deaf)
+    EARLY_WAKE_AFTER_TEXT_S = 0.5
+
+    def _maybe_early_wake(self, after_s: float = 0.0) -> None:
+        """Start the wake run while the response plays (media player), once
+        its text is known: a question keeps its follow-up instead, and HA's
+        run must be over first."""
+        seq = self._early_wake_seq
+        if seq is None or seq != self._run_seq or seq == self._run_ended_seq:
+            return
+        if self._response_text_pending:
+            return  # its text (question or not, HA's run end) still to come
+        if self._next_is_followup():
+            self._early_wake_seq = None
+            return
+
+        def start() -> None:
+            self._early_wake_timer = None
+            if (self._early_wake_seq != seq or seq != self._run_seq
+                    or seq == self._run_ended_seq):
+                return
+            if not (self._playback_task and not self._playback_task.done()):
+                return  # already played: the normal end follows
+            self._early_wake_seq = None
+            # Wake word listening starts now, on the silence sent while the
+            # response plays: openWakeWord's window is full when the real
+            # microphone comes back (no warm-up after the end of the sound)
+            self._early_wake = True
+            self._run_ended(seq, reason="response received (wake word during playback)")
+
+        if self._early_wake_timer is not None:
+            self._early_wake_timer.cancel()
+        if after_s > 0:
+            self._early_wake_timer = asyncio.get_running_loop().call_later(after_s, start)
+        else:
+            start()
+
     def _next_is_followup(self) -> bool:
         """The next run will be a follow-up (see _start_next_run)."""
         return (self._expect_followup and self._followup.enabled
@@ -1511,6 +1610,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         if not self._driven or seq != self._run_seq or seq == self._run_ended_seq:
             return
         self._run_ended_seq = seq
+        self._run_ended_at = time.monotonic()
         self._next_run_reason = reason
         self._cancel_watchdog()
         self._mic_paused = True
@@ -1553,6 +1653,12 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     "Follow-up: %d in a row, back to wake word", self._followup_count,
                 )
             self._followup_count = 0
+            if not self._next_run_reason.startswith(("response played", "response received")):
+                # No response playing: the real microphone, right away
+                if self._mic_mute is not None:
+                    self._mic_mute.release(f"run over without response ({self._next_run_reason})")
+                self._mic_silence_until = 0.0
+                self._ready_pending = ("(no response)", self._run_ended_at)
             await self._send_run_pipeline(
                 PipelineStage.WAKE, f"previous run over: {self._next_run_reason}")
         except (ConnectionError, OSError):
@@ -1835,8 +1941,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 # in its place: beep, response, waiting sound)
                 eos_end = None
                 if self._eos_settings.enabled and pre_open is None and not self._mic_paused:
-                    if not (time.monotonic() < self._mic_silence_until
-                            or (self._mic_mute is not None and self._mic_mute.is_muted())):
+                    if not self._substituted(time.monotonic()):
                         eos_end = self._eos.feed(pcm)
                 if eos_end is not None:
                     pcm = pcm[:eos_end]  # the audio up to the end of speech
@@ -1872,8 +1977,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
                             if self._mirrors:
                                 self._mirrors.mic_sent(audio)
 
-                    # A waiting sound is playing: don't capture it
-                    if now < self._mic_silence_until:
+                    # A sound of the app is playing: don't capture it (never
+                    # while a command is being listened to)
+                    substituted = self._substituted(now)
+                    if substituted:
                         send_pcm = silence
 
                     chunks_sent += 1
@@ -1907,16 +2014,16 @@ class VbanSatelliteHandler(AsyncEventHandler):
                     # While a response plays on the media_player, send silence
                     # instead of the mic. Keep sending chunks: HA's wake word
                     # stage would otherwise starve and time out.
-                    if self._mic_mute:
-                        muted = self._mic_mute.is_muted()
-                        if muted != mic_muted:
-                            _LOGGER.debug(
-                                "mic muted (TTS on media_player)" if muted
-                                else "mic unmuted"
-                            )
-                            mic_muted = muted
-                        if muted:
-                            send_pcm = silence
+                    if substituted != mic_muted:
+                        _LOGGER.debug("silence sent instead of the mic" if substituted
+                                      else "real mic sent")
+                        mic_muted = substituted
+                    if (not substituted and self._ready_pending is not None
+                            and self._wake_run):
+                        # The real microphone reaches the wake run now
+                        text, since = self._ready_pending
+                        self._ready_pending = None
+                        _LOGGER.info("Wake word ready %.1f s %s", time.monotonic() - since, text)
 
                     chunk = AudioChunk(
                         rate=WYOMING_RATE,
@@ -1994,7 +2101,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._server_ready = False
         # A response cut off mid-transfer will never play: unmute
         if self._tts_receiving and self._mic_mute:
-            self._mic_mute.end_response(self._tts_generation)
+            self._mic_mute.end_response(self._tts_generation, "HA disconnected")
         self._tts_receiving = False
         self._cancel_followup_tasks()
         self._stop_thinking()

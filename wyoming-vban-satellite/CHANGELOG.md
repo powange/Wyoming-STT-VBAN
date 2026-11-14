@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.16.1
+
+Fix: the Bureau satellite (media player output) went deaf after a wake word, until "Muet" was toggled (14/11).
+
+- **Wake run never sent before Home Assistant has ended the previous run.** With a streaming response (an LLM: HA sends the audio while the answer is generated, its text after it), the wake run started during the playback (3.15.0) could reach HA before HA ended the response's run. HA doesn't cancel a run when a satellite asks for a new one: the old run's end then marks "no pipeline running" and HA drops every microphone chunk of the new wake run, which never hears anything again (matches 12:19: "Wake word ready" in the log, HA waiting for the wake word, no detection). The wake run now waits for the response's text, and 0.5 s more when the text comes after the audio.
+- **Streaming responses recognized as responses**: their text, coming after the audio, was taken for an announcement: no `jarvis_echange`, no question detected (no follow-up), no response noted on the wake word clip.
+- **The microphone mute has one source of truth** (media player output): only the app's own playbacks (a response, an announcement such as "Je réfléchis...") mute it, each with its id; a new one replaces the previous one instead of stacking, and the end of a playback that is no longer the current one is ignored. A change of the media player's state never mutes it.
+- **Never muted while a command is listened to** (from the wake word to the end of speech): a mute left over can no longer replace the command by silence (the cut sentence of 11:48, ended 0.5 s after it "stopped").
+- **A mute can't stay**: at most the length of the sound + `end_margin_ms` + 3 s once it plays, 30 s at most (`Mic mute timeout, real microphone restored`). After a run ended without a response (no transcript, error, timeout), the real microphone comes back before the next wake run (`Wake word ready X.X s (no response)`).
+- **`Wake word ready`** is only logged once the real microphone actually reaches the wake run; `Mic muted (reason: …)` / `Mic restored (reason: …)` follow every change.
+
 ## 3.16.0
 
 - **New: conversation agent prewarmed with each satellite's context.** The first question to Ollama after a quiet time took up to 46 s (14/11, Bureau: "Combien font 2 x 7 ?" answered after 45.6 s, the next one after 3.8 s), although Home Assistant had been prewarmed a minute before: Home Assistant builds a different system prompt for each device (its area, timers support, before the exposed entities), and the `conversation.process` action, without a device, warms the version no satellite uses.

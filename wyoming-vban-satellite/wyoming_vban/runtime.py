@@ -427,8 +427,9 @@ class SatelliteRunner:
             # Shared by all connections of this satellite
             self.mic_mute = MicMute(
                 tail_s=cfg.mic_mute_tail_ms / 1000,
-                # The longest response, plus the Cast start delay and the tail
-                max_muted_s=VbanSatelliteHandler.MAX_TTS_BUFFER_S + 30.0,
+                # While a response is being received (then its length, see
+                # MicMute.playing)
+                max_muted_s=MicMute.MAX_PLAYBACK_S,
             )
             _LOGGER.info(
                 "  TTS output: media_player %s (HTTP %s:%d)%s, mic muted during "
