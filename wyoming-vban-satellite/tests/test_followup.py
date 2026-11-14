@@ -156,6 +156,29 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
                 return event
         return None
 
+    async def connection_closed(self, timeout: float) -> bool:
+        """The satellite closed the connection (HA would reconnect)."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while (left := deadline - asyncio.get_running_loop().time()) > 0:
+            try:
+                event = await asyncio.wait_for(self.ha.read_event(), left)
+            except asyncio.TimeoutError:
+                return False
+            except (ConnectionError, OSError):
+                return True
+            if event is None:
+                return True
+        return False
+
+    async def reconnect(self) -> None:
+        """HA connecting again, like after a reset."""
+        await self.ha.disconnect()
+        self.ha = AsyncTcpClient("127.0.0.1", self.port)
+        await self.ha.connect()
+        await self.ha.write_event(Describe().event())
+        await self.ha.write_event(RunSatellite().event())
+        await self.ha.write_event(Describe().event())
+
     async def next_run(self, timeout: float = 3.0) -> Optional[RunPipeline]:
         event = await self.next_event("run-pipeline", timeout)
         return RunPipeline.from_event(event) if event else None
@@ -320,8 +343,9 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("No run for" in line for line in logs.output))
 
     async def test_speech_then_nothing_from_ha_ends_the_run(self) -> None:
-        # The user speaks, then HA ends the run without telling us: a long
-        # watchdog (not the no-speech one) brings the wake word back
+        # The user speaks, then HA never answers: a long watchdog (not the
+        # no-speech one) gives up and resets the connection (HA's run may
+        # still go on: a new run on this connection would be left deaf)
         self.enterContext(unittest.mock.patch.object(
             VbanSatelliteHandler, "RESPONSE_TIMEOUT_S", 0.8))
         await self.next_run()
@@ -329,9 +353,11 @@ class FollowupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.next_run()).start_stage, "asr")
         with self.assertLogs("wyoming_vban.satellite", "WARNING") as logs:
             await self.ha.write_event(VoiceStarted().event())
-            run = await self.next_run(timeout=2.0)
-        self.assertEqual(run.start_stage, "wake")
+            closed = await self.connection_closed(timeout=2.0)
+        self.assertTrue(closed)
         self.assertTrue(any("no transcript" in line for line in logs.output))
+        self.assertTrue(any("Satellite reset after follow-up: speech without transcript" in line
+                            for line in logs.output))
 
     async def test_at_most_three_follow_ups(self) -> None:
         await self.next_run()

@@ -309,6 +309,7 @@ class SatelliteRunner:
             beep_latency_s=_ms_to_s(cfg.followup_beep_latency_ms),
             mic_tail_s=cfg.mic_mute_tail_ms / 1000,
             beep_output=cfg.followup_beep_output,
+            stt_timeout_s=cfg.stt_timeout_s,
         )
         self.end_of_speech = EndOfSpeechSettings(
             enabled=cfg.end_of_speech_enabled, silence_ms=cfg.end_of_speech_silence_ms,
@@ -338,6 +339,15 @@ class SatelliteRunner:
         self._stream = cfg.vban_receive_stream_name  # subscribed to
         self._platforms: dict[str, str] = {}  # media_player -> integration
         self.on_question: Optional[Callable[[str], None]] = None  # (set by the app)
+        # Deaf watchdog: speech heard since the last wake word (bursts of
+        # level well above the background after a quiet second)
+        self.last_detection_at = time.monotonic()
+        self._speech_bursts = 0
+        self._burst_on = False
+        self._quiet_since = -math.inf
+        self._floor_db: Optional[float] = None
+        self._floor_at = -math.inf
+        self._deaf_warned = False
 
     # Lifecycle
 
@@ -455,6 +465,7 @@ class SatelliteRunner:
                 end_of_speech=self.end_of_speech,
                 on_question=lambda name=cfg.name: (
                     self.on_question(name) if self.on_question else None),
+                on_detection=self.note_detection,
                 exchange_publisher=self.publisher,
                 satellite_name=cfg.name,
                 mic_label="RTSP" if self.rtsp is not None else "VBAN",
@@ -572,6 +583,49 @@ class SatelliteRunner:
                 return False  # asked again next time
             cached = self._platforms[entity_id] = (entry or {}).get("platform", "")
         return cached == "cast"
+
+    # Deaf watchdog
+
+    SPEECH_ABOVE_FLOOR_DB = 15.0
+    DEAF_MIN_BURSTS = 3
+
+    def _track_speech(self, now: float, level: float) -> None:
+        if now - self._floor_at >= 1.0:  # background: sorted once a second
+            levels = sorted(entry[1] for entry in self._levels)
+            self._floor_db = levels[len(levels) // 10] if levels else None
+            self._floor_at = now
+        if self._floor_db is None:
+            return
+        if level > max(self._floor_db, -70.0) + self.SPEECH_ABOVE_FLOOR_DB:
+            if not self._burst_on and now - self._quiet_since >= 1.0:
+                self._speech_bursts += 1
+            self._burst_on = True
+        elif self._burst_on:
+            self._burst_on = False
+            self._quiet_since = now
+
+    def note_detection(self) -> None:
+        self.last_detection_at = time.monotonic()
+        self._speech_bursts = 0
+        self._deaf_warned = False
+
+    def check_deaf(self, minutes: int) -> None:
+        """Speech heard several times but no wake word for `minutes`: warn
+        (no automatic reset)."""
+        if minutes <= 0 or self._deaf_warned:
+            return
+        if (time.monotonic() - self.last_detection_at >= minutes * 60
+                and self._speech_bursts >= self.DEAF_MIN_BURSTS):
+            self._deaf_warned = True
+            token = SATELLITE_NAME.set(self.cfg.name)
+            try:
+                _LOGGER.warning(
+                    "No wake word for %d min although speech was heard %d times: the "
+                    "satellite may be deaf (toggle Muet in Home Assistant to reset it)",
+                    minutes, self._speech_bursts,
+                )
+            finally:
+                SATELLITE_NAME.reset(token)
 
     def in_exchange(self) -> bool:
         """Listening after the wake word, thinking or answering."""
@@ -693,6 +747,7 @@ class SatelliteRunner:
         self.followup.beep_latency_s = _ms_to_s(cfg.followup_beep_latency_ms)
         self.followup.mic_tail_s = cfg.mic_mute_tail_ms / 1000
         self.followup.beep_output = cfg.followup_beep_output
+        self.followup.stt_timeout_s = cfg.stt_timeout_s
         # Handlers hold this object: change its content
         for field in dataclasses.fields(WaitingCues):
             setattr(self.cues, field.name, getattr(cues, field.name))
@@ -744,7 +799,9 @@ class SatelliteRunner:
                 len(pcm16) // 2, rms, peak,
                 calibration_clipped(pcm16) if max(high, -low) >= CLIP_THRESHOLD else 0,
             )
-            self._levels.append((now, _db(rms / 32768), abs(dc) / 32768))
+            level = _db(rms / 32768)
+            self._levels.append((now, level, abs(dc) / 32768))
+            self._track_speech(now, level)
         self._expire_levels(now)
         self.mic_feed.dispatch(packet, pcm16)
 
@@ -899,6 +956,7 @@ class AppRuntime:
         self._ha_audio: Optional[HaAudioSync] = None
         self.ha_ws_url = SUPERVISOR_WS_URL
         self.discovery = Discovery()  # one mDNS responder for all satellites
+        self._deaf_task: Optional[asyncio.Task] = None
         self.prewarmer = Prewarmer(
             lambda: self._watcher, lambda: self._runners,
             lambda: self.options.prewarm_idle_minutes if self.options else 0,
@@ -1285,6 +1343,8 @@ class AppRuntime:
         logging.getLogger().setLevel(logging.DEBUG if options.debug_logging else logging.INFO)
         _LOGGER.info("Starting %d satellite(s)", len(options.satellites))
         self.prewarmer.start()
+        if self._deaf_task is None:
+            self._deaf_task = asyncio.create_task(self._watch_deaf())
         await self._sync_clips(options)
         cues = self._build_cues(options)
         self._sync_phrases(cues)
@@ -1330,6 +1390,10 @@ class AppRuntime:
                 await self._stop_receiver(port)
             await self.discovery.close()  # (normally closed with its last service)
             await self.prewarmer.stop()
+            if self._deaf_task is not None:
+                self._deaf_task.cancel()
+                await asyncio.gather(self._deaf_task, return_exceptions=True)
+                self._deaf_task = None
         finally:
             self._runners = {}
             self._phrase_tasks = {}
@@ -1386,6 +1450,17 @@ class AppRuntime:
             return error
         finally:
             self._changing = False
+
+    DEAF_CHECK_S = 60.0
+
+    async def _watch_deaf(self) -> None:
+        """deaf_watchdog_minutes: warn about a satellite hearing speech but
+        no wake word (see SatelliteRunner.check_deaf)."""
+        while True:
+            await asyncio.sleep(self.DEAF_CHECK_S)
+            minutes = self.options.deaf_watchdog_minutes if self.options else 0
+            for runner in list(self._runners.values()):
+                runner.check_deaf(minutes)
 
     async def _clean_up(self) -> None:
         """A change is confirmed: clips beyond the new limits, phrases no

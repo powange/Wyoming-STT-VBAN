@@ -167,6 +167,9 @@ class SatelliteConfig:
     # Keep the Cast app open (it closes after 5 min idle; reopening delays
     # the next response): 0.2 s of silence every 4 min while idle
     tts_keep_awake: bool = False
+    # The satellite ended the listening: HA's transcript awaited this long,
+    # then the connection is reset (see VbanSatelliteHandler._reset_connection)
+    stt_timeout_s: int = 15
     # End of speech detected by the app during STT (see end_of_speech.py)
     end_of_speech_enabled: bool = False
     end_of_speech_silence_ms: int = 500
@@ -292,7 +295,8 @@ class SatelliteConfig:
             )
             self.mic_mute_tail_ms = tail
 
-        for name, low, high in (("end_of_speech_silence_ms", 300, 2000),
+        for name, low, high in (("stt_timeout_s", 5, 120),
+                                ("end_of_speech_silence_ms", 300, 2000),
                                 ("end_of_speech_min_listen_ms", 0, 5000)):
             value = max(low, min(high, int(getattr(self, name))))
             if value != getattr(self, name):
@@ -452,6 +456,8 @@ class AppOptions:
     # Conversation agent prewarmed again after this long without a question
     # (0: only on the jarvis_prechauffage event); see prewarm.py
     prewarm_idle_minutes: int = 0
+    # Warn when a satellite heard speech but no wake word for this long (0: off)
+    deaf_watchdog_minutes: int = 0
 
 def load_options(path: str) -> AppOptions:
     """Read the app options file."""
@@ -484,6 +490,7 @@ def parse_options(options: dict[str, Any]) -> AppOptions:
         satellites=satellites,
         debug_logging=bool(options.get("debug_logging")),
         prewarm_idle_minutes=max(0, min(1440, int(options.get("prewarm_idle_minutes") or 0))),
+        deaf_watchdog_minutes=max(0, min(1440, int(options.get("deaf_watchdog_minutes") or 0))),
         publish_exchanges=True if publish is None else bool(publish),
         debug_mirrors=mirrors,
         announcements_tts_engine=(

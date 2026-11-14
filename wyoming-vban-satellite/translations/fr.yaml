@@ -12,6 +12,9 @@ configuration:
       wake_clips:
         name: Garder les extraits du mot-cle
         description: Garder les extraits du mot-cle de ce satellite quand wake_clips est active (active par defaut)
+      stt_timeout_s:
+        name: Delai de transcription (s)
+        description: Une fois l'ecoute terminee par le satellite, la transcription de Home Assistant est attendue ce temps ; ensuite le satellite reinitialise sa connexion (comme l'interrupteur Muet), 5 a 120 (15 par defaut)
       output:
         name: Sortie des reponses
         description: 'vban (defaut) : bloc Sortie VBAN ; media_player : bloc Media player (Sortie VBAN en secours si activee) ; none : reponses non jouees (ex. pour tester un micro)'
@@ -239,6 +242,9 @@ configuration:
   debug_logging:
     name: Journalisation de debogage
     description: Activer la journalisation detaillee
+  deaf_watchdog_minutes:
+    name: Alerte satellite sourd (minutes)
+    description: Avertir dans le journal quand un satellite a entendu parler plusieurs fois sans aucun mot-cle pendant ce temps (0 = desactive, par defaut) ; pas de reinitialisation automatique
   prewarm_idle_minutes:
     name: Prechauffage apres inactivite (minutes)
     description: Prechauffer de nouveau l'agent de conversation avec le contexte d'un satellite apres ce nombre de minutes sans question de sa part (0 = desactive, par defaut ; l'evenement jarvis_prechauffage fonctionne toujours)

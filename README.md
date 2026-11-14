@@ -191,6 +191,7 @@ a full example.
 | `announcements_tts_voice` | `fr_FR-siwis-medium` | Voice of the spoken announcements |
 | `debug_mirror` | `[]` | Debug copies of audio streams as VBAN |
 | `debug_logging` | `false` | Enable verbose logging |
+| `deaf_watchdog_minutes` | `0` | Warn in the log when a satellite heard speech several times but no wake word for this many minutes (no automatic reset) |
 | `prewarm_idle_minutes` | `0` | Prewarm a satellite's conversation agent again after this many minutes without a question from it (0 = only on the `jarvis_prechauffage` event) |
 
 ## Examples

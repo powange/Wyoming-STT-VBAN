@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.16.2
+
+Fix: the satellite stayed deaf after a transcript that came too late, until "Muet" was toggled (14/11, 14:55, Bureau: Whisper took 17 s).
+
+- **After giving up on Home Assistant, the satellite resets its connection** instead of sending a new wake run on it. When the satellite ends a listening itself (end of speech, no speech in a follow-up) and HA's transcript doesn't come, HA's run is still going on: HA doesn't cancel it when the satellite asks for a new run, and its late end then makes HA drop every microphone chunk of the new run. The satellite now does what toggling "Muet" does: it stops its audio, closes the connection, HA cancels its run and reconnects (about 3 s later) with a fresh run; the late transcript goes nowhere. Log: `Satellite reset after end of speech: no transcript`. Same for the other runs given up on while HA may still be working (speech without transcript in a follow-up, no response after a transcript). An error sent by HA ends HA's run itself: the next run still starts on the same connection (no 3 s gap after each false wake).
+- **New satellite option `stt_timeout_s`** (follow-up block in the editor, 5 to 120 s, default 15 instead of 10): how long HA's transcript is awaited once the satellite has ended the listening.
+- **New global option `deaf_watchdog_minutes`** (0 = off, the default): a warning in the log when a satellite heard speech at least 3 times but no wake word for this long (`… may be deaf (toggle Muet in Home Assistant to reset it)`). No automatic reset.
+
 ## 3.16.1
 
 Fix: the Bureau satellite (media player output) went deaf after a wake word, until "Muet" was toggled (14/11).

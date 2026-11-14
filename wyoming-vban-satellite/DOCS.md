@@ -239,6 +239,7 @@ needed as usual.
 - **enabled**: Enable follow-ups (default: `true`)
 - **beep**: Play a short beep (150 ms, 880 Hz) on the satellite's output (VBAN or media player) when it starts listening for the answer (default: `true`)
 - **timeout_s**: If no speech is detected within this time, go back to wake word listening, 3–30 s (default: 8). Counted from when the listening really opens (see below).
+- Satellite option **stt_timeout_s** (5–120 s, default 15): once the satellite has ended a listening itself (end of speech, no speech), Home Assistant's transcript is awaited this long. Then the satellite resets its connection, like toggling "Muet": Home Assistant cancels its run and reconnects about 3 s later (`Satellite reset after …`). A new run sent while Home Assistant is still working on the previous one would be left deaf by it.
 - **beep_output**: `media_player` (default, with the responses) or `vban` (the satellite's VBAN output, which must be enabled: no Cast latency of about 1.5 s on the beep). The response always ends before the beep.
 - **beep_latency_ms**: how long the speaker takes to play the beep, 0–3000 ms. Empty (default): 400 ms on VBAN, 1500 ms on a media player whose state can't be followed.
 
@@ -349,6 +350,10 @@ A busy satellite is warmed 30 s later; 90 s at most each.
 - **prewarm_idle_minutes** (global, default 0 = off): warmed again after this many minutes without a question from the satellite.
 
 Log: `Prewarm Bureau: 3.9 s` (under ~6 s the cache was good; 20 s and more the prompt was read again).
+
+### Deaf satellite warning
+
+**deaf_watchdog_minutes** (global, default 0 = off): a warning in the log when a satellite heard speech at least 3 times (its level well above the background, after a quiet second) but no wake word for this many minutes. Nothing is reset automatically: toggle "Muet" in Home Assistant.
 
 ### Wake word clips (`wake_clips` block)
 

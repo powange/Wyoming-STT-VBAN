@@ -12,6 +12,9 @@ configuration:
       wake_clips:
         name: Keep wake word clips
         description: Keep this satellite's wake word clips when wake_clips is enabled (default on)
+      stt_timeout_s:
+        name: Transcription timeout (s)
+        description: Once the satellite has ended the listening, Home Assistant's transcript is awaited this long; then the satellite resets its connection (like toggling Mute), 5 to 120 (default 15)
       output:
         name: Response output
         description: 'vban (default): the VBAN output block; media_player: the Media player block (VBAN output as fallback if enabled); none: responses are not played (e.g. to test a microphone)'
@@ -239,6 +242,9 @@ configuration:
   debug_logging:
     name: Debug Logging
     description: Enable verbose debug logging
+  deaf_watchdog_minutes:
+    name: Deaf satellite warning (minutes)
+    description: Warn in the log when a satellite heard speech several times but no wake word for this long (0 = off, default); no automatic reset
   prewarm_idle_minutes:
     name: Prewarm after inactivity (minutes)
     description: Warm the conversation agent again with a satellite's context after this many minutes without a question from it (0 = off, default; the jarvis_prechauffage event always works)

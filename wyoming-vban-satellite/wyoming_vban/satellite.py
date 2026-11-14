@@ -118,6 +118,9 @@ class FollowupSettings:
     mic_tail_s: float = 0.25
     # Where the beep plays: "media_player" (with the responses) or "vban"
     beep_output: str = "media_player"
+    # The satellite ended the listening (end of speech, no speech in a
+    # follow-up): HA's transcript or error awaited this long (stt_timeout_s)
+    stt_timeout_s: float = 15.0
 
 
 def make_tones(rate: int, notes: list[tuple[float, float]], volume: float) -> bytes:
@@ -332,7 +335,6 @@ class VbanSatelliteHandler(AsyncEventHandler):
     # skipped TTS (empty response): the run is over.
     RESPONSE_TIMEOUT_S = 60.0
     # Run end not seen this long after stopping a follow-up: assume it ended
-    FOLLOWUP_END_TIMEOUT_S = 10.0
     # VBAN receiver (e.g. Atom) buffering after the last packet is sent
     VBAN_PLAYBACK_LATENCY_S = 0.4
     # Follow-up: the listening opens once the beep has really played (and
@@ -382,9 +384,11 @@ class VbanSatelliteHandler(AsyncEventHandler):
         clip_recorder: Optional[Callable[[], Optional["ClipRecorder"]]] = None,
         end_of_speech: Optional[EndOfSpeechSettings] = None,
         on_question: Optional[Callable[[], None]] = None,
+        on_detection: Optional[Callable[[], None]] = None,
     ):
         super().__init__(reader, writer)
         self._on_question = on_question  # a transcript: the agent is asked
+        self._on_detection = on_detection  # a wake word detected (deaf watchdog)
         self._stt_active = False  # wake word heard / STT running: listening
         # End of speech detected by the app during STT (shared settings)
         self._eos_settings = end_of_speech or EndOfSpeechSettings()
@@ -495,6 +499,7 @@ class VbanSatelliteHandler(AsyncEventHandler):
         # "Wake word ready" once the real mic reaches a wake run: (text, since)
         self._ready_pending: Optional[tuple[str, float]] = None
         self._run_ended_at = 0.0
+        self._next_run_abandoned = False
         # Follow-up: mic audio received before this time is replaced by
         # silence (until the listening really opens)
         self._mic_guard_until = 0.0
@@ -624,6 +629,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
                 # A new wake word: whatever was awaited from the last run is over
                 self._forget_transcript()
             self._stt_active = True
+            if self._on_detection is not None:
+                self._on_detection()
             self._capture_wake_clip(Detection.from_event(event))
             return True
 
@@ -1499,11 +1506,12 @@ class VbanSatelliteHandler(AsyncEventHandler):
             "Follow-up: no transcript %.0f s after speech started: run over",
             self.RESPONSE_TIMEOUT_S,
         )
-        self._run_ended(self._run_seq, reason="follow-up: speech without transcript")
+        self._run_ended(self._run_seq, reason="follow-up: speech without transcript",
+                        abandoned=True)
 
     def _on_response_timeout(self) -> None:
         _LOGGER.info("No response after transcript (empty response?): run over")
-        self._run_ended(self._run_seq, reason="no response in time")
+        self._run_ended(self._run_seq, reason="no response in time", abandoned=True)
 
     def _substituted(self, now: float) -> bool:
         """Silence goes instead of the microphone: a sound of the app plays
@@ -1529,8 +1537,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
             self._mic_paused = True
             seq = self._run_seq
             self._set_watchdog(
-                self.FOLLOWUP_END_TIMEOUT_S,
-                lambda: self._run_ended(seq, reason="end of speech: no transcript"),
+                self._followup.stt_timeout_s,
+                lambda: self._run_ended(seq, reason="end of speech: no transcript",
+                                        abandoned=True),
             )
 
     @property
@@ -1547,8 +1556,27 @@ class VbanSatelliteHandler(AsyncEventHandler):
         _spawn(self._write_quietly(AudioStop().event()))
         seq = self._run_seq
         self._set_watchdog(
-            self.FOLLOWUP_END_TIMEOUT_S, lambda: self._run_ended(seq, reason="follow-up: no speech"),
+            self._followup.stt_timeout_s,
+            lambda: self._run_ended(seq, reason="follow-up: no speech", abandoned=True),
         )
+
+    async def _reset_connection(self, reason: str) -> None:
+        """The satellite gave up waiting for HA (e.g. a transcript taking
+        17 s): HA's run may still be going. A new run on this connection
+        would be emptied by its end (HA doesn't cancel a run when the
+        satellite asks for another one; the old run's end then makes HA drop
+        all the satellite's audio: deaf). Like toggling "Muet": the
+        connection is closed, HA cancels its run, reconnects (about 3 s
+        later) and starts afresh; a late transcript goes nowhere."""
+        _LOGGER.warning("Satellite reset after %s: reconnecting to Home Assistant", reason)
+        self._next_run_task = None  # (this very task: not cancelled)
+        self._cancel_followup_tasks()
+        self._stop_thinking()
+        if self._mic_mute is not None:
+            self._mic_mute.release(f"satellite reset after {reason}")
+        self._mic_silence_until = 0.0
+        await self._stop_streaming()
+        self.writer.close()
 
     async def _write_quietly(self, event: Event) -> None:
         try:
@@ -1600,7 +1628,9 @@ class VbanSatelliteHandler(AsyncEventHandler):
         return (self._expect_followup and self._followup.enabled
                 and self._followup_count < self.MAX_FOLLOWUPS)
 
-    def _run_ended(self, seq: int, delay: float = 0.0, reason: str = "run over") -> None:
+    def _run_ended(
+        self, seq: int, delay: float = 0.0, reason: str = "run over", abandoned: bool = False,
+    ) -> None:
         """The run seq is over (response played, error or timeout).
 
         Starts the next run: a follow-up if the response was a question,
@@ -1612,6 +1642,8 @@ class VbanSatelliteHandler(AsyncEventHandler):
         self._run_ended_seq = seq
         self._run_ended_at = time.monotonic()
         self._next_run_reason = reason
+        # The satellite gave up waiting for HA: HA's run may still go on
+        self._next_run_abandoned = abandoned
         self._cancel_watchdog()
         self._mic_paused = True
         if self._next_run_task and not self._next_run_task.done():
@@ -1622,6 +1654,10 @@ class VbanSatelliteHandler(AsyncEventHandler):
         try:
             await asyncio.sleep(delay)
             if not (self._server_ready and self._is_running) or self.writer.is_closing():
+                return
+
+            if self._next_run_abandoned:
+                await self._reset_connection(self._next_run_reason)
                 return
 
             if self._followup_active:
